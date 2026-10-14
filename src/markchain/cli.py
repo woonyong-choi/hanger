@@ -7,16 +7,20 @@ import json
 import logging
 import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError
 from pydantic import ValidationError
 
+from markchain.documents import Documents
 from markchain.errors import MarkchainError
+from markchain.model import ClaudeModel, Intent, Planner
 from markchain.requests import Proposal
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
+from markchain.service import Service
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
 
@@ -31,6 +35,7 @@ def main() -> int:
     parser.add_argument("--vault", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--search-url", default="http://127.0.0.1:19200")
+    parser.add_argument("--model", default="sonnet")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("key")
     submit = commands.add_parser("submit")
@@ -40,6 +45,10 @@ def main() -> int:
     commands.add_parser("sync")
     commands.add_parser("watch")
     commands.add_parser("audit")
+    commands.add_parser("serve")
+    automate = commands.add_parser("automate")
+    automate.add_argument("key")
+    automate.add_argument("intent", type=Path)
     search = commands.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
@@ -48,9 +57,15 @@ def main() -> int:
     arguments = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     try:
-        with Runtime(arguments.vault, arguments.state) as runtime:
-            result = _execute(runtime, arguments)
-        print(json.dumps(result, ensure_ascii=False))
+        with closing(
+            SearchIndex(arguments.search_url, str(arguments.vault.resolve()))
+        ) as index:
+            synchronizer = Synchronizer(Documents(arguments.vault), index)
+            planner = Planner(synchronizer, ClaudeModel(arguments.model))
+            with Runtime(arguments.vault, arguments.state, planner) as runtime:
+                result = _execute(runtime, arguments, synchronizer)
+        if arguments.command != "serve":
+            print(json.dumps(result, ensure_ascii=False))
     except ValidationError:
         logger.error("invalid proposal format")
         return 1
@@ -63,9 +78,11 @@ def main() -> int:
 # cost: time O(n), heap O(n), stack O(1), io O(f)
 # vars: n = request and result bytes, f = target count
 # basis: estimate
-def _execute(runtime: Runtime, arguments: argparse.Namespace) -> object:
+def _execute(
+    runtime: Runtime, arguments: argparse.Namespace, synchronizer: Synchronizer
+) -> object:
     if arguments.command in {"sync", "watch", "audit", "search"}:
-        return _search(runtime, arguments)
+        return _search(synchronizer, arguments)
     match arguments.command:
         case "key":
             return {"key": runtime.issue_key()}
@@ -74,6 +91,17 @@ def _execute(runtime: Runtime, arguments: argparse.Namespace) -> object:
             return {"status": runtime.submit(arguments.key, proposal)}
         case "run":
             return runtime.run_next()
+        case "automate":
+            intent = Intent.model_validate_json(arguments.intent.read_bytes())
+            return {"status": runtime.submit_intent(arguments.key, intent)}
+        case "serve":
+            service = Service(runtime, synchronizer)
+            service.start()
+            try:
+                service.mcp.run()
+            finally:
+                service.close()
+            return None
         case "status":
             return runtime.status(arguments.key)
         case "cancel":
@@ -86,27 +114,22 @@ def _execute(runtime: Runtime, arguments: argparse.Namespace) -> object:
 # vars: n = document bytes processed, b = result or batch bytes
 # vars: d = directory depth, f = files checked
 # basis: estimate
-def _search(runtime: Runtime, arguments: argparse.Namespace) -> object:
-    index = SearchIndex(arguments.search_url, str(runtime.documents.root))
-    synchronizer = Synchronizer(runtime.documents, index)
-    try:
-        match arguments.command:
-            case "sync":
-                return synchronizer.reconcile()
-            case "audit":
-                return synchronizer.audit()
-            case "search":
-                return synchronizer.search(arguments.query, arguments.limit)
-            case "watch":
-                stop = threading.Event()
-                try:
-                    VaultWatcher(synchronizer).run(stop)
-                except KeyboardInterrupt:
-                    stop.set()
-                return {"status": "stopped"}
-        raise AssertionError("search command must be supported")
-    finally:
-        index.close()
+def _search(synchronizer: Synchronizer, arguments: argparse.Namespace) -> object:
+    match arguments.command:
+        case "sync":
+            return synchronizer.reconcile()
+        case "audit":
+            return synchronizer.audit()
+        case "search":
+            return synchronizer.search(arguments.query, arguments.limit)
+        case "watch":
+            stop = threading.Event()
+            try:
+                VaultWatcher(synchronizer).run(stop)
+            except KeyboardInterrupt:
+                stop.set()
+            return {"status": "stopped"}
+    raise AssertionError("search command must be supported")
 
 
 if __name__ == "__main__":

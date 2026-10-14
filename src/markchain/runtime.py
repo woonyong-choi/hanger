@@ -2,6 +2,7 @@ from __future__ import annotations
 
 __all__ = ["Runtime"]
 
+import json
 import os
 import secrets
 import sqlite3
@@ -21,6 +22,7 @@ from persistqueue.serializers import json as json_serializer
 
 from markchain.documents import Documents
 from markchain.errors import ConflictError, MarkchainError, RequestError
+from markchain.model import Intent, Planner
 from markchain.requests import (
     Proposal,
     digest,
@@ -37,18 +39,29 @@ class _State(TypedDict):
     cursor: int
     status: str
     results: dict[str, str]
+    intent: dict[str, Any]
+    dependencies: dict[str, str]
+    revision: int
+    decision: dict[str, Any]
+    usage: dict[str, Any] | None
+    search: dict[str, Any]
+    error: str
+    applied: dict[str, str | None]
 
 
 class Runtime:
     # cost: time O(q), heap O(q), stack O(1), io O(q)
     # vars: q = retained queue payload bytes; library materializes queue rows on restart
     # basis: estimate
-    def __init__(self, vault: Path, state: Path) -> None:
+    def __init__(
+        self, vault: Path, state: Path, planner: Planner | None = None
+    ) -> None:
         self.documents = Documents(vault)
         self.state = state.resolve()
         self._resources = ExitStack()
         self._admission = threading.RLock()
-        self._consumer = threading.Lock()
+        self._consumer = threading.BoundedSemaphore(2)
+        self._planner = planner
         self._pending: dict[str, dict[str, Any]] = {}
         self._queue_ids: dict[str, int] = {}
         if self.state.is_relative_to(self.documents.root):
@@ -83,6 +96,45 @@ class Runtime:
     # basis: estimate
     def submit(self, key: str, proposal: Proposal) -> str:
         deadline = validate_key(key, self._secret)
+        self._validate_proposal(proposal)
+        return self._enqueue(
+            key,
+            {"proposal": proposal.model_dump(mode="json")},
+            proposal.fingerprint,
+            deadline,
+        )
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1)
+    # vars: n = intent bytes
+    # basis: estimate
+    def submit_intent(self, key: str, intent: Intent) -> str:
+        deadline = validate_key(key, self._secret)
+        if self._planner is None:
+            raise RequestError("model planner is not configured")
+        payload = intent.model_dump(mode="json")
+        fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
+        return self._enqueue(key, {"intent": payload}, fingerprint, deadline)
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1)
+    # vars: n = prior proposal and observed effects bytes
+    # basis: estimate
+    def reconsider(self, key: str, new_key: str) -> str:
+        deadline = validate_key(new_key, self._secret)
+        previous = self.status(key)
+        if previous.get("status") not in {"conflict", "failed"}:
+            raise RequestError("job must be conflicted or failed")
+        intent = Intent.model_validate(previous["intent"])
+        payload = {
+            "intent": intent.model_dump(mode="json"),
+            "prior": {
+                name: previous.get(name, {})
+                for name in ("proposal", "results", "applied")
+            },
+        }
+        fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
+        return self._enqueue(new_key, payload, fingerprint, deadline)
+
+    def _validate_proposal(self, proposal: Proposal) -> None:
         canonical_paths = set()
         for change in proposal.changes:
             self.documents.resolve(change.path)
@@ -90,16 +142,23 @@ class Runtime:
             if canonical in canonical_paths:
                 raise RequestError("duplicate portable document path")
             canonical_paths.add(canonical)
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1)
+    # vars: n = request bytes
+    # basis: estimate
+    def _enqueue(
+        self, key: str, payload: dict[str, Any], fingerprint: str, deadline: float
+    ) -> str:
         with self._admission:
             previous = self.status(key)
             if previous:
-                if previous["fingerprint"] != proposal.fingerprint:
+                if previous["fingerprint"] != fingerprint:
                     raise RequestError("request key reused with different content")
                 return "duplicate"
             request = {
                 "key": key,
-                "fingerprint": proposal.fingerprint,
-                "proposal": proposal.model_dump(mode="json"),
+                "fingerprint": fingerprint,
+                **payload,
                 "deadline": deadline,
                 "cancelled": False,
             }
@@ -200,8 +259,10 @@ class Runtime:
         self._resources.callback(connection.close)
         saver = SqliteSaver(connection)
         builder = StateGraph(_State)
+        builder.add_node("prepare", self._prepare)
         builder.add_node("apply", self._apply)
-        builder.add_edge(START, "apply")
+        builder.add_conditional_edges(START, _route)
+        builder.add_conditional_edges("prepare", _route)
         builder.add_conditional_edges("apply", _route)
         self._graph = builder.compile(checkpointer=saver)
         for row in self._queue.queue():
@@ -210,6 +271,59 @@ class Runtime:
             request = row["data"]
             self._pending[request["key"]] = request
             self._queue_ids[request["key"]] = row["id"]
+
+    # cost: time O(n+t), heap O(n), stack O(d), io O(f), tokens O(n)
+    # vars: n = context and model result bytes, t = model latency
+    # vars: d = directory depth, f = dependency files
+    # basis: estimate
+    def _prepare(self, state: _State) -> dict[str, Any]:
+        if self._planner is None:
+            raise RequestError("model planner is not configured")
+
+        def is_cancelled() -> bool:
+            return (
+                self._pending[state["key"]]["cancelled"]
+                or time.time() >= state["deadline"]
+            )
+
+        try:
+            planned = self._planner.prepare(
+                Intent.model_validate(state["intent"]),
+                is_cancelled,
+                {
+                    "proposal": state["proposal"],
+                    "observed": state["results"],
+                    "applied": state.get("applied", {}),
+                }
+                if state["proposal"]
+                else None,
+            )
+            if is_cancelled():
+                return {
+                    "status": "cancelled"
+                    if self._pending[state["key"]]["cancelled"]
+                    else "expired"
+                }
+            if planned["proposal"]:
+                self._validate_proposal(Proposal.model_validate(planned["proposal"]))
+            return {
+                **planned,
+                "cursor": 0,
+                "status": "running" if planned["proposal"] else "completed",
+            }
+        except ConflictError:
+            if self._pending[state["key"]]["cancelled"]:
+                return {"status": "cancelled"}
+            if time.time() >= state["deadline"]:
+                return {"status": "expired"}
+            return self._conflict(state)
+        except RequestError as error:
+            return {"status": "failed", "error": str(error)}
+
+    def _conflict(self, state: _State) -> dict[str, Any]:
+        if state["intent"].get("mode") == "bypass" and state["revision"] < 2:
+            return {"status": "planning", "revision": state["revision"] + 1}
+        return {"status": "conflict"}
 
     # cost: time O(n), heap O(n), stack O(1), io O(f)
     # vars: n = target and proposal bytes, f = target count
@@ -224,10 +338,21 @@ class Runtime:
                 return self._stopped(proposal, "expired")
             change = proposal.changes[state["cursor"]]
             try:
+                targets = {change.path for change in proposal.changes}
+                for path, expected in state.get("dependencies", {}).items():
+                    if path in targets:
+                        continue
+                    if self.documents.read_hash(path) != expected:
+                        raise ConflictError("supporting source changed")
                 self.documents.check_proposal(proposal, state["cursor"])
                 outcome = self.documents.apply(change)
             except ConflictError:
-                return self._stopped(proposal, "conflict")
+                stopped = self._stopped(proposal, "conflict")
+                return {
+                    **stopped,
+                    **self._conflict(state),
+                    "applied": {**state.get("applied", {}), **stopped["applied"]},
+                }
             except RequestError:
                 return self._stopped(proposal, "invalid_target")
             cursor = state["cursor"] + 1
@@ -236,6 +361,12 @@ class Runtime:
                 "cursor": cursor,
                 "results": {**state["results"], change.path: outcome},
                 "status": status,
+                "applied": {
+                    **state.get("applied", {}),
+                    change.path: None
+                    if change.after is None
+                    else digest(change.after.encode()),
+                },
             }
 
     # cost: time O(n), heap O(m+f), stack O(1), io O(f)
@@ -243,6 +374,7 @@ class Runtime:
     # basis: estimate
     def _stopped(self, proposal: Proposal, status: str) -> dict[str, Any]:
         results = {}
+        applied: dict[str, str | None] = {}
         for change in proposal.changes:
             try:
                 current = self.documents.read_hash(change.path)
@@ -252,12 +384,13 @@ class Runtime:
             expected = None if change.after is None else digest(change.after.encode())
             if current == expected:
                 outcome = "result_present"
+                applied[change.path] = expected
             elif current == change.before:
                 outcome = "source_present"
             else:
                 outcome = "externally_changed"
             results[change.path] = outcome
-        return {"status": status, "results": results}
+        return {"status": status, "results": results, "applied": applied}
 
 
 def _config(key: str) -> RunnableConfig:
@@ -265,16 +398,27 @@ def _config(key: str) -> RunnableConfig:
 
 
 def _initial(request: dict[str, Any]) -> _State:
+    prior = request.get("prior", {})
     return {
         "key": request["key"],
         "fingerprint": request["fingerprint"],
-        "proposal": request["proposal"],
+        "proposal": request.get("proposal", prior.get("proposal", {})),
         "deadline": request["deadline"],
         "cursor": 0,
-        "status": "running",
-        "results": {},
+        "status": "planning" if "intent" in request else "running",
+        "results": prior.get("results", {}),
+        "intent": request.get("intent", {}),
+        "dependencies": {},
+        "revision": 0,
+        "decision": {},
+        "usage": None,
+        "search": {},
+        "error": "",
+        "applied": prior.get("applied", {}),
     }
 
 
 def _route(state: _State) -> str:
+    if state["status"] == "planning":
+        return "prepare"
     return "apply" if state["status"] == "running" else END

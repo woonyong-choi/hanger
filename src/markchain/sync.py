@@ -151,6 +151,18 @@ class Synchronizer:
                 if _included(path) and not (Path(parent) / name).is_symlink():
                     yield path
 
+    # cost: time O(f), heap O(1), stack O(1), io O(f)
+    # vars: f = dependency files
+    # basis: estimate
+    def matches(self, signatures: dict[str, str]) -> bool:
+        for path, signature in signatures.items():
+            try:
+                if _signature(self.documents.resolve(path)) != signature:
+                    return False
+            except (OSError, RequestError):
+                return False
+        return True
+
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes, bounded by MAX_DOCUMENT_BYTES
     # basis: estimate
