@@ -9,7 +9,7 @@ from markchain.trace import Trace
 def main() -> None:
     root = Path(__file__).parent / ".runtime/trace-measurement"
     root.mkdir(parents=True, exist_ok=True)
-    results = {}
+    results: dict[str, object] = {}
     for enabled in (False, True):
         samples = []
         trace = Trace(root / "trace.jsonl" if enabled else None)
