@@ -6,13 +6,19 @@ import argparse
 import json
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 
+from elastic_transport import TransportError
+from elasticsearch import ApiError
 from pydantic import ValidationError
 
 from markchain.errors import MarkchainError
 from markchain.requests import Proposal
 from markchain.runtime import Runtime
+from markchain.search import SearchIndex
+from markchain.sync import Synchronizer
+from markchain.watcher import VaultWatcher
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +30,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(prog="markchain")
     parser.add_argument("--vault", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--search-url", default="http://127.0.0.1:19200")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("key")
     submit = commands.add_parser("submit")
     submit.add_argument("key")
     submit.add_argument("proposal", type=Path)
     commands.add_parser("run")
+    commands.add_parser("sync")
+    commands.add_parser("watch")
+    commands.add_parser("audit")
+    search = commands.add_parser("search")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=20)
     for name in ("status", "cancel"):
         commands.add_parser(name).add_argument("key")
     arguments = parser.parse_args()
@@ -41,7 +54,7 @@ def main() -> int:
     except ValidationError:
         logger.error("invalid proposal format")
         return 1
-    except (MarkchainError, OSError, sqlite3.Error) as error:
+    except (MarkchainError, OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
         return 1
     return 0
@@ -51,6 +64,8 @@ def main() -> int:
 # vars: n = request and result bytes, f = target count
 # basis: estimate
 def _execute(runtime: Runtime, arguments: argparse.Namespace) -> object:
+    if arguments.command in {"sync", "watch", "audit", "search"}:
+        return _search(runtime, arguments)
     match arguments.command:
         case "key":
             return {"key": runtime.issue_key()}
@@ -65,6 +80,33 @@ def _execute(runtime: Runtime, arguments: argparse.Namespace) -> object:
             return {"cancelled": runtime.cancel(arguments.key)}
         case _:
             raise AssertionError("parser must select a supported command")
+
+
+# cost: time O(n), heap O(b), stack O(d), io O(f)
+# vars: n = document bytes processed, b = result or batch bytes
+# vars: d = directory depth, f = files checked
+# basis: estimate
+def _search(runtime: Runtime, arguments: argparse.Namespace) -> object:
+    index = SearchIndex(arguments.search_url, str(runtime.documents.root))
+    synchronizer = Synchronizer(runtime.documents, index)
+    try:
+        match arguments.command:
+            case "sync":
+                return synchronizer.reconcile()
+            case "audit":
+                return synchronizer.audit()
+            case "search":
+                return synchronizer.search(arguments.query, arguments.limit)
+            case "watch":
+                stop = threading.Event()
+                try:
+                    VaultWatcher(synchronizer).run(stop)
+                except KeyboardInterrupt:
+                    stop.set()
+                return {"status": "stopped"}
+        raise AssertionError("search command must be supported")
+    finally:
+        index.close()
 
 
 if __name__ == "__main__":

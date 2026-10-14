@@ -8,11 +8,13 @@ version = "0.1.0.dev0"
 description = "Durable local Markdown document workflows"
 requires-python = ">=3.12"
 dependencies = [
+  "elasticsearch>=9.1,<10",
   "filelock>=3.20,<5",
   "langgraph>=1.2,<2",
   "langgraph-checkpoint-sqlite>=3.1,<4",
   "persist-queue==1.1.0",
   "pydantic>=2.12,<3",
+  "watchdog>=6,<8",
 ]
 
 [project.scripts]
