@@ -20,7 +20,12 @@ def test_trace_records_metrics_without_source_or_extra_calls(
     calls = 0
 
     def search(
-        sync: Synchronizer, query: str, limit: int = 20, *, fallback_offset: int = 0
+        sync: Synchronizer,
+        query: str,
+        limit: int = 20,
+        *,
+        fallback_offset: int = 0,
+        fallback_reason: str | None = None,
     ) -> dict[str, Any]:
         return {"documents": [], "coverage": "synthetic"}
 

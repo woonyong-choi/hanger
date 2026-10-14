@@ -24,6 +24,9 @@ class Intent(BaseModel):
     paths: tuple[str, ...] = Field(default=(), max_length=100)
     mode: Literal["normal", "bypass"] = "normal"
     allow_delete: bool = False
+    fallback_reason: (
+        Literal["insufficient_evidence", "user_reported_missing"] | None
+    ) = None
 
 
 class _Edit(BaseModel):
@@ -132,7 +135,9 @@ class Planner:
         previous: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self.trace.measure("search") as metrics:
-            search = self.synchronizer.search(intent.query)
+            search = self.synchronizer.search(
+                intent.query, fallback_reason=intent.fallback_reason
+            )
             if self.trace.enabled:
                 metrics["candidates"] = len(search["documents"])
                 metrics["source"] = str(search.get("source", "unknown"))

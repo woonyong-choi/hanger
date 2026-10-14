@@ -6,10 +6,10 @@ import os
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from itertools import batched
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError
@@ -31,27 +31,39 @@ class Synchronizer:
         self.read_bytes = 0
         self.diagnostics: deque[dict[str, str]] = deque(maxlen=100)
         self._writer = threading.RLock()
+        self._retry_paths: set[str] = set()
 
     # cost: time O(f+n), heap O(b), stack O(d), io O(f+n/b)
     # vars: f = file count, n = changed bytes, b = batch bytes, d = directory depth
     # basis: estimate
-    def reconcile(self) -> dict[str, Any]:
+    def reconcile(
+        self, is_cancelled: Callable[[], bool] = lambda: False
+    ) -> dict[str, Any]:
         with self._writer:
             self.index.ensure()
             self.diagnostics.clear()
             reads = self.read_count
-            checked = 0
-            for paths in batched(self.paths(), 256):
-                self.sync_paths(list(paths))
-                checked += len(paths)
-            for entry in self.index.entries():
-                path = entry["path"]
-                try:
-                    exists = self.documents.resolve(path).exists()
-                except RequestError:
-                    exists = False
-                if not _included(path) or not exists:
-                    self.index.write([{"path": path}])
+        checked = 0
+        for paths in batched(self.paths(), 256):
+            if is_cancelled():
+                raise InterruptedError("reconciliation interrupted")
+            self.sync_paths(list(paths))
+            checked += len(paths)
+        for entries in batched(self.index.entries(), 256):
+            if is_cancelled():
+                raise InterruptedError("reconciliation interrupted")
+            with self._writer:
+                removed = []
+                for entry in entries:
+                    path = entry["path"]
+                    try:
+                        exists = self.documents.resolve(path).is_file()
+                    except RequestError:
+                        exists = False
+                    if not _included(path) or not exists:
+                        removed.append({"path": path})
+                self.index.write(removed)
+        with self._writer:
             self.index.refresh()
             return {
                 "checked": checked,
@@ -67,6 +79,12 @@ class Synchronizer:
             selected = [p for p in paths if _included(p)]
             previous = self.index.metadata(selected)
             self.index.write(self._updates(selected, previous, force=force))
+
+    def drain_retries(self) -> list[str]:
+        with self._writer:
+            paths = list(self._retry_paths)
+            self._retry_paths.clear()
+            return paths
 
     # cost: time O(n), heap O(m), stack O(1), io O(k)
     # vars: n = audited bytes, m = largest file bytes, k = audit count
@@ -95,7 +113,13 @@ class Synchronizer:
     # vars: f = files read, d = directory depth
     # basis: estimate
     def search(
-        self, query: str, limit: int = 20, *, fallback_offset: int = 0
+        self,
+        query: str,
+        limit: int = 20,
+        *,
+        fallback_offset: int = 0,
+        fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
+        | None = None,
     ) -> dict[str, Any]:
         if not query.strip() or not 1 <= limit <= 100 or fallback_offset < 0:
             raise RequestError("query and a limit between 1 and 100 are required")
@@ -108,14 +132,19 @@ class Synchronizer:
                     self.sync_paths(stale, force=True)
                     self.index.refresh()
                     results, stale = self._read_hits(self.index.find(query, limit))
-                if results and not stale and fallback_offset == 0:
+                if (
+                    results
+                    and not stale
+                    and fallback_offset == 0
+                    and fallback_reason is None
+                ):
                     return {
                         "source": "elasticsearch",
                         "documents": results,
                         "candidate_limit": limit,
                         "coverage": "ranked_candidates",
                     }
-                reason = "stale_results" if stale else "no_hits"
+                reason = fallback_reason or ("stale_results" if stale else "no_hits")
             except (TransportError, ApiError):
                 reason = "search_unavailable"
             fallback = self._local_search(query, limit, fallback_offset)
@@ -205,6 +234,7 @@ class Synchronizer:
         self, paths: list[str], previous: dict[str, dict[str, Any]], *, force: bool
     ) -> Iterator[dict[str, Any]]:
         for path in paths:
+            self._retry_paths.discard(path)
             try:
                 target = self.documents.resolve(path)
             except RequestError:
@@ -222,6 +252,8 @@ class Synchronizer:
                 yield {"path": path}
             except (ConflictError, OSError) as error:
                 self.diagnostics.append({"path": path, "retry": str(error)})
+                if len(self._retry_paths) < 4096:
+                    self._retry_paths.add(path)
 
     # cost: time O(n), heap O(n), stack O(1), io O(k)
     # vars: n = result content bytes, k = result count
