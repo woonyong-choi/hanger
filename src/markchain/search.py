@@ -12,7 +12,7 @@ from markchain.requests import digest
 
 class SearchIndex:
     def __init__(self, url: str, vault_identity: str) -> None:
-        self.name = "markchain-" + digest(vault_identity.encode())[:24]
+        self.name = "markchain-" + digest(vault_identity.encode())[:24] + "-v1"
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
 
     def close(self) -> None:
@@ -33,7 +33,11 @@ class SearchIndex:
                         "document": {
                             "type": "custom",
                             "tokenizer": "nori_tokenizer",
-                            "filter": ["lowercase", "nori_readingform"],
+                            "filter": [
+                                "nori_part_of_speech",
+                                "lowercase",
+                                "nori_readingform",
+                            ],
                         }
                     }
                 },

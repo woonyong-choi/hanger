@@ -1,6 +1,8 @@
 import os
+import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -69,6 +71,19 @@ def test_search_stale_hit_repairs_before_return(sync: Synchronizer) -> None:
     assert result["documents"][0]["content"] == "# 결제\n최신 조건"
 
 
+# #3: Korean grammatical particles must not turn unrelated notes into candidates.
+@pytest.mark.parametrize("query", ["멱등성이", "멱등셩"])
+def test_search_korean_particle_and_typo_excludes_unrelated(
+    sync: Synchronizer, query: str
+) -> None:
+    (sync.documents.root / "payment.md").write_text(
+        "# 결제\n멱등성 키로 중복을 막는다."
+    )
+    (sync.documents.root / "garden.md").write_text("# 정원\n여행 사진을 정리한 자료다.")
+    sync.reconcile()
+    assert [hit["path"] for hit in sync.index.find(query, 20)] == ["payment.md"]
+
+
 # #3: missing indexed results allow a reasoned local fallback and index repair.
 def test_search_unindexed_file_uses_and_records_fallback(sync: Synchronizer) -> None:
     target = sync.documents.root / "a.md"
@@ -78,6 +93,79 @@ def test_search_unindexed_file_uses_and_records_fallback(sync: Synchronizer) -> 
     assert result["reason"] == "no_hits"
     assert result["documents"][0]["path"] == "a.md"
     assert sync.search("결제")["source"] == "elasticsearch"
+
+
+# #3: indexed hits do not prevent a reasoned search for missing evidence.
+def test_search_missing_evidence_starts_at_first_file(sync: Synchronizer) -> None:
+    (sync.documents.root / "z.md").write_text("# 결제\n기존 문서")
+    sync.reconcile()
+    (sync.documents.root / "a.md").write_text("# 결제\n누락된 근거")
+    result = sync.search("결제", fallback_reason="insufficient_evidence")
+    assert result["reason"] == "insufficient_evidence"
+    assert {doc["path"] for doc in result["documents"]} == {"a.md", "z.md"}
+    assert sync.index.metadata(["a.md"])
+
+
+# #3: a directory replacing a document must not retain its search entry.
+def test_reconcile_file_replaced_by_directory_removes_entry(sync: Synchronizer) -> None:
+    path = sync.documents.root / "a.md"
+    path.write_text("# 결제")
+    sync.reconcile()
+    path.unlink()
+    path.mkdir()
+    sync.reconcile()
+    assert not list(sync.index.entries())
+
+
+# #3: search can finish while reconciliation waits between filesystem batches.
+def test_reconcile_allows_search_between_batches(
+    sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = sync.documents.root / "a.md"
+    path.write_text("# 결제")
+    sync.reconcile()
+    reached, release = threading.Event(), threading.Event()
+
+    def paths() -> Iterator[str]:
+        yield from ["a.md"] * 256
+        reached.set()
+        assert release.wait(10)
+
+    monkeypatch.setattr(sync, "paths", paths)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        scan = pool.submit(sync.reconcile)
+        try:
+            assert reached.wait(10)
+            result = pool.submit(sync.search, "결제").result(timeout=5)
+            assert result["documents"][0]["path"] == "a.md"
+        finally:
+            release.set()
+        scan.result(timeout=10)
+
+
+# #3: a transient read failure is retried without another filesystem event.
+def test_watch_retries_unreadable_new_file(
+    sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (sync.documents.root / "a.md").write_text("# 결제")
+    read = sync.read
+    attempts = 0
+
+    def transient_read(path: str) -> dict[str, str]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise PermissionError("file temporarily unavailable")
+        return read(path)
+
+    monkeypatch.setattr(sync, "read", transient_read)
+    monkeypatch.setattr("markchain.watcher.time.monotonic", lambda: 0)
+    watcher = VaultWatcher(sync)
+    watcher.flush()
+    assert not sync.index.metadata(["a.md"])
+    monkeypatch.setattr("markchain.watcher.time.monotonic", lambda: 11)
+    watcher.flush()
+    assert sync.index.metadata(["a.md"])
 
 
 # #3: out-of-order signals reread current files instead of indexing old payloads.

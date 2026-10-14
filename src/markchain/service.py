@@ -78,10 +78,20 @@ class Service:
     # vars: n = searched bytes, k = result bytes, d = directory depth, f = files read
     # basis: estimate
     def search_documents(
-        self, query: str, limit: int = 20, fallback_offset: int = 0
+        self,
+        query: str,
+        limit: int = 20,
+        fallback_offset: int = 0,
+        fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
+        | None = None,
     ) -> dict[str, Any]:
         """Search Elasticsearch first and return verified local source text."""
-        return self.synchronizer.search(query, limit, fallback_offset=fallback_offset)
+        return self.synchronizer.search(
+            query,
+            limit,
+            fallback_offset=fallback_offset,
+            fallback_reason=fallback_reason,
+        )
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes

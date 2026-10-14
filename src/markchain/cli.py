@@ -55,6 +55,10 @@ def main() -> int:
     search = commands.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--fallback-offset", type=int, default=0)
+    search.add_argument(
+        "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
+    )
     for name in ("status", "cancel"):
         commands.add_parser(name).add_argument("key")
     arguments = parser.parse_args()
@@ -133,7 +137,12 @@ def _search(synchronizer: Synchronizer, arguments: argparse.Namespace) -> object
         case "audit":
             return synchronizer.audit()
         case "search":
-            return synchronizer.search(arguments.query, arguments.limit)
+            return synchronizer.search(
+                arguments.query,
+                arguments.limit,
+                fallback_offset=arguments.fallback_offset,
+                fallback_reason=arguments.fallback_reason,
+            )
         case "watch":
             stop = threading.Event()
             try:

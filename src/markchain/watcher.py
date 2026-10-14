@@ -5,6 +5,8 @@ __all__ = ["VaultWatcher"]
 import logging
 import threading
 import time
+from collections.abc import Callable
+from itertools import batched
 from pathlib import Path
 
 from elastic_transport import TransportError
@@ -25,6 +27,7 @@ class VaultWatcher(FileSystemEventHandler):
         self._lock = threading.Lock()
         self._paths: set[str] = set()
         self._rescan = True
+        self._retry_at = 0.0
 
     def start(self) -> None:
         self._observer.schedule(
@@ -55,15 +58,21 @@ class VaultWatcher(FileSystemEventHandler):
     # cost: time O(n), heap O(b), stack O(d), io O(f)
     # vars: n = changed bytes, b = batch bytes, d = directory depth, f = file count
     # basis: estimate
-    def flush(self) -> None:
+    def flush(self, is_cancelled: Callable[[], bool] = lambda: False) -> None:
         with self._lock:
             paths, rescan = self._paths, self._rescan
             self._paths, self._rescan = set(), False
+        if time.monotonic() >= self._retry_at:
+            paths.update(self.synchronizer.drain_retries())
+            self._retry_at = time.monotonic() + 10
         try:
             if rescan:
-                self.synchronizer.reconcile()
+                self.synchronizer.reconcile(is_cancelled)
             elif paths:
-                self.synchronizer.sync_paths(list(paths))
+                for batch in batched(paths, 256):
+                    if is_cancelled():
+                        raise InterruptedError("event synchronization interrupted")
+                    self.synchronizer.sync_paths(list(batch))
                 self.synchronizer.index.refresh()
         except (OSError, MarkchainError, TransportError, ApiError):
             with self._lock:
@@ -84,7 +93,7 @@ class VaultWatcher(FileSystemEventHandler):
                         with self._lock:
                             self._rescan = True
                         next_scan = time.monotonic() + 3600
-                    self.flush()
+                    self.flush(stop.is_set)
                     if time.monotonic() >= next_audit:
                         self.synchronizer.audit()
                         next_audit = time.monotonic() + 60
