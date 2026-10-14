@@ -22,6 +22,7 @@ from markchain.runtime import Runtime
 from markchain.search import SearchIndex
 from markchain.service import Service
 from markchain.sync import Synchronizer
+from markchain.trace import Trace
 from markchain.watcher import VaultWatcher
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ def main() -> int:
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--search-url", default="http://127.0.0.1:19200")
     parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--trace", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("key")
     submit = commands.add_parser("submit")
@@ -63,7 +65,14 @@ def main() -> int:
         ) as index:
             synchronizer = Synchronizer(Documents(arguments.vault), index)
             planner = Planner(synchronizer, ClaudeModel(arguments.model))
-            with Runtime(arguments.vault, arguments.state, planner) as runtime:
+            with (
+                closing(
+                    Trace(arguments.state / "trace.jsonl" if arguments.trace else None)
+                ) as trace,
+                Runtime(
+                    arguments.vault, arguments.state, planner, trace=trace
+                ) as runtime,
+            ):
                 result = _execute(runtime, arguments, synchronizer)
         if arguments.command != "serve":
             print(json.dumps(result, ensure_ascii=False))

@@ -33,6 +33,7 @@ from markchain.requests import (
     issue_key,
     validate_key,
 )
+from markchain.trace import Trace
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class Runtime:
         planner: Planner | None = None,
         *,
         limits: Limits | None = None,
+        trace: Trace | None = None,
     ) -> None:
         self.documents = Documents(vault, writer_id=str(state.resolve()))
         self.state = state.resolve()
@@ -81,6 +83,9 @@ class Runtime:
         self._consumer = threading.BoundedSemaphore(2)
         self._interrupted = threading.Event()
         self._planner = planner
+        self._trace = trace or Trace()
+        if planner is not None:
+            planner.trace = self._trace
         self._limits = limits or Limits()
         self._pending: dict[str, dict[str, Any]] = {}
         self._queue_ids: dict[str, int] = {}
@@ -324,6 +329,7 @@ class Runtime:
             request = item["data"]
             key = request["key"]
             config = _config(key)
+            trace_token = self._trace.begin(key)
             try:
                 if self._interrupted.is_set():
                     raise InterruptedError("runtime is stopping; work remains queued")
@@ -342,6 +348,7 @@ class Runtime:
             except (OSError, sqlite3.Error) as error:
                 return self._retry(item, error)
             finally:
+                self._trace.end(trace_token)
                 with self._admission:
                     self._active.discard(key)
 
@@ -369,6 +376,7 @@ class Runtime:
         with self._admission:
             request = dict(self._pending[key])
             attempts = request.get("attempts", 0) + 1
+            self._trace.record("retry", {"attempt": attempts})
             if attempts > 3:
                 self._graph.update_state(
                     _config(key),
@@ -535,7 +543,8 @@ class Runtime:
                     if self.documents.read_hash(path) != expected:
                         raise ConflictError("supporting source changed")
                 self.documents.check_proposal(proposal, state["cursor"])
-                outcome = self.documents.apply(change)
+                with self._trace.measure("apply"):
+                    outcome = self.documents.apply(change)
             except ConflictError:
                 stopped = self._stopped(proposal, "conflict")
                 return {
