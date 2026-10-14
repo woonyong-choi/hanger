@@ -2,17 +2,21 @@ from __future__ import annotations
 
 __all__ = ["Documents"]
 
+import hashlib
+import logging
 import os
 from pathlib import Path
-from uuid import uuid4
 
 from markchain.errors import ConflictError, RequestError
 from markchain.requests import Change, Proposal, digest
 
+logger = logging.getLogger(__name__)
+
 
 class Documents:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, writer_id: str = "direct") -> None:
         self.root = root.resolve(strict=True)
+        self._writer_id = writer_id
 
     def resolve(self, relative: str) -> Path:
         path = Path(relative)
@@ -31,13 +35,18 @@ class Documents:
             raise RequestError("symlink document paths are not writable")
         return target
 
-    # cost: time O(n), heap O(n), stack O(1), io 1
+    # cost: time O(n), heap O(1), stack O(1), io O(n/b)
     # vars: n = document bytes
+    # vars: b = 64 KiB read block
     # basis: estimate
     def read_hash(self, relative: str) -> str | None:
         target = self.resolve(relative)
         try:
-            return digest(target.read_bytes())
+            hashed = hashlib.sha256()
+            with target.open("rb") as source:
+                while chunk := source.read(65536):
+                    hashed.update(chunk)
+            return hashed.hexdigest()
         except FileNotFoundError:
             return None
 
@@ -67,7 +76,8 @@ class Documents:
             _sync_directory(target.parent)
             return "applied"
         target.parent.mkdir(parents=True, exist_ok=True)
-        pending = target.with_name(f".{target.name}.{uuid4().hex}.pending")
+        pending = self._pending_path(change.path)
+        pending.unlink(missing_ok=True)
         try:
             with pending.open("xb") as output:
                 output.write(change.after.encode())
@@ -83,6 +93,24 @@ class Documents:
         finally:
             pending.unlink(missing_ok=True)
         return "applied"
+
+    # cost: time O(f), heap O(1), stack O(1), io O(f)
+    # vars: f = proposal targets
+    # basis: estimate
+    def discard_pending(self, proposal: Proposal) -> None:
+        for change in proposal.changes:
+            try:
+                self._pending_path(change.path).unlink(missing_ok=True)
+            except RequestError:
+                logger.warning("candidate parent moved outside its owned location")
+
+    def _pending_path(self, relative: str) -> Path:
+        target = self.root / relative
+        parent = target.parent.resolve()
+        if parent != target.parent or not parent.is_relative_to(self.root):
+            raise RequestError("candidate parent is no longer an owned directory")
+        identity = digest((self._writer_id + ":" + relative).encode())[:32]
+        return target.with_name(f".markchain-{identity}.pending")
 
 
 # cost: time O(1), heap O(1), stack O(1), io O(1)
