@@ -38,6 +38,7 @@ class Service:
         self.mcp.add_tool(self.resolve_conflict)
 
     def start(self) -> None:
+        self.runtime.cleanup()
         watcher = VaultWatcher(self.synchronizer)
         self._threads = [
             threading.Thread(
@@ -45,12 +46,14 @@ class Service:
             ),
             threading.Thread(target=self._work, name="markchain-worker-1"),
             threading.Thread(target=self._work, name="markchain-worker-2"),
+            threading.Thread(target=self._maintain, name="markchain-cleanup"),
         ]
         for thread in self._threads:
             thread.start()
 
     def close(self) -> None:
         self._stop.set()
+        self.runtime.interrupt()
         for thread in self._threads:
             thread.join()
 
@@ -144,3 +147,13 @@ class Service:
             except (OSError, sqlite3.Error, MarkchainError) as error:
                 logger.error("work attempt failed: %s", error)
                 self._stop.wait(2)
+
+    # cost: time O(c), heap O(b), stack O(1), io O(c)
+    # vars: c = expired checkpoint bytes, b = checkpoint page bytes
+    # basis: estimate
+    def _maintain(self) -> None:
+        while not self._stop.wait(30):
+            try:
+                self.runtime.cleanup()
+            except (OSError, sqlite3.Error, MarkchainError) as error:
+                logger.error("cleanup failed: %s", error)

@@ -349,7 +349,10 @@ def test_run_transient_write_failure_retries(
         monkeypatch.setattr(Documents, "apply", fail_write)
         with pytest.raises(OSError, match="synthetic"):
             runtime.run_next()
+        assert runtime.run_next() is None
         monkeypatch.setattr(Documents, "apply", original)
+        future = time.time() + 3
+        monkeypatch.setattr(time, "time", lambda: future)
         result = runtime.run_next()
         assert result is not None and result["status"] == "completed"
         assert (paths[0] / "a.md").read_text() == "a"

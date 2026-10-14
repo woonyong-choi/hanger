@@ -16,8 +16,9 @@ from markchain.sync import Synchronizer
 
 
 # #4: cancellation invalidates an in-flight result, even if the model returns late.
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
 def test_cancel_running_model_never_applies_late_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
     root = tmp_path / "vault"
     root.mkdir()
@@ -45,13 +46,27 @@ def test_cancel_running_model_never_applies_late_result(
                 future = workers.submit(runtime.run_next)
                 try:
                     assert started.wait(5)
-                    assert runtime.cancel(key)
+                    if stop == "shutdown":
+                        runtime.interrupt()
+                    else:
+                        assert runtime.cancel(key)
                 finally:
                     released.set()
-                result = future.result(timeout=5)
-            assert result is not None and result["status"] == "cancelled"
+                if stop == "shutdown":
+                    with pytest.raises(InterruptedError):
+                        future.result(timeout=5)
+                    result = None
+                else:
+                    result = future.result(timeout=5)
+                    assert result is not None and result["status"] == "cancelled"
             assert not (root / "docs/a.md").exists()
-            assert runtime.run_next() is None
+            if stop == "cancel":
+                assert runtime.run_next() is None
+        if stop == "shutdown":
+            with Runtime(root, tmp_path / "state", planner) as resumed:
+                result = resumed.run_next()
+                assert result is not None and result["status"] == "completed"
+                assert (root / "docs/a.md").read_text() == "late"
     finally:
         index.close()
 

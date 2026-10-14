@@ -46,6 +46,7 @@ def main() -> int:
     commands.add_parser("watch")
     commands.add_parser("audit")
     commands.add_parser("serve")
+    commands.add_parser("cleanup")
     automate = commands.add_parser("automate")
     automate.add_argument("key")
     automate.add_argument("intent", type=Path)
@@ -91,6 +92,8 @@ def _execute(
             return {"status": runtime.submit(arguments.key, proposal)}
         case "run":
             return runtime.run_next()
+        case "cleanup":
+            return runtime.cleanup()
         case "automate":
             intent = Intent.model_validate_json(arguments.intent.read_bytes())
             return {"status": runtime.submit_intent(arguments.key, intent)}

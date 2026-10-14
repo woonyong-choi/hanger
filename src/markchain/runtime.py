@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-__all__ = ["Runtime"]
+__all__ = ["Limits", "Runtime"]
 
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import threading
 import time
 import unicodedata
 from contextlib import ExitStack
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -17,18 +20,28 @@ from filelock import FileLock, Timeout
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
-from persistqueue import Empty, SQLiteAckQueue
+from persistqueue import SQLiteAckQueue
 from persistqueue.serializers import json as json_serializer
 
 from markchain.documents import Documents
 from markchain.errors import ConflictError, MarkchainError, RequestError
 from markchain.model import Intent, Planner
 from markchain.requests import (
+    KEY_LIFETIME_SECONDS,
     Proposal,
     digest,
     issue_key,
     validate_key,
 )
+
+
+@dataclass(frozen=True)
+class Limits:
+    pending_jobs: int = 256
+    request_bytes: int = 2 * 1024 * 1024
+    pending_bytes: int = 64 * 1024 * 1024
+    state_bytes: int = 2 * 1024 * 1024 * 1024
+    free_bytes: int = 5 * 1024 * 1024 * 1024
 
 
 class _State(TypedDict):
@@ -54,16 +67,24 @@ class Runtime:
     # vars: q = retained queue payload bytes; library materializes queue rows on restart
     # basis: estimate
     def __init__(
-        self, vault: Path, state: Path, planner: Planner | None = None
+        self,
+        vault: Path,
+        state: Path,
+        planner: Planner | None = None,
+        *,
+        limits: Limits | None = None,
     ) -> None:
-        self.documents = Documents(vault)
+        self.documents = Documents(vault, writer_id=str(state.resolve()))
         self.state = state.resolve()
         self._resources = ExitStack()
         self._admission = threading.RLock()
         self._consumer = threading.BoundedSemaphore(2)
+        self._interrupted = threading.Event()
         self._planner = planner
+        self._limits = limits or Limits()
         self._pending: dict[str, dict[str, Any]] = {}
         self._queue_ids: dict[str, int] = {}
+        self._active: set[str] = set()
         if self.state.is_relative_to(self.documents.root):
             raise RequestError("runtime state must be outside vault")
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -87,6 +108,72 @@ class Runtime:
 
     def close(self) -> None:
         self._resources.close()
+
+    def interrupt(self) -> None:
+        self._interrupted.set()
+
+    # cost: time O(c+q), heap O(b+q), stack O(1), io O(c+q)
+    # vars: c = checkpoint bytes, q = retained queue bytes, b = checkpoint page bytes
+    # basis: estimate
+    def cleanup(self) -> dict[str, Any]:
+        today = datetime.fromtimestamp(time.time()).date().isoformat()
+        marker = self.state / "cleaned.date"
+        if marker.exists() and marker.read_text() == today:
+            return {"status": "already_cleaned"}
+        acquired = 0
+        try:
+            for _ in range(2):
+                if not self._consumer.acquire(blocking=False):
+                    return {"status": "busy"}
+                acquired += 1
+            with self._admission:
+                removed = self._clean_expired()
+                marker.write_text(today)
+                return {"status": "cleaned", "removed": removed}
+        finally:
+            for _ in range(acquired):
+                self._consumer.release()
+
+    # cost: time O(c+q), heap O(b+q), stack O(1), io O(c+q)
+    # vars: c = checkpoint bytes, q = queued bytes, b = one checkpoint bytes
+    # basis: estimate
+    def _clean_expired(self) -> int:
+        now = time.time()
+        for key, request in list(self._pending.items()):
+            if request["deadline"] > now:
+                continue
+            proposal = request.get("proposal", request.get("prior", {}).get("proposal"))
+            if proposal:
+                self.documents.discard_pending(Proposal.model_validate(proposal))
+            queue_id = self._queue_ids[key]
+            self._queue.get(id=queue_id, block=False)
+            self._queue.ack(id=queue_id)
+            self._pending.pop(key)
+            self._queue_ids.pop(key)
+        removed = 0
+        before = None
+        while True:
+            page = list(self._saver.list(None, before=before, limit=1))
+            if not page:
+                break
+            checkpoint = page[0]
+            before = checkpoint.config
+            key = str(checkpoint.config["configurable"]["thread_id"])
+            if int(key.split(".")[0]) + KEY_LIFETIME_SECONDS <= now:
+                for saved in self._saver.list(_config(key)):
+                    proposal = saved.checkpoint["channel_values"].get("proposal")
+                    if proposal:
+                        self.documents.discard_pending(
+                            Proposal.model_validate(proposal)
+                        )
+                self._saver.delete_thread(key)
+                removed += 1
+        self._queue.clear_acked_data(keep_latest=0)
+        self._queue.shrink_disk_usage()
+        with self._saver.lock:
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._connection.execute("VACUUM")
+        return removed
 
     def issue_key(self) -> str:
         return issue_key(self._secret)
@@ -161,13 +248,45 @@ class Runtime:
                 **payload,
                 "deadline": deadline,
                 "cancelled": False,
+                "size_bytes": len(json.dumps(payload).encode()),
             }
+            self._check_capacity(request["size_bytes"])
             queue_id = self._queue.put(request)
             if queue_id is None:
                 raise RequestError("queue did not confirm persisted request")
             self._pending[key] = request
             self._queue_ids[key] = int(queue_id)
         return "accepted"
+
+    # cost: time O(q+f), heap O(f), stack O(d), io O(f)
+    # vars: q = pending jobs, f = state files, d = state directory depth
+    # basis: estimate
+    def _check_capacity(self, incoming_bytes: int) -> None:
+        limits = self._limits
+        if len(self._pending) >= limits.pending_jobs:
+            raise RequestError("pending job limit reached; retry after completion")
+        if incoming_bytes > limits.request_bytes:
+            raise RequestError("request byte limit exceeded")
+        pending_bytes = sum(
+            item.get("size_bytes", limits.request_bytes)
+            for item in self._pending.values()
+        )
+        if pending_bytes + incoming_bytes > limits.pending_bytes:
+            raise RequestError("pending byte limit reached")
+        self._check_storage()
+
+    # cost: time O(f), heap O(f), stack O(d), io O(f)
+    # vars: f = state files, d = state directory depth
+    # basis: estimate
+    def _check_storage(self) -> None:
+        limits = self._limits
+        state_bytes = sum(
+            path.stat().st_size for path in self.state.rglob("*") if path.is_file()
+        )
+        if state_bytes + 8 * limits.request_bytes >= limits.state_bytes:
+            raise RequestError("state byte limit reached; cleanup is required")
+        if shutil.disk_usage(self.state).free < limits.free_bytes:
+            raise RequestError("insufficient free disk space")
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = saved graph state bytes
@@ -199,14 +318,15 @@ class Runtime:
     # basis: estimate
     def run_next(self) -> dict[str, Any] | None:
         with self._consumer:
-            try:
-                item = self._queue.get(block=False, raw=True)
-            except Empty:
+            item = self._take_ready()
+            if item is None:
                 return None
             request = item["data"]
             key = request["key"]
             config = _config(key)
             try:
+                if self._interrupted.is_set():
+                    raise InterruptedError("runtime is stopping; work remains queued")
                 snapshot = self._graph.get_state(config)
                 if snapshot.values:
                     if snapshot.next:
@@ -214,14 +334,65 @@ class Runtime:
                 else:
                     self._graph.invoke(_initial(request), config, durability="sync")
                 result = self.status(key)
-                with self._admission:
-                    self._queue.ack(id=item["pqid"])
-                    self._pending.pop(key, None)
-                    self._queue_ids.pop(key, None)
+                self._finish(key, item["pqid"])
                 return result
-            except (OSError, sqlite3.Error):
+            except InterruptedError:
                 self._queue.nack(id=item["pqid"])
                 raise
+            except (OSError, sqlite3.Error) as error:
+                return self._retry(item, error)
+            finally:
+                with self._admission:
+                    self._active.discard(key)
+
+    # cost: time O(q+n), heap O(n), stack O(1), io O(1)
+    # vars: q = bounded pending jobs, n = selected job bytes
+    # basis: estimate
+    def _take_ready(self) -> dict[str, Any] | None:
+        with self._admission:
+            for key, request in self._pending.items():
+                if key in self._active:
+                    continue
+                stopped = request["cancelled"] or request["deadline"] <= time.time()
+                if not stopped and request.get("retry_at", 0) > time.time():
+                    continue
+                item = self._queue.get(id=self._queue_ids[key], block=False, raw=True)
+                self._active.add(key)
+                return dict(item)
+        return None
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1)
+    # vars: n = persisted request and checkpoint bytes
+    # basis: estimate
+    def _retry(self, item: dict[str, Any], error: Exception) -> dict[str, Any]:
+        key = item["data"]["key"]
+        with self._admission:
+            request = dict(self._pending[key])
+            attempts = request.get("attempts", 0) + 1
+            if attempts > 3:
+                self._graph.update_state(
+                    _config(key),
+                    {"status": "failed", "error": "I/O retry limit exhausted"},
+                    as_node="apply",
+                )
+                result = self.status(key)
+                self._finish(key, item["pqid"])
+                return result
+            request.update(
+                attempts=attempts, retry_at=time.time() + (2, 10, 30)[attempts - 1]
+            )
+            self._queue.update(request, id=item["pqid"])
+            self._pending[key] = request
+            self._queue.nack(id=item["pqid"])
+        raise error
+
+    # cost: time O(1), heap O(1), stack O(1), io O(1)
+    # basis: estimate
+    def _finish(self, key: str, queue_id: int) -> None:
+        with self._admission:
+            self._queue.ack(id=queue_id)
+            self._pending.pop(key, None)
+            self._queue_ids.pop(key, None)
 
     # cost: time O(q), heap O(q), stack O(1), io O(q)
     # vars: q = retained queue bytes
@@ -253,24 +424,26 @@ class Runtime:
             serializer=json_serializer,
         )
         self._resources.callback(self._queue.close)
-        connection = sqlite3.connect(
+        self._queue.clear_acked_data(keep_latest=0)
+        self._connection = sqlite3.connect(
             self.state / "graph.sqlite", check_same_thread=False
         )
-        self._resources.callback(connection.close)
-        saver = SqliteSaver(connection)
+        self._resources.callback(self._connection.close)
+        self._saver = SqliteSaver(self._connection)
         builder = StateGraph(_State)
         builder.add_node("prepare", self._prepare)
         builder.add_node("apply", self._apply)
         builder.add_conditional_edges(START, _route)
         builder.add_conditional_edges("prepare", _route)
         builder.add_conditional_edges("apply", _route)
-        self._graph = builder.compile(checkpointer=saver)
+        self._graph = builder.compile(checkpointer=self._saver)
         for row in self._queue.queue():
             if str(row["status"]) == "5":
                 continue
             request = row["data"]
             self._pending[request["key"]] = request
             self._queue_ids[request["key"]] = row["id"]
+        self.cleanup()
 
     # cost: time O(n+t), heap O(n), stack O(d), io O(f), tokens O(n)
     # vars: n = context and model result bytes, t = model latency
@@ -282,11 +455,13 @@ class Runtime:
 
         def is_cancelled() -> bool:
             return (
-                self._pending[state["key"]]["cancelled"]
+                self._interrupted.is_set()
+                or self._pending[state["key"]]["cancelled"]
                 or time.time() >= state["deadline"]
             )
 
         try:
+            self._check_storage()
             planned = self._planner.prepare(
                 Intent.model_validate(state["intent"]),
                 is_cancelled,
@@ -298,6 +473,8 @@ class Runtime:
                 if state["proposal"]
                 else None,
             )
+            if self._interrupted.is_set():
+                raise InterruptedError("runtime stopped while planning")
             if is_cancelled():
                 return {
                     "status": "cancelled"
@@ -305,6 +482,11 @@ class Runtime:
                     else "expired"
                 }
             if planned["proposal"]:
+                if (
+                    len(json.dumps(planned["proposal"]).encode())
+                    > self._limits.request_bytes
+                ):
+                    raise RequestError("model proposal byte limit exceeded")
                 self._validate_proposal(Proposal.model_validate(planned["proposal"]))
             return {
                 **planned,
@@ -312,6 +494,8 @@ class Runtime:
                 "status": "running" if planned["proposal"] else "completed",
             }
         except ConflictError:
+            if self._interrupted.is_set():
+                raise InterruptedError("runtime stopped while planning") from None
             if self._pending[state["key"]]["cancelled"]:
                 return {"status": "cancelled"}
             if time.time() >= state["deadline"]:
@@ -330,12 +514,18 @@ class Runtime:
     # basis: estimate
     def _apply(self, state: _State) -> dict[str, Any]:
         with self._admission:
+            if self._interrupted.is_set():
+                raise InterruptedError("runtime stopped before document replacement")
             request = self._pending[state["key"]]
             proposal = Proposal.model_validate(state["proposal"])
             if request["cancelled"]:
                 return self._stopped(proposal, "cancelled")
             if time.time() >= state["deadline"]:
                 return self._stopped(proposal, "expired")
+            try:
+                self._check_storage()
+            except RequestError as error:
+                return {"status": "failed", "error": str(error)}
             change = proposal.changes[state["cursor"]]
             try:
                 targets = {change.path for change in proposal.changes}
