@@ -38,6 +38,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
             str(state),
             "--search-url",
             url,
+            "--trace",
             "serve",
         ],
     )
@@ -84,6 +85,10 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
             completed = await _completed(session, key)
             assert completed["usage"] is not None
             assert "멱등" in (root / "docs/payment.md").read_text()
+            trace = (state / "trace.jsonl").read_text()
+            assert '"input_tokens"' in trace
+            assert '"stage": "model"' in trace
+            assert "멱등" not in trace
 
 
 async def _key(session: ClientSession) -> str:

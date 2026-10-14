@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from markchain.errors import ConflictError, RequestError
 from markchain.requests import Change, Proposal
 from markchain.sync import Synchronizer
+from markchain.trace import Trace
 
 
 class Intent(BaseModel):
@@ -118,6 +119,7 @@ class Planner:
     def __init__(self, synchronizer: Synchronizer, model: ClaudeModel) -> None:
         self.synchronizer = synchronizer
         self.model = model
+        self.trace = Trace()
 
     # cost: time O(n+t), heap O(n), stack O(d), io O(f), tokens O(n)
     # vars: n = bounded context and model output bytes, t = model latency
@@ -129,7 +131,15 @@ class Planner:
         is_cancelled: Callable[[], bool],
         previous: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        search = self.synchronizer.search(intent.query)
+        with self.trace.measure("search") as metrics:
+            search = self.synchronizer.search(intent.query)
+            if self.trace.enabled:
+                metrics["candidates"] = len(search["documents"])
+                metrics["source"] = str(search.get("source", "unknown"))
+                metrics["reason"] = str(search.get("reason", "ranked_candidates"))
+                metrics["source_bytes"] = sum(
+                    len(doc["content"].encode()) for doc in search["documents"]
+                )
         documents = {item["path"]: item for item in search["documents"]}
         for path in intent.paths:
             try:
@@ -165,7 +175,19 @@ class Planner:
             )
         if len(prompt.encode()) > 512 * 1024:
             raise RequestError("planning context exceeds 512 KiB")
-        response = self.model.generate(prompt, invalidated)
+        with self.trace.measure("model") as metrics:
+            response = self.model.generate(prompt, invalidated)
+            if self.trace.enabled:
+                metrics["input_bytes"] = len(prompt.encode())
+                usage = response.get("usage") or {}
+                for name in (
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                ):
+                    if isinstance(usage.get(name), (int, float)):
+                        metrics[name] = usage[name]
         if invalidated():
             raise ConflictError("source changed while model was running")
         try:
