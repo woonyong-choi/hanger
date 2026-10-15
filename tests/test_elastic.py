@@ -180,5 +180,5 @@ def test_progress_without_terminal_prints_deciles() -> None:
     step.done()
     lines = stream.getvalue().splitlines()
     assert len(lines) == 12
-    assert lines[-1].startswith("  [1/2] Download Elasticsearch")
-    assert "done" in lines[-1] and "1000 B" in lines[-1]
+    assert lines[-1].startswith("  done [1/2] Download Elasticsearch")
+    assert "1000 B" in lines[-1]

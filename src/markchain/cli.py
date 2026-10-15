@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from markchain.config import Settings, load_settings
 from markchain.documents import Documents
-from markchain.elastic import ES_VERSION, ElasticManager
+from markchain.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
 from markchain.errors import MarkchainError
 from markchain.logs import configure
 from markchain.model import ClaudeModel, Intent, Planner
@@ -252,41 +252,48 @@ def _setup(
     arguments: argparse.Namespace, settings: Settings, launcher: Launcher
 ) -> object:
     state: Path = arguments.state.expanduser().resolve()
+
+    def check(chosen: Settings) -> None:
+        recorded = state / "vault.path"
+        if recorded.exists() and recorded.read_text() != chosen.vault.root:
+            raise SetupAbortedError(
+                f"{state} already belongs to {recorded.read_text()}; "
+                "use another --state for a different vault"
+            )
+
     try:
         settings = run_setup(
             _config_path(arguments),
             settings,
             vault=arguments.vault,
             managed=arguments.managed,
+            confirm=check,
         )
     except SetupAbortedError as error:
-        print(f"\n  {error}. Nothing was changed.", file=sys.stderr)
+        print(f"\n  {error}. Nothing was changed.\n", file=sys.stderr)
         raise SystemExit(1) from None
-    recorded = state / "vault.path"
-    if recorded.exists() and recorded.read_text() != settings.vault.root:
-        raise MarkchainError(
-            f"{state} already belongs to {recorded.read_text()}. "
-            "Use another --state for a different vault.",
-            code="setup",
-        )
-    if launcher.stop():
-        print("  Restarted the background service to apply the new settings.\n")
+    ui = Progress(sys.stdout)
     engine = ElasticManager(_INSTALL_ROOT, state, settings)
-    progress = Progress(sys.stdout)
-    if engine.installed() and not arguments.reinstall:
-        progress.title("  3/3  Search engine", f"Elasticsearch {ES_VERSION}")
-        print(f"  ready {engine.home}")
-        print("  Use 'markchain setup --reinstall' to download and verify it again.")
-    else:
+    install = arguments.reinstall or not engine.installed()
+    total = 1 + (INSTALL_STEPS if install else 1)
+    step = ui.step(1, total, "Stop background service")
+    step.done("stopped" if launcher.stop() else "not running")
+    if install:
         engine.install(
-            progress, reinstall=arguments.reinstall, title="  3/3  Search engine"
+            ui, reinstall=arguments.reinstall, title=None, first=2, total=total
         )
+    else:
+        step = ui.step(2, total, "Check search engine")
+        step.done(f"Elasticsearch {ES_VERSION} ready")
+    ui.stream.write("\n")
+    ui.line("done", "Markchain is ready", str(settings.vault.root))
     command = f"{shutil.which('markchain') or 'markchain'} serve"
-    if arguments.state.resolve() != _DEFAULT_STATE:
+    if state != _DEFAULT_STATE.resolve():
         command += f" --state {shlex.quote(str(state))}"
-    print("\n  Connect an MCP client:")
-    print(f"    claude mcp add --scope user markchain -- {command}")
-    print(f"    codex mcp add markchain -- {command}\n")
+    ui.note("connect an MCP client (already registered clients need nothing):")
+    ui.note(f"  claude mcp add --scope user markchain -- {command}")
+    ui.note(f"  codex mcp add markchain -- {command}")
+    ui.stream.write("\n")
     return _SILENT
 
 
