@@ -51,7 +51,7 @@ class Progress:
         return Step(self, f"[{index}/{total}] {label}", unit)
 
     def note(self, text: str) -> None:
-        self.stream.write("\n" + text + "\n")
+        self.stream.write("\n  " + text + "\n")
         self.stream.flush()
 
 

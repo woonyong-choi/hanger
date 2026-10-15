@@ -186,16 +186,13 @@ class Synchronizer:
         for parent, directories, files in os.walk(
             self.documents.root, followlinks=False
         ):
+            base = Path(parent).relative_to(self.documents.root)
             directories[:] = sorted(
-                [
-                    d
-                    for d in directories
-                    if not self.settings.excluded(d)
-                    and not (Path(parent) / d).is_symlink()
-                    and scope.can_descend(
-                        (Path(parent) / d).relative_to(self.documents.root).as_posix()
-                    )
-                ]
+                d
+                for d in directories
+                if not self.settings.excluded((base / d).as_posix())
+                and not (Path(parent) / d).is_symlink()
+                and scope.can_descend((base / d).as_posix())
             )
             for name in sorted(files):
                 path = (Path(parent) / name).relative_to(self.documents.root).as_posix()

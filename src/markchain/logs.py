@@ -16,6 +16,7 @@ def configure(state: Path, *, console: int | None = logging.WARNING) -> None:
     root.setLevel(logging.INFO)
     for handler in list(root.handlers):
         root.removeHandler(handler)
+        handler.close()
     try:
         folder = state / "logs"
         folder.mkdir(parents=True, exist_ok=True)

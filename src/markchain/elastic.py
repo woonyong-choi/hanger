@@ -149,19 +149,29 @@ class ElasticManager:
     def installed(self) -> bool:
         return (self.home / ".markchain-installed").exists()
 
-    def install(self, progress: Progress | None = None) -> Path:
-        """Download, verify and unpack the pinned server once per version."""
+    def install(
+        self,
+        progress: Progress | None = None,
+        *,
+        reinstall: bool = False,
+        title: str = "Markchain search engine setup",
+    ) -> Path:
+        """Download, verify and unpack the pinned server once per version.
+
+        A reinstall builds the new copy beside the old one and swaps it in only
+        after every step succeeded, so a failed download keeps the old server.
+        """
         marker = self.home / ".markchain-installed"
-        if marker.exists():
+        if marker.exists() and not reinstall:
             return self.home
         self.install_root.mkdir(parents=True, exist_ok=True)
         with FileLock(self.install_root / "install.lock"):
-            if marker.exists():
+            if marker.exists() and not reinstall:
                 return self.home
             suffix, checksum = _archive()
             if progress is not None:
                 progress.title(
-                    "Markchain search engine setup",
+                    title,
                     f"Elasticsearch {ES_VERSION} ({suffix}) + Nori Korean analyzer",
                 )
             work = self.install_root / f".install-{os.getpid()}"
@@ -304,6 +314,11 @@ class ElasticManager:
             f"-Ehttp.port={self.settings.port}",
             f"-Epath.data={data}",
             f"-Epath.logs={logs}",
+            # Percentage watermarks block a nearly full laptop disk (90% of a
+            # large drive is still plenty); use absolute free-space limits.
+            "-Ecluster.routing.allocation.disk.watermark.low=3gb",
+            "-Ecluster.routing.allocation.disk.watermark.high=2gb",
+            "-Ecluster.routing.allocation.disk.watermark.flood_stage=1gb",
         ]
         heap = self.settings.heap_mb
         env = {**os.environ, "ES_JAVA_OPTS": f"-Xms{heap}m -Xmx{heap}m"}

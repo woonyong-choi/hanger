@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["Settings", "load_settings"]
+__all__ = ["Settings", "dump_settings", "load_settings"]
 
 import tomllib
 from pathlib import Path, PurePosixPath
@@ -13,7 +13,13 @@ from markchain.errors import RequestError
 
 class _Vault(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+    # Vault root chosen in setup; --vault on the command line overrides it.
+    root: str | None = None
+    # Top-level folders Markchain searches and edits; empty means all.
+    managed: tuple[str, ...] = ()
+    # Folders (within managed ones) the model may write; empty means managed.
     writable: tuple[str, ...] = ()
+    # Folder or file names skipped at any depth.
     exclude: tuple[str, ...] = ()
 
 
@@ -65,6 +71,8 @@ class Settings(BaseModel):
     def excluded(self, path: str) -> bool:
         """Return whether a vault-relative path is outside search and writes."""
         parts = PurePosixPath(path).parts
+        if self.vault.managed and parts and parts[0] not in self.vault.managed:
+            return True
         return any(p.startswith(".") or p in self.vault.exclude for p in parts)
 
     def writable(self, path: str) -> bool:
@@ -90,3 +98,33 @@ def load_settings(path: Path | None) -> Settings:
             return Settings.model_validate(tomllib.load(source))
     except (tomllib.TOMLDecodeError, ValidationError) as error:
         raise RequestError(f"설정 파일 오류: {path}: {error}", code="config") from error
+
+
+def _value(value: object) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_value(item) for item in value) + "]"
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+_HEADER = """# Markchain settings. Edit freely; changes apply when the service restarts
+# (markchain stop, or the next request after it exits).
+# Every value has a default; delete a line to return to it.
+"""
+
+
+def dump_settings(settings: Settings) -> str:
+    """Render settings as TOML, omitting unset optional values."""
+    sections = []
+    for name, section in settings.model_dump(mode="json").items():
+        lines = [f"[{name}]"]
+        lines += [
+            f"{key} = {_value(value)}"
+            for key, value in section.items()
+            if value is not None
+        ]
+        sections.append("\n".join(lines))
+    return _HEADER + "\n" + "\n\n".join(sections) + "\n"
