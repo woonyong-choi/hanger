@@ -277,6 +277,10 @@ class Runtime:
         canonical_paths = set()
         for change in proposal.changes:
             self.documents.resolve(change.path)
+            if not self.settings.writable(change.path):
+                raise RequestError(
+                    f"쓰기 허용 범위 밖입니다: {change.path}", code="write_denied"
+                )
             canonical = unicodedata.normalize("NFC", change.path).casefold()
             if canonical in canonical_paths:
                 raise RequestError("duplicate portable document path")
@@ -350,7 +354,8 @@ class Runtime:
         request = self._pending.get(key)
         if request is None:
             return {}
-        return {"key": key, "fingerprint": request["fingerprint"], "status": "queued"}
+        status = "cancelled" if request.get("cancelled") else "queued"
+        return {"key": key, "fingerprint": request["fingerprint"], "status": status}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = saved graph state bytes
@@ -648,7 +653,9 @@ class Runtime:
         except MarkchainError as error:
             if isinstance(error, SearchUnavailableError):
                 raise
-            if error.retryable:
+            # Model output that breaks an edit rule is re-drafted with the
+            # rule violation as feedback, like a review rejection.
+            if error.retryable or error.code == "model_output":
                 return self._again(
                     state, "model_attempt", self.settings.jobs.error_attempts, error
                 )
@@ -664,9 +671,9 @@ class Runtime:
         feedback = list(getattr(error, "issues", [str(error)]))
         if attempt < limit:
             logger.info(
-                "job=%s %s로 다시 작성 (%d/%d)",
+                "job=%s redrafting after %s (%d/%d)",
                 _job(state["key"]),
-                label,
+                error.code,
                 attempt,
                 limit,
             )
@@ -692,7 +699,7 @@ class Runtime:
         if mode == "bypass" and state["revision"] < limit:
             revision = state["revision"] + 1
             logger.info(
-                "job=%s 원문 변경으로 다시 시도 (%d/%d)",
+                "job=%s source changed, replanning (%d/%d)",
                 _job(state["key"]),
                 revision,
                 limit,
@@ -714,55 +721,68 @@ class Runtime:
     # vars: n = target and proposal bytes, f = target count
     # basis: estimate
     def _apply(self, state: _State) -> dict[str, Any]:
+        """Write every remaining file in one step.
+
+        One graph step for all files keeps the checkpoint from storing the
+        whole proposal again per file. After a crash the step runs again and
+        each file is recognised as already applied, pending or changed.
+        """
         with self._admission:
-            if self._interrupted.is_set():
-                raise InterruptedError("runtime stopped before document replacement")
-            request = self._pending[state["key"]]
             proposal = Proposal.model_validate(state["proposal"])
-            if request["cancelled"]:
-                return self._stopped(proposal, "cancelled")
-            if time.time() >= state["deadline"]:
-                return self._stopped(proposal, "expired")
-            try:
-                self._check_storage()
-            except RequestError as error:
-                return {
-                    "status": "failed",
-                    "error": str(error),
-                    "error_code": "storage",
-                }
-            change = proposal.changes[state["cursor"]]
-            try:
-                targets = {change.path for change in proposal.changes}
-                for path, expected in state.get("dependencies", {}).items():
-                    if path in targets:
-                        continue
-                    if self.documents.read_hash(path) != expected:
-                        raise ConflictError(f"근거 문서 변경: {path}")
-                self.documents.check_proposal(proposal, state["cursor"])
-                with self._trace.measure("apply"):
-                    outcome = self.documents.apply(change)
-            except ConflictError as error:
-                stopped = self._stopped(proposal, "conflict")
-                return {
-                    **stopped,
-                    **self._conflict(state, str(error)),
-                    "applied": {**state.get("applied", {}), **stopped["applied"]},
-                }
-            except RequestError:
-                return self._stopped(proposal, "invalid_target")
-            cursor = state["cursor"] + 1
-            status = "completed" if cursor == len(proposal.changes) else "running"
+            results = dict(state["results"])
+            applied = dict(state.get("applied", {}))
+            targets = {change.path for change in proposal.changes}
+            for cursor in range(state["cursor"], len(proposal.changes)):
+                if self._interrupted.is_set():
+                    raise InterruptedError(
+                        "runtime stopped before document replacement"
+                    )
+                request = self._pending[state["key"]]
+                if request["cancelled"]:
+                    return self._stopped(proposal, "cancelled")
+                if time.time() >= state["deadline"]:
+                    return self._stopped(proposal, "expired")
+                try:
+                    self._check_storage()
+                except RequestError as error:
+                    return {
+                        **self._stopped(proposal, "failed"),
+                        "error": str(error),
+                        "error_code": "storage",
+                    }
+                change = proposal.changes[cursor]
+                try:
+                    for path, expected in state.get("dependencies", {}).items():
+                        if path in targets:
+                            continue
+                        if self.documents.read_hash(path) != expected:
+                            raise ConflictError(f"근거 문서 변경: {path}")
+                    self.documents.check_proposal(proposal, cursor)
+                    with self._trace.measure("apply"):
+                        outcome = self.documents.apply(change)
+                except ConflictError as error:
+                    stopped = self._stopped(proposal, "conflict")
+                    return {
+                        **stopped,
+                        **self._conflict(state, str(error)),
+                        "cursor": cursor,
+                        "applied": {**applied, **stopped["applied"]},
+                    }
+                except RequestError as error:
+                    return {
+                        **self._stopped(proposal, "failed"),
+                        "error": f"반영할 수 없는 대상: {error}",
+                        "error_code": "invalid_target",
+                    }
+                results[change.path] = outcome
+                applied[change.path] = (
+                    None if change.after is None else digest(change.after.encode())
+                )
             return {
-                "cursor": cursor,
-                "results": {**state["results"], change.path: outcome},
-                "status": status,
-                "applied": {
-                    **state.get("applied", {}),
-                    change.path: None
-                    if change.after is None
-                    else digest(change.after.encode()),
-                },
+                "cursor": len(proposal.changes),
+                "results": results,
+                "status": "completed",
+                "applied": applied,
             }
 
     # cost: time O(n), heap O(m+f), stack O(1), io O(f)
@@ -789,7 +809,13 @@ class Runtime:
         return {"status": status, "results": results, "applied": applied}
 
 
-_RETRYABLE = {"review_rejected", "model_error", "source_changed", "internal"}
+_RETRYABLE = {
+    "review_rejected",
+    "model_error",
+    "model_output",
+    "source_changed",
+    "internal",
+}
 
 
 def _resolution(choice: str) -> list[dict[str, Any]]:

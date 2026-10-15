@@ -339,7 +339,8 @@ def test_run_symlink_replacement_reports_invalid_target(
         outside.write_text("external")
         (paths[0] / "a.md").symlink_to(outside)
         result = runtime.run_next()
-        assert result is not None and result["status"] == "invalid_target"
+        assert result is not None and result["status"] == "failed"
+        assert result["error_code"] == "invalid_target"
         assert outside.read_text() == "external"
         assert runtime.run_next() is None
 
