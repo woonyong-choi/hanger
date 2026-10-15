@@ -236,3 +236,41 @@ def test_watcher_survives_unexpected_error(
     stop.set()
     monkeypatch.undo()
     thread.join(timeout=5)
+
+
+# While a job waits to retry, job_status says so; a failed job keeps no work data.
+def test_retry_is_visible_and_failure_leaves_no_work_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    clock = time.time()
+    monkeypatch.setattr(time, "time", lambda: clock)
+
+    def broken(documents: Documents, change: Change) -> str:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(Documents, "apply", broken)
+    with Runtime(root, tmp_path / "state") as runtime:
+        key = runtime.issue_key()
+        runtime.submit(key, Proposal(changes=(Change(path="a.md", after="x"),)))
+        for attempt in range(1, 4):
+            with pytest.raises(OSError):
+                runtime.run_next()
+            message = runtime.describe(key)["message"]
+            assert f"10초 뒤 다시 시도 ({attempt}/3)" in message
+            clock += 11
+        result = runtime.run_next()
+        assert result is not None and result["status"] == "failed"
+        status = runtime.describe(key)
+        assert {"proposal", "intent", "search"}.isdisjoint(status)
+        assert [action["tool"] for action in status["next_actions"]] == [
+            "issue_key",
+            "request_change",
+        ]
+        assert (
+            runtime.submit(key, Proposal(changes=(Change(path="a.md", after="x"),)))
+            == "duplicate"
+        )
+        with pytest.raises(RequestError, match="새 키로 다시 요청"):
+            runtime.reconsider(key, runtime.issue_key())

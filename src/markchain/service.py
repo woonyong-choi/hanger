@@ -251,8 +251,11 @@ class Service:
         """
         self.touch()
         state = self.runtime.status(key)
-        if state.get("status") not in {"conflict", "failed"}:
-            raise RequestError("충돌·실패한 작업만 처리할 수 있습니다")
+        if state.get("status") != "conflict":
+            raise RequestError(
+                "충돌로 멈춘 작업만 처리할 수 있습니다. "
+                "실패한 작업은 새 키로 다시 요청하세요"
+            )
         if choice == "reconsider":
             return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
         if not state.get("proposal"):

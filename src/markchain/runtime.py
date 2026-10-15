@@ -46,7 +46,8 @@ from markchain.trace import Trace
 
 logger = logging.getLogger(__name__)
 # Retry delays for unexpected job errors; the last value repeats.
-_BACKOFF_SECONDS = (2, 10, 30)
+# Short internal retries; after the last one the caller reports the failure.
+_RETRY_SECONDS = 10
 
 
 @dataclass(frozen=True)
@@ -252,8 +253,11 @@ class Runtime:
     def reconsider(self, key: str, new_key: str) -> str:
         deadline = validate_key(new_key, self._secret)
         previous = self.status(key)
-        if previous.get("status") not in {"conflict", "failed"}:
-            raise RequestError("충돌·실패한 작업만 재검토할 수 있습니다")
+        if previous.get("status") != "conflict":
+            raise RequestError(
+                "충돌로 멈춘 작업만 재검토할 수 있습니다. "
+                "실패한 작업은 새 키로 다시 요청하세요"
+            )
         if not previous.get("intent"):
             raise RequestError(
                 "job has no model instruction; submit a new request for current sources"
@@ -349,13 +353,32 @@ class Runtime:
     # basis: estimate
     def status(self, key: str) -> dict[str, Any]:
         snapshot = self._graph.get_state(_config(key))
-        if snapshot.values:
-            return dict(snapshot.values)
         request = self._pending.get(key)
-        if request is None:
+        record: dict[str, Any]
+        if snapshot.values:
+            record = dict(snapshot.values)
+        elif request is not None:
+            status = "cancelled" if request.get("cancelled") else "queued"
+            record = {
+                "key": key,
+                "fingerprint": request["fingerprint"],
+                "status": status,
+            }
+        else:
             return {}
-        status = "cancelled" if request.get("cancelled") else "queued"
-        return {"key": key, "fingerprint": request["fingerprint"], "status": status}
+        if (
+            request is not None
+            and request.get("attempts")
+            and not request.get("cancelled")
+            and record.get("status") in {"queued", "planning", "running"}
+        ):
+            # Waiting for an internal retry; the caller relays this to the user.
+            record["error"] = (
+                f"오류로 {_RETRY_SECONDS}초 뒤 다시 시도 "
+                f"({request['attempts']}/{self.settings.jobs.error_attempts}): "
+                f"{request.get('retry_reason', '')}"
+            )
+        return record
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = saved graph state bytes
@@ -375,13 +398,18 @@ class Runtime:
         if status in {"queued", "planning", "running"}:
             message = self.health() or state.get("error") or "처리 중"
             actions = [{"tool": "job_status"}, {"tool": "cancel_job"}]
-        elif status in {"conflict", "failed"}:
-            message = state.get("error") or "작업이 멈췄습니다"
+        elif status == "failed":
+            message = state.get("error") or "작업이 실패했습니다"
+            actions = [
+                {"tool": "issue_key", "note": "새 키 발급"},
+                {"tool": "request_change", "note": "같은 내용으로 다시 요청"},
+            ]
+        elif status == "conflict":
+            message = state.get("error") or "원문이 바뀌어 멈췄습니다"
             actions = [{"tool": "read_document"}]
-            retryable = state.get("error_code") in _RETRYABLE
-            if state.get("intent") and (status == "conflict" or retryable):
+            if state.get("intent"):
                 actions += _resolution("reconsider")
-            if state.get("proposal") and status == "conflict":
+            if state.get("proposal"):
                 actions += _resolution("overwrite")
         elif status == "completed":
             changed = len(state.get("results", {}))
@@ -431,6 +459,8 @@ class Runtime:
                         self._graph.invoke(None, config, durability="sync")
                 else:
                     self._graph.invoke(_initial(request), config, durability="sync")
+                if self.status(key).get("status") in _DISCARDED:
+                    self._discard(key)
                 result = self.status(key)
                 self._finish(key, item["pqid"])
                 return result
@@ -477,32 +507,35 @@ class Runtime:
             attempts = request.get("attempts", 0) + 1
             self._trace.record("retry", {"attempt": attempts})
             reason = f"{type(error).__name__}: {error}"
-            if attempts >= limit:
+            if attempts > limit:
                 logger.error(
-                    "job=%s 실패 (%d/%d): %s", _job(key), attempts, limit, reason
+                    "job=%s failed after %d retries: %s", _job(key), limit, reason
                 )
                 self._graph.update_state(
                     _config(key),
                     {
                         "status": "failed",
-                        "error": f"처리 오류 {attempts}회: {reason}",
+                        "error": f"{limit}번 다시 시도했지만 실패: {reason}",
                         "error_code": "internal",
                     },
                     as_node="apply",
                 )
+                self._discard(key)
                 result = self.status(key)
                 self._finish(key, item["pqid"])
                 return result
-            delay = _BACKOFF_SECONDS[min(attempts, len(_BACKOFF_SECONDS)) - 1]
+            delay = _RETRY_SECONDS
             logger.warning(
-                "job=%s 오류, %d초 후 재시도 (%d/%d): %s",
+                "job=%s retrying in %ds (%d/%d): %s",
                 _job(key),
                 delay,
                 attempts,
                 limit,
                 reason,
             )
-            request.update(attempts=attempts, retry_at=time.time() + delay)
+            request.update(
+                attempts=attempts, retry_at=time.time() + delay, retry_reason=reason
+            )
             self._queue.update(request, id=item["pqid"])
             self._pending[key] = request
             self._queue.nack(id=item["pqid"])
@@ -518,6 +551,20 @@ class Runtime:
 
     # cost: time O(1), heap O(1), stack O(1), io O(1)
     # basis: estimate
+    def _discard(self, key: str) -> None:
+        """Drop the working data of a job that will not continue.
+
+        Only a small record stays for job_status and duplicate detection until
+        the key expires. Unfinished temporary files are removed.
+        """
+        state = self.status(key)
+        proposal = state.get("proposal")
+        if proposal:
+            self.documents.discard_pending(Proposal.model_validate(proposal))
+        record = {name: state[name] for name in _KEPT if name in state}
+        self._saver.delete_thread(key)
+        self._graph.update_state(_config(key), record, as_node="apply")
+
     def _finish(self, key: str, queue_id: int) -> None:
         with self._admission:
             self._queue.ack(id=queue_id)
@@ -809,13 +856,18 @@ class Runtime:
         return {"status": status, "results": results, "applied": applied}
 
 
-_RETRYABLE = {
-    "review_rejected",
-    "model_error",
-    "model_output",
-    "source_changed",
-    "internal",
-}
+# Jobs that end here keep only a small record; their working data is dropped.
+_DISCARDED = {"failed", "cancelled", "expired"}
+_KEPT = (
+    "key",
+    "fingerprint",
+    "deadline",
+    "status",
+    "error",
+    "error_code",
+    "results",
+    "applied",
+)
 
 
 def _resolution(choice: str) -> list[dict[str, Any]]:
