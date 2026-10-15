@@ -12,7 +12,7 @@ from markchain.config import Settings
 from markchain.context import shape
 from markchain.documents import Documents
 from markchain.editing import Decision, EditPolicy, materialize
-from markchain.errors import RequestError, ReviewRejectedError
+from markchain.errors import RequestError
 from markchain.model import ClaudeModel, Intent, Planner
 from markchain.requests import digest
 from markchain.runtime import Runtime
@@ -265,8 +265,8 @@ def test_reconsider_does_not_claim_previous_results(
     assert status["message"] == "작업을 완료했습니다. 변경한 파일은 없습니다."
 
 
-# 8: an edit that retypes most of a document is held unless rewrite is allowed.
-def test_large_rewrite_is_held_without_permission(tmp_path: Path) -> None:
+# 8: how much to change is the model's judgment; only exactness is enforced.
+def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     root.mkdir()
     content = "# 문서\n" + "".join(
@@ -277,32 +277,34 @@ def test_large_rewrite_is_held_without_permission(tmp_path: Path) -> None:
     }
     rewritten = content.replace("내용이 길게 이어진다", "새 내용")
     decision = Decision.model_validate(_edit("a.md", content, rewritten))
-    with pytest.raises(RequestError) as error:
-        materialize(decision, sources, Documents(root))
-    assert error.value.code == "change_too_large"
-    allowed = materialize(
-        decision, sources, Documents(root), EditPolicy(allow_rewrite=True)
+    assert (
+        materialize(decision, sources, Documents(root))["changes"][0]["after"]
+        == rewritten
     )
-    assert allowed["changes"][0]["after"] == rewritten
-    small = Decision.model_validate(_edit("a.md", content, content + "추가 한 줄\n"))
-    assert materialize(small, sources, Documents(root))
 
 
-# 8: a re-plan may not add text that the earlier attempt already wrote.
-def test_repeated_addition_after_partial_apply_is_rejected(tmp_path: Path) -> None:
+# Profiles that require evidence reject changes without a quoted source.
+def test_profile_evidence_requirement(tmp_path: Path) -> None:
     root = tmp_path / "vault"
     root.mkdir()
-    added = "\n만료된 키는 새 요청으로 처리한다는 예외를 둔다."
-    content = "# 결제\n재시도 2회" + added
+    content = "# 결제\n재시도 2회"
     sources = {"a.md": {"content": content, "hash": digest(content.encode())}}
-    decision = Decision.model_validate(
-        _edit("a.md", "재시도 2회", "재시도 2회" + added)
-    )
-    with pytest.raises(ReviewRejectedError):
+    decision = Decision.model_validate(_edit("a.md", "재시도 2회", "재시도 3회"))
+    with pytest.raises(RequestError) as error:
         materialize(
-            decision, sources, Documents(root), EditPolicy(applied=frozenset({"a.md"}))
+            decision, sources, Documents(root), EditPolicy(require_evidence=True)
         )
+    assert error.value.code == "model_output"
     assert materialize(decision, sources, Documents(root))
+    quoted = Decision.model_validate(
+        {
+            **_edit("a.md", "재시도 2회", "재시도 3회"),
+            "evidence": [{"path": "a.md", "quote": "재시도 2회"}],
+        }
+    )
+    assert materialize(
+        quoted, sources, Documents(root), EditPolicy(require_evidence=True)
+    )
 
 
 # 5: configured write roots and exclusions are enforced before any model call.

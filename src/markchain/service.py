@@ -16,10 +16,10 @@ from mcp.server.fastmcp import Context, FastMCP
 from markchain.context import shape
 from markchain.errors import RequestError, SearchUnavailableError
 from markchain.model import Intent
-from markchain.requests import Change, Proposal
 from markchain.runtime import Runtime
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
+from markchain.workflows import collect_proposal
 
 if TYPE_CHECKING:
     from markchain.elastic import ElasticManager
@@ -125,7 +125,10 @@ class Service:
     # vars: n = collected text bytes
     # basis: estimate
     def collect(self, key: str, text: str) -> dict[str, str]:
-        """Save a memo, link or conversation unchanged under inbox/ (no model)."""
+        """Save any text unchanged under inbox/ (no model).
+
+        The file is named collection time, title, then a short content hash.
+        """
         self.touch()
         try:
             size = len(text.encode())
@@ -135,11 +138,10 @@ class Service:
             ) from error
         if not text.strip() or size > 1024 * 1024:
             raise RequestError("수집할 내용은 비어 있지 않고 1MiB 이하여야 합니다.")
-        path = f"inbox/{key.split('.')[1]}.md" if "." in key else "inbox/invalid.md"
-        status = self.runtime.submit(
-            key, Proposal(changes=(Change(path=path, after=text),))
-        )
-        return {"key": key, "status": status, "path": path}
+        # The key's issue time names the file, so a resend gets the same name.
+        proposal = collect_proposal(text, self.runtime.key_issued(key))
+        status = self.runtime.submit(key, proposal)
+        return {"key": key, "status": status, "path": proposal.changes[0].path}
 
     # cost: time O(n), heap O(k), stack O(d), io O(f)
     # vars: n = searched bytes, k = result bytes, d = directory depth, f = files read

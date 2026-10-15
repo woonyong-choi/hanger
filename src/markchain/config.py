@@ -41,7 +41,6 @@ class _Jobs(BaseModel):
     # Retries 10 seconds apart after an unexpected error; also the number of
     # drafts when the model output breaks an edit rule.
     error_attempts: int = Field(default=3, ge=1, le=10)
-    max_change_ratio: float = Field(default=0.3, gt=0, le=1)
 
 
 class _Service(BaseModel):
@@ -93,13 +92,20 @@ class Settings(BaseModel):
                 )
 
 
+# Settings removed in later versions; old files still load.
+_RETIRED = (("jobs", "max_change_ratio"),)
+
+
 def load_settings(path: Path | None) -> Settings:
     """Load settings from TOML; a missing default file means defaults."""
     if path is None or not path.exists():
         return Settings()
     try:
         with path.open("rb") as source:
-            return Settings.model_validate(tomllib.load(source))
+            values = tomllib.load(source)
+        for section, key in _RETIRED:
+            values.get(section, {}).pop(key, None)
+        return Settings.model_validate(values)
     except (tomllib.TOMLDecodeError, ValidationError) as error:
         raise RequestError(
             f"설정 파일을 읽을 수 없습니다: {path}: {error}", code="config"
