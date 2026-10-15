@@ -38,6 +38,8 @@ class _Jobs(BaseModel):
     default_mode: Literal["normal", "bypass"] = "normal"
     source_changed_retries: int = Field(default=2, ge=0, le=10)
     review_attempts: int = Field(default=3, ge=1, le=10)
+    # Retries 10 seconds apart after an unexpected error; also the number of
+    # drafts when the model output breaks an edit rule.
     error_attempts: int = Field(default=3, ge=1, le=10)
     max_change_ratio: float = Field(default=0.3, gt=0, le=1)
 

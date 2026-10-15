@@ -364,11 +364,12 @@ def test_submit_expired_or_forged_key_rejected(
     with Runtime(*paths) as runtime:
         key = runtime.issue_key()
         proposal = Proposal(changes=(Change(path="a.md", after="a"),))
-        with pytest.raises(RequestError, match="signature"):
+        with pytest.raises(RequestError, match="발급한 키가 아닙니다") as forged:
             runtime.submit(key[:-1] + ("0" if key[-1] != "0" else "1"), proposal)
+        assert forged.value.code == "invalid_key"
         future = time.time() + 86401
         monkeypatch.setattr("markchain.requests.time.time", lambda: future)
-        with pytest.raises(RequestError, match="expired"):
+        with pytest.raises(RequestError, match="유효기간"):
             runtime.submit(key, proposal)
         assert runtime.run_next() is None
 
@@ -390,7 +391,7 @@ def test_run_transient_write_failure_retries(
             runtime.run_next()
         assert runtime.run_next() is None
         monkeypatch.setattr(Documents, "apply", original)
-        future = time.time() + 3
+        future = time.time() + 11
         monkeypatch.setattr(time, "time", lambda: future)
         result = runtime.run_next()
         assert result is not None and result["status"] == "completed"

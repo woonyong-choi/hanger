@@ -53,17 +53,25 @@ def issue_key(secret: bytes) -> str:
     return f"{payload}.{signature}"
 
 
+# The caller recovers by issuing a fresh key and sending the request again.
+_NEW_KEY = "요청 키를 쓸 수 없습니다({}). issue_key로 새 키를 받아 다시 요청하세요"
+
+
 def validate_key(key: str, secret: bytes) -> float:
     try:
         issued, nonce, signature = key.split(".")
         issued_seconds = int(issued)
     except ValueError as error:
-        raise RequestError("invalid request key") from error
+        raise RequestError(
+            _NEW_KEY.format("형식이 잘못됐습니다"), code="invalid_key"
+        ) from error
     payload = f"{issued}.{nonce}"
     expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
-        raise RequestError("invalid request signature")
+        raise RequestError(
+            _NEW_KEY.format("이 서버가 발급한 키가 아닙니다"), code="invalid_key"
+        )
     age_seconds = time.time() - issued_seconds
     if age_seconds < 0 or age_seconds >= KEY_LIFETIME_SECONDS:
-        raise RequestError("expired or future request key")
+        raise RequestError(_NEW_KEY.format("유효기간이 지났습니다"), code="invalid_key")
     return float(issued_seconds + KEY_LIFETIME_SECONDS)
