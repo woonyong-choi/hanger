@@ -5,7 +5,10 @@ __all__ = ["main"]
 import argparse
 import json
 import logging
+import shlex
+import shutil
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -32,6 +35,7 @@ from markchain.service import Service
 from markchain.sync import Synchronizer
 from markchain.trace import Trace
 from markchain.watcher import VaultWatcher
+from markchain.wizard import SetupAbortedError, edit_command, run_setup
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,20 @@ _CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"
 # A shutting-down daemon may hold the state lock briefly.
 _DAEMON_LOCK_SECONDS = 90
 _INSTALL_ROOT = Path.home() / ".local" / "share" / "markchain"
+_DEFAULT_STATE = _INSTALL_ROOT / "vault"
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="markchain")
-    parser.add_argument("--vault", type=Path, required=True)
-    parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument(
+        "--vault", type=Path, help="vault root (default: the one chosen in setup)"
+    )
+    parser.add_argument(
+        "--state",
+        type=Path,
+        default=_DEFAULT_STATE,
+        help=f"runtime state folder outside the vault (default: {_DEFAULT_STATE})",
+    )
     parser.add_argument(
         "--config", type=Path, help="settings TOML (default: <state>/config.toml)"
     )
@@ -66,7 +78,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("daemon", help="internal: shared background process")
     commands.add_parser("stop", help="stop the shared daemon")
-    commands.add_parser("setup", help="install the managed Elasticsearch")
+    setup = commands.add_parser(
+        "setup", help="choose the vault and folders, then install the search engine"
+    )
+    setup.add_argument(
+        "--reinstall",
+        action="store_true",
+        help="download and verify the search engine again",
+    )
+    setup.add_argument(
+        "--managed",
+        action="append",
+        help="top-level folder to manage (repeat); skips the prompts with --vault",
+    )
+    config = commands.add_parser("config", help="show or edit the settings file")
+    config.add_argument("--edit", action="store_true", help="open it in an editor")
     commands.add_parser("key")
     search = commands.add_parser("search")
     search.add_argument("query")
@@ -109,8 +135,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _global_arguments(arguments: argparse.Namespace) -> list[str]:
-    values = ["--vault", str(arguments.vault.resolve())]
-    values += ["--state", str(arguments.state.resolve())]
+    values = ["--state", str(arguments.state.resolve())]
+    if arguments.vault is not None:
+        values += ["--vault", str(arguments.vault.resolve())]
     if arguments.config:
         values += ["--config", str(arguments.config.resolve())]
     if arguments.search_url:
@@ -131,6 +158,12 @@ def main(argv: list[str] | None = None) -> int:
     configure(state, console=None if quiet else logging.WARNING)
     try:
         settings = load_settings(arguments.config or state / "config.toml")
+        if arguments.vault is None and arguments.command not in _NO_VAULT:
+            if not settings.vault.root:
+                raise MarkchainError(
+                    "Vault is not configured. Run: markchain setup", code="setup"
+                )
+            arguments.vault = Path(settings.vault.root)
         if arguments.search_url:
             settings = settings.model_copy(
                 update={
@@ -168,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 _SILENT = object()
+# Commands that work before a vault is configured.
+_NO_VAULT = {"setup", "config", "stop"}
 
 
 def _dispatch(
@@ -180,12 +215,9 @@ def _dispatch(
     if command == "stop":
         return {"stopped": launcher.stop()}
     if command == "setup":
-        engine = ElasticManager(_INSTALL_ROOT, arguments.state, settings)
-        if engine.installed():
-            print(f"Elasticsearch {ES_VERSION} is already installed: {engine.home}")
-            return _SILENT
-        engine.install(Progress())
-        return _SILENT
+        return _setup(arguments, settings, launcher)
+    if command == "config":
+        return _config(arguments)
     if command == "daemon":
         return _daemon(arguments, settings, launcher)
     if command in _CLIENT:
@@ -196,6 +228,66 @@ def _dispatch(
                 connection.close()
             return _remote(arguments, launcher)
     return _local(arguments, settings)
+
+
+def _config_path(arguments: argparse.Namespace) -> Path:
+    path: Path = arguments.config or arguments.state / "config.toml"
+    return path
+
+
+def _config(arguments: argparse.Namespace) -> object:
+    path = _config_path(arguments)
+    if not path.exists():
+        print(f"No settings yet. Run: markchain setup  ({path})")
+        return _SILENT
+    if arguments.edit:
+        subprocess.run(shlex.split(edit_command(path)), check=False)
+        return _SILENT
+    print(path.read_text(), end="")
+    print(f"\n# {path}\n# edit: markchain config --edit  or  {edit_command(path)}")
+    return _SILENT
+
+
+def _setup(
+    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
+) -> object:
+    state: Path = arguments.state.expanduser().resolve()
+    try:
+        settings = run_setup(
+            _config_path(arguments),
+            settings,
+            vault=arguments.vault,
+            managed=arguments.managed,
+        )
+    except SetupAbortedError as error:
+        print(f"\n  {error}. Nothing was changed.", file=sys.stderr)
+        raise SystemExit(1) from None
+    recorded = state / "vault.path"
+    if recorded.exists() and recorded.read_text() != settings.vault.root:
+        raise MarkchainError(
+            f"{state} already belongs to {recorded.read_text()}. "
+            "Use another --state for a different vault.",
+            code="setup",
+        )
+    if launcher.stop():
+        print("  Restarted the background service to apply the new settings.\n")
+    engine = ElasticManager(_INSTALL_ROOT, state, settings)
+    progress = Progress(sys.stdout)
+    if engine.installed() and not arguments.reinstall:
+        progress.title("  3/3  Search engine", f"Elasticsearch {ES_VERSION}")
+        print(f"  ready {engine.home}")
+        print("  Use 'markchain setup --reinstall' to download and verify it again.")
+    else:
+        engine.install(
+            progress, reinstall=arguments.reinstall, title="  3/3  Search engine"
+        )
+    command = f"{shutil.which('markchain') or 'markchain'} serve"
+    if arguments.state.resolve() != _DEFAULT_STATE:
+        command += f" --state {shlex.quote(str(state))}"
+    print("\n  Connect an MCP client:")
+    print(f"    claude mcp add --scope user markchain -- {command}")
+    print(f"    codex mcp add markchain -- {command}\n")
+    return _SILENT
 
 
 def _daemon(
