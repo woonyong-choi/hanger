@@ -153,7 +153,7 @@ class Scenario:
             "empty search distinguishes failure",
             passed=not empty["error"]
             and empty["data"]["documents"] == []
-            and empty["data"].get("complete") is True,
+            and empty["data"].get("source") == "elasticsearch",
         )
 
     def intent(self, instruction: str) -> dict[str, Any]:

@@ -172,6 +172,19 @@ class SearchIndex:
             for hit in response["hits"]["hits"]
         ]
 
+    # cost: time O(q), heap O(q), stack O(1), io 2
+    # vars: q = query bytes
+    # basis: estimate
+    def analyze(self, text: str) -> list[str]:
+        """Return the query terms the index matches, longest first."""
+        tokens: set[str] = set()
+        for analyzer in ("document", "standard"):
+            response = self.client.indices.analyze(
+                index=self.name, analyzer=analyzer, text=text
+            )
+            tokens.update(item["token"] for item in response["tokens"])
+        return sorted((t for t in tokens if t.strip()), key=len, reverse=True)
+
     # cost: time O(k), heap O(k), stack O(1), io O(1)
     # vars: k = audit batch metadata bytes
     # basis: estimate

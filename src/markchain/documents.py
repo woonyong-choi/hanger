@@ -58,7 +58,7 @@ class Documents:
             result = None if change.after is None else digest(change.after.encode())
             expected = {result} if index < cursor else {change.before, result}
             if self.read_hash(change.path) not in expected:
-                raise ConflictError(f"document changed: {change.path}")
+                raise ConflictError(f"문서 변경: {change.path}")
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = source and result bytes
@@ -70,7 +70,7 @@ class Documents:
         if current == result:
             return "already_applied"
         if current != change.before:
-            raise ConflictError(f"document changed: {change.path}")
+            raise ConflictError(f"문서 변경: {change.path}")
         if change.after is None:
             target.unlink()
             _sync_directory(target.parent)
@@ -85,7 +85,7 @@ class Documents:
                 os.fsync(output.fileno())
             # External writers can still race the final compare and replacement.
             if self.read_hash(change.path) != change.before:
-                raise ConflictError(f"document changed: {change.path}")
+                raise ConflictError(f"문서 변경: {change.path}")
             if target.exists():
                 pending.chmod(target.stat().st_mode & 0o777)
             os.replace(pending, target)

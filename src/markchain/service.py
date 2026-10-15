@@ -2,72 +2,133 @@ from __future__ import annotations
 
 __all__ = ["Service"]
 
+import functools
 import logging
-import sqlite3
 import threading
-from typing import Any, Literal
+import time
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, Literal
 
-from mcp.server.fastmcp import FastMCP
+import anyio
+import anyio.to_thread
+from mcp.server.fastmcp import Context, FastMCP
 
-from markchain.errors import MarkchainError, RequestError
+from markchain.context import shape
+from markchain.errors import RequestError, SearchUnavailableError
 from markchain.model import Intent
 from markchain.requests import Change, Proposal
 from markchain.runtime import Runtime
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
 
+if TYPE_CHECKING:
+    from markchain.elastic import ElasticManager
+
 logger = logging.getLogger(__name__)
+
+# A worker loop that has not reported for this long while idle is stalled.
+_IDLE_STALL_SECONDS = 60
+# One job may run a model twice per attempt plus file work.
+_BUSY_STALL_SECONDS = 1500
+_MONITOR_SECONDS = 5
+# How long a search waits for a starting search server before failing.
+SEARCH_WAIT_SECONDS = 30
+_CLEANUP_SECONDS = 30
 
 
 class Service:
-    def __init__(self, runtime: Runtime, synchronizer: Synchronizer) -> None:
+    def __init__(
+        self,
+        runtime: Runtime,
+        synchronizer: Synchronizer,
+        engine: ElasticManager | None = None,
+    ) -> None:
         self.runtime = runtime
         self.synchronizer = synchronizer
+        self.engine = engine
         self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
+        self._threads: dict[str, threading.Thread] = {}
+        self._targets: dict[str, Callable[[], None]] = {}
+        self._beats: dict[str, float] = {}
+        self._busy: dict[str, float] = {}
+        self.last_activity = time.monotonic()
+        runtime.health = self.health
         self.mcp = FastMCP(
             "markchain", instructions="Local canonical Markdown workflows"
         )
-        self.mcp.add_tool(self.issue_key)
-        self.mcp.add_tool(self.collect)
-        self.mcp.add_tool(self.search_documents)
-        self.mcp.add_tool(self.read_document)
-        self.mcp.add_tool(self.request_change)
-        self.mcp.add_tool(self.job_status)
-        self.mcp.add_tool(self.cancel_job)
-        self.mcp.add_tool(self.resolve_conflict)
+        for tool in (
+            self.issue_key,
+            self.collect,
+            self.search_documents,
+            self.read_document,
+            self.request_change,
+            self.job_status,
+            self.cancel_job,
+            self.resolve_conflict,
+        ):
+            self.mcp.add_tool(tool)
 
     def start(self) -> None:
         self.runtime.cleanup()
         watcher = VaultWatcher(self.synchronizer)
-        self._threads = [
-            threading.Thread(
-                target=watcher.run, args=(self._stop,), name="markchain-watch"
-            ),
-            threading.Thread(target=self._work, name="markchain-worker-1"),
-            threading.Thread(target=self._work, name="markchain-worker-2"),
-            threading.Thread(target=self._maintain, name="markchain-cleanup"),
-        ]
-        for thread in self._threads:
-            thread.start()
+        self._targets = {
+            "markchain-watch": lambda: watcher.run(self._stop),
+            "markchain-worker-1": lambda: self._work("markchain-worker-1"),
+            "markchain-worker-2": lambda: self._work("markchain-worker-2"),
+            "markchain-monitor": self._maintain,
+        }
+        for name in self._targets:
+            self._spawn(name)
+
+    def _spawn(self, name: str) -> None:
+        self._beats[name] = time.monotonic()
+        thread = threading.Thread(target=self._targets[name], name=name, daemon=True)
+        self._threads[name] = thread
+        thread.start()
 
     def close(self) -> None:
         self._stop.set()
         self.runtime.interrupt()
-        for thread in self._threads:
-            thread.join()
+        for thread in list(self._threads.values()):
+            thread.join(timeout=30)
+
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
+
+    def idle(self) -> bool:
+        return not self.runtime.pending_count() and not self._busy
+
+    # cost: time O(w), heap O(1), stack O(1)
+    # vars: w = worker threads
+    # basis: estimate
+    def health(self) -> str | None:
+        """Explain why queued work is not moving, or None when it should be."""
+        if self.engine is not None and not self.engine.ready():
+            return self.engine.message()
+        now = time.monotonic()
+        for name, beat in self._beats.items():
+            if not name.startswith("markchain-worker"):
+                continue
+            started = self._busy.get(name)
+            if started is not None and now - started > _BUSY_STALL_SECONDS:
+                return "작업 처리가 오래 멈춰 있습니다"
+            if started is None and now - beat > _IDLE_STALL_SECONDS:
+                return "작업 처리 멈춤"
+        return None
 
     def issue_key(self) -> str:
-        """Issue a request identity before sending a mutating operation."""
+        """Issue a request key. Every mutating call needs its own fresh key."""
+        self.touch()
         return self.runtime.issue_key()
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = collected text bytes
     # basis: estimate
     def collect(self, key: str, text: str) -> dict[str, str]:
-        """Preserve a memo, link or conversation in inbox without model rewriting."""
+        """Save a memo, link or conversation unchanged under inbox/ (no model)."""
+        self.touch()
         if not text.strip() or len(text.encode()) > 1024 * 1024:
-            raise RequestError("collection must contain 1 byte to 1 MiB of text")
+            raise RequestError("수집할 내용은 1바이트~1MiB여야 합니다")
         path = f"inbox/{key.split('.')[1]}.md" if "." in key else "inbox/invalid.md"
         status = self.runtime.submit(
             key, Proposal(changes=(Change(path=path, after=text),))
@@ -77,50 +138,96 @@ class Service:
     # cost: time O(n), heap O(k), stack O(d), io O(f)
     # vars: n = searched bytes, k = result bytes, d = directory depth, f = files read
     # basis: estimate
-    def search_documents(
+    async def search_documents(
         self,
         query: str,
-        limit: int = 20,
-        fallback_offset: int = 0,
+        limit: int | None = None,
+        fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
+        | None = None,
+        folders: tuple[str, ...] = (),
+        ctx: Context | None = None,  # type: ignore[type-arg]
+    ) -> dict[str, Any]:
+        """Search listed vault folders (OR; empty means all).
+
+        Top results come with full text; the rest are listed with matched lines.
+        Use read_document for a listed path. fallback_reason re-syncs the scope
+        before searching when a document seems to be missing. While the search
+        server starts, progress is reported for up to 30 seconds.
+        """
+        self.touch()
+        waited = 0
+        while self.engine is not None and not self.engine.ready():
+            message = self.engine.message()
+            if waited >= SEARCH_WAIT_SECONDS:
+                raise SearchUnavailableError(
+                    f"{message}. {SEARCH_WAIT_SECONDS}초 안에 준비되지 않았습니다. "
+                    "잠시 후 다시 시도하세요"
+                )
+            if ctx is not None:
+                await ctx.report_progress(waited, SEARCH_WAIT_SECONDS, message)
+                await ctx.info(message)
+            await anyio.sleep(1)
+            waited += 1
+        return await anyio.to_thread.run_sync(
+            functools.partial(self.search, query, limit, fallback_reason, folders)
+        )
+
+    # cost: time O(n), heap O(k), stack O(d), io O(f)
+    # vars: n = searched bytes, k = result bytes, d = directory depth, f = files read
+    # basis: estimate
+    def search(
+        self,
+        query: str,
+        limit: int | None = None,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        """Search within any listed vault-relative folders (OR); empty means all."""
-        return self.synchronizer.search(
+        """Synchronous search used by the CLI and the MCP tool."""
+        if self.engine is not None:
+            self.engine.require()
+        settings = self.synchronizer.settings
+        result = self.synchronizer.search(
             query,
-            limit,
-            fallback_offset=fallback_offset,
+            limit or settings.search.candidates,
             fallback_reason=fallback_reason,
             folders=folders,
         )
+        full, listed = shape(
+            result["documents"], {}, settings, self.synchronizer.terms(query)
+        )
+        return {**result, "documents": list(full.values()), "listed": listed}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes
     # basis: estimate
     def read_document(self, path: str) -> dict[str, str]:
-        """Read an explicitly selected local Markdown source."""
+        """Read one local Markdown document as it is now."""
+        self.touch()
         return self.synchronizer.read(path)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = intent bytes
     # basis: estimate
     def request_change(self, key: str, intent: Intent) -> dict[str, str]:
-        """Queue a write, edit or organization request; never publish remotely."""
+        """Queue a write, edit or organize request. Accepted is not completed."""
+        self.touch()
         return {"key": key, "status": self.runtime.submit_intent(key, intent)}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = persisted job state bytes
     # basis: estimate
     def job_status(self, key: str) -> dict[str, Any]:
-        """Read the proposal, evidence, progress and any conflict from durable state."""
+        """Read progress, result, reason and the next possible actions."""
+        self.touch()
         return self.runtime.describe(key)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = queued job bytes
     # basis: estimate
     def cancel_job(self, key: str) -> dict[str, bool]:
-        """Cancel remaining work; already applied user files are not rolled back."""
+        """Cancel remaining work; files already written are not rolled back."""
+        self.touch()
         return {"cancelled": self.runtime.cancel(key)}
 
     # cost: time O(n), heap O(n), stack O(1), io O(f)
@@ -129,10 +236,14 @@ class Service:
     def resolve_conflict(
         self, key: str, new_key: str, choice: Literal["reconsider", "overwrite"]
     ) -> dict[str, str]:
-        """Use an offered action with a fresh key; overwrite needs a saved draft."""
+        """Re-plan from current sources, or overwrite with the saved proposal.
+
+        Use a fresh key from issue_key as new_key.
+        """
+        self.touch()
         state = self.runtime.status(key)
         if state.get("status") not in {"conflict", "failed"}:
-            raise RequestError("job must be conflicted or failed")
+            raise RequestError("충돌·실패한 작업만 처리할 수 있습니다")
         if choice == "reconsider":
             return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
         if not state.get("proposal"):
@@ -156,20 +267,36 @@ class Service:
     # cost: time O(n), heap O(n), stack O(1), io O(f), tokens O(n)
     # vars: n = work bytes over service lifetime, f = work I/O count
     # basis: estimate
-    def _work(self) -> None:
+    def _work(self, name: str) -> None:
         while not self._stop.wait(0.2):
+            self._beats[name] = time.monotonic()
+            if self.engine is not None and not self.engine.ready():
+                continue
+            self._busy[name] = time.monotonic()
             try:
                 self.runtime.run_next()
-            except (OSError, sqlite3.Error, MarkchainError) as error:
-                logger.error("work attempt failed: %s", error)
+            except InterruptedError:
+                return
+            except Exception:
+                logger.exception("%s 작업 시도 실패", name)
                 self._stop.wait(2)
+            finally:
+                self._busy.pop(name, None)
 
     # cost: time O(c), heap O(b), stack O(1), io O(c)
     # vars: c = expired checkpoint bytes, b = checkpoint page bytes
     # basis: estimate
     def _maintain(self) -> None:
-        while not self._stop.wait(30):
-            try:
-                self.runtime.cleanup()
-            except (OSError, sqlite3.Error, MarkchainError) as error:
-                logger.error("cleanup failed: %s", error)
+        next_cleanup = time.monotonic()
+        while not self._stop.wait(_MONITOR_SECONDS):
+            self._beats["markchain-monitor"] = time.monotonic()
+            for name, thread in list(self._threads.items()):
+                if not thread.is_alive() and not self._stop.is_set():
+                    logger.error("%s 종료 감지, 다시 시작", name)
+                    self._spawn(name)
+            if time.monotonic() >= next_cleanup:
+                next_cleanup = time.monotonic() + _CLEANUP_SECONDS
+                try:
+                    self.runtime.cleanup()
+                except Exception:
+                    logger.exception("청소 실패")

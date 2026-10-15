@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from markchain.documents import Documents
-from markchain.errors import RequestError
+from markchain.errors import RequestError, SearchUnavailableError
 from markchain.search import SearchIndex
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
@@ -102,15 +102,17 @@ def test_search_same_korean_word_in_different_contexts(sync: Synchronizer) -> No
     }
 
 
-# #3: missing indexed results allow a reasoned local fallback and index repair.
-def test_search_unindexed_file_uses_and_records_fallback(sync: Synchronizer) -> None:
+# #3: an unindexed file is found after a reasoned scope re-sync, not by a scan.
+def test_search_unindexed_file_found_after_scope_resync(sync: Synchronizer) -> None:
+    sync.reconcile()
     target = sync.documents.root / "a.md"
     target.write_text("# 결제\n새로운 결제 지식")
-    result = sync.search("결제")
-    assert result["source"] == "local_fallback"
-    assert result["reason"] == "no_hits"
+    assert sync.search("결제")["documents"] == []
+    result = sync.search("결제", fallback_reason="user_reported_missing")
+    assert result["source"] == "elasticsearch"
+    assert result["reason"] == "user_reported_missing"
     assert result["documents"][0]["path"] == "a.md"
-    assert sync.search("결제")["source"] == "elasticsearch"
+    assert sync.search("결제")["documents"][0]["path"] == "a.md"
 
 
 # #3: indexed hits do not prevent a reasoned search for missing evidence.
@@ -224,21 +226,27 @@ def test_invalid_file_does_not_block_sync(sync: Synchronizer, invalid: bytes) ->
     report = sync.reconcile()
     assert report["diagnostics"][0]["path"] == "a.md"
     assert sync.search("결제")["documents"][0]["path"] == "b.md"
-    assert not sync.search("missing")["complete"]
+    assert sync.search("missing")["documents"] == []
 
 
-# #3: bounded fallback exposes unfinished traversal rather than claiming absence.
-def test_fallback_can_continue_after_result_limit(sync: Synchronizer) -> None:
-    for number in range(3):
-        (sync.documents.root / f"{number}.md").write_text("# 결제\n자료")
-    first = sync.search("결제", 1)
-    assert not first["complete"]
-    second = sync.search("결제", 1, fallback_offset=first["next_offset"])
-    assert first["documents"][0]["path"] != second["documents"][0]["path"]
+# #9: a search outage is an explicit error, never a silent local scan.
+def test_search_outage_raises_without_local_scan(sync: Synchronizer) -> None:
+    (sync.documents.root / "a.md").write_text("# 결제\n자료")
+    sync.reconcile()
+    url = os.environ["MARKCHAIN_TEST_SEARCH_URL"]
+    sync.index.client.close()
+    sync.index.client = SearchIndex(
+        "http://127.0.0.1:9", str(sync.documents.root)
+    ).client
+    try:
+        with pytest.raises(SearchUnavailableError):
+            sync.search("결제")
+    finally:
+        sync.index.client = SearchIndex(url, str(sync.documents.root)).client
 
 
 # #9: folder filtering precedes top-k and is identical in fallback and continuation.
-@pytest.mark.parametrize("source", ["indexed", "stale", "unindexed", "unavailable"])
+@pytest.mark.parametrize("source", ["indexed", "stale", "unindexed"])
 def test_search_folders_preserve_union_and_boundaries(
     sync: Synchronizer, source: str
 ) -> None:
@@ -259,35 +267,19 @@ def test_search_folders_preserve_union_and_boundaries(
     if source == "stale":
         for path in selected:
             (root / path).write_text("# 재시도\n현재의 멱등성 키")
-    if source == "unavailable":
-        sync.index.client.close()
     folders = ("docs/api/", "docs/api/child", "docs/api", "worktree/app/docs", "legacy")
+    reason = "user_reported_missing" if source == "unindexed" else None
 
-    result = sync.search("재시도", folders=folders)
+    result = sync.search("재시도", folders=folders, fallback_reason=reason)
 
     assert {d["path"] for d in result["documents"]} == set(selected)
     assert result["folders"] == ["docs/api", "legacy", "worktree/app/docs"]
     if source == "stale":
         assert all("현재의" in d["content"] for d in result["documents"])
-    if source == "unavailable":
-        sync.index.client = SearchIndex(
-            os.environ["MARKCHAIN_TEST_SEARCH_URL"], str(root)
-        ).client
-    page = sync.search(
-        "재시도", 1, folders=folders, fallback_reason="insufficient_evidence"
+    rechecked = sync.search(
+        "재시도", folders=folders, fallback_reason="insufficient_evidence"
     )
-    found: set[str] = set()
-    while page["next_offset"] is not None:
-        found.update(d["path"] for d in page["documents"])
-        page = sync.search(
-            "재시도",
-            1,
-            folders=folders,
-            fallback_offset=page["next_offset"],
-            fallback_reason="insufficient_evidence",
-        )
-    found.update(d["path"] for d in page["documents"])
-    assert found == set(selected)
+    assert {d["path"] for d in rechecked["documents"]} == set(selected)
     assert not sync.search("재시도", folders=("missing",))["documents"]
 
 
@@ -363,7 +355,7 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
         "문서/개발/a.md",
         "docs/[api]/b.md",
     }
-    local = sync.search(
+    absent = sync.search(
         "absent", folders=("문서/개발",), fallback_reason="insufficient_evidence"
     )
-    assert local["complete"] and local["diagnostics"] == []
+    assert absent["documents"] == []

@@ -208,8 +208,9 @@ def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) 
         service = Service(runtime, Synchronizer(runtime.documents, index))
         status = service.job_status(result["key"])
         assert status["error"] and status["message"]
-        assert "reconsider" in status["next_actions"]
-        assert "overwrite" not in status["next_actions"]
+        choices = [a.get("args", {}).get("choice") for a in status["next_actions"]]
+        assert "reconsider" in choices
+        assert "overwrite" not in choices
         with pytest.raises(RequestError, match="no saved proposal.*reconsider"):
             service.resolve_conflict(result["key"], runtime.issue_key(), "overwrite")
     assert path.read_text() == "사용자 변경"

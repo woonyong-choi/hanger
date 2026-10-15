@@ -6,17 +6,24 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 import threading
-from contextlib import closing
+import time
+from contextlib import ExitStack, closing
 from pathlib import Path
+from typing import Any
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError
 from pydantic import ValidationError
 
+from markchain.config import Settings, load_settings
 from markchain.documents import Documents
+from markchain.elastic import ElasticManager
 from markchain.errors import MarkchainError
+from markchain.logs import configure
 from markchain.model import ClaudeModel, Intent, Planner
+from markchain.proxy import Launcher, Relay, call_tool
 from markchain.requests import Proposal
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
@@ -27,38 +34,42 @@ from markchain.watcher import VaultWatcher
 
 logger = logging.getLogger(__name__)
 
+# Commands answered by the shared daemon when it runs (or must run).
+_CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
+# A shutting-down daemon may hold the state lock briefly.
+_DAEMON_LOCK_SECONDS = 90
+_INSTALL_ROOT = Path.home() / ".local" / "share" / "markchain"
 
-# cost: time O(n), heap O(n), stack O(1), io O(f)
-# vars: n = request and result bytes, f = target count
-# basis: estimate
-def main() -> int:
+
+def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="markchain")
     parser.add_argument("--vault", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--search-url", default="http://127.0.0.1:19200")
+    parser.add_argument(
+        "--config", type=Path, help="settings TOML (default: <state>/config.toml)"
+    )
+    parser.add_argument(
+        "--search-url",
+        help="use an existing Elasticsearch instead of the managed one",
+    )
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--trace", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
+    serve = commands.add_parser(
+        "serve", help="MCP stdio entry; relays to the shared daemon"
+    )
+    serve.add_argument(
+        "--foreground",
+        action="store_true",
+        help="run everything in this process instead of the shared daemon",
+    )
+    commands.add_parser("daemon", help="internal: shared background process")
+    commands.add_parser("stop", help="stop the shared daemon")
+    commands.add_parser("setup", help="install the managed Elasticsearch")
     commands.add_parser("key")
-    submit = commands.add_parser("submit")
-    submit.add_argument("key")
-    submit.add_argument("proposal", type=Path)
-    commands.add_parser("run", help="execute one queued job, then exit")
-    commands.add_parser("sync")
-    commands.add_parser("watch")
-    commands.add_parser("audit")
-    commands.add_parser("serve", help="run MCP, file watch and queue workers together")
-    commands.add_parser("cleanup")
-    automate = commands.add_parser(
-        "automate", help="queue an intent; use run or serve to execute"
-    )
-    automate.add_argument("key")
-    automate.add_argument(
-        "intent", type=Path, help="JSON with kind, instruction and query"
-    )
     search = commands.add_parser("search")
     search.add_argument("query")
-    search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--limit", type=int)
     search.add_argument(
         "--folder",
         action="append",
@@ -66,30 +77,79 @@ def main() -> int:
         dest="folders",
         help="vault-relative folder; repeat for OR scope; omit to search all",
     )
-    search.add_argument("--fallback-offset", type=int, default=0)
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
     )
+    automate = commands.add_parser(
+        "automate", help="queue an intent; the daemon executes it"
+    )
+    automate.add_argument("key")
+    automate.add_argument(
+        "intent", type=Path, help="JSON with kind, instruction and query"
+    )
+    collect = commands.add_parser("collect", help="save text unchanged under inbox/")
+    collect.add_argument("key")
+    collect.add_argument("file", help="text file, or - for stdin")
+    resolve = commands.add_parser("resolve", help="reconsider or overwrite a job")
+    resolve.add_argument("key")
+    resolve.add_argument("new_key")
+    resolve.add_argument("choice", choices=("reconsider", "overwrite"))
     for name in ("status", "cancel"):
         commands.add_parser(name).add_argument("key")
-    arguments = parser.parse_args()
-    logging.basicConfig(level=logging.INFO)
+    submit = commands.add_parser("submit")
+    submit.add_argument("key")
+    submit.add_argument("proposal", type=Path)
+    commands.add_parser("run", help="execute one queued job locally, then exit")
+    commands.add_parser("sync")
+    commands.add_parser("watch")
+    commands.add_parser("audit")
+    commands.add_parser("cleanup")
+    return parser
+
+
+def _global_arguments(arguments: argparse.Namespace) -> list[str]:
+    values = ["--vault", str(arguments.vault.resolve())]
+    values += ["--state", str(arguments.state.resolve())]
+    if arguments.config:
+        values += ["--config", str(arguments.config.resolve())]
+    if arguments.search_url:
+        values += ["--search-url", arguments.search_url]
+    values += ["--model", arguments.model]
+    if arguments.trace:
+        values.append("--trace")
+    return values
+
+
+# cost: time O(n), heap O(n), stack O(1), io O(f)
+# vars: n = request and result bytes, f = target count
+# basis: estimate
+def main(argv: list[str] | None = None) -> int:
+    arguments = _parser().parse_args(argv)
+    state: Path = arguments.state
+    quiet = arguments.command in {"serve", "daemon"}
+    configure(state, console=None if quiet else logging.WARNING)
     try:
-        with closing(
-            SearchIndex(arguments.search_url, str(arguments.vault.resolve()))
-        ) as index:
-            synchronizer = Synchronizer(Documents(arguments.vault), index)
-            planner = Planner(synchronizer, ClaudeModel(arguments.model))
-            with (
-                closing(
-                    Trace(arguments.state / "trace.jsonl" if arguments.trace else None)
-                ) as trace,
-                Runtime(
-                    arguments.vault, arguments.state, planner, trace=trace
-                ) as runtime,
-            ):
-                result = _execute(runtime, arguments, synchronizer)
-        if arguments.command != "serve":
+        settings = load_settings(arguments.config or state / "config.toml")
+        if arguments.search_url:
+            settings = settings.model_copy(
+                update={
+                    "elasticsearch": settings.elasticsearch.model_copy(
+                        update={"managed": False}
+                    )
+                }
+            )
+        launcher = Launcher(
+            state,
+            [
+                sys.executable,
+                "-m",
+                "markchain.cli",
+                *_global_arguments(arguments),
+                "daemon",
+            ],
+        )
+        result = _dispatch(arguments, settings, launcher)
+        if result is not _SILENT:
             print(json.dumps(result, ensure_ascii=False))
     except ValidationError as error:
         details = "; ".join(
@@ -97,11 +157,165 @@ def main() -> int:
             for item in error.errors(include_input=False, include_url=False)
         )
         logger.error("invalid input: %s", details)
+        print(f"입력 오류: {details}", file=sys.stderr)
         return 1
     except (MarkchainError, OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
+        print(f"오류: {error}", file=sys.stderr)
         return 1
     return 0
+
+
+_SILENT = object()
+
+
+def _dispatch(
+    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
+) -> object:
+    command = arguments.command
+    if command == "serve" and not arguments.foreground:
+        Relay(launcher, sys.stdin.buffer, sys.stdout.buffer).run()
+        return _SILENT
+    if command == "stop":
+        return {"stopped": launcher.stop()}
+    if command == "setup":
+        engine = ElasticManager(_INSTALL_ROOT, arguments.state, settings)
+        return {"installed": str(engine.install())}
+    if command == "daemon":
+        return _daemon(arguments, settings, launcher)
+    if command in _CLIENT:
+        managed = settings.elasticsearch.managed
+        connection = launcher.connect()
+        if connection is not None or managed:
+            if connection is not None:
+                connection.close()
+            return _remote(arguments, launcher)
+    return _local(arguments, settings)
+
+
+def _daemon(
+    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
+) -> object:
+    """Become the daemon, or step aside when another one already serves."""
+    deadline = time.monotonic() + _DAEMON_LOCK_SECONDS
+    while True:
+        try:
+            return _local(arguments, settings)
+        except MarkchainError as error:
+            if "already in use" not in str(error):
+                raise
+        connection = launcher.connect()
+        if connection is not None:
+            connection.close()
+            logger.info("다른 본체가 이미 실행 중입니다")
+            return _SILENT
+        if time.monotonic() >= deadline:
+            raise MarkchainError("상태 폴더 잠금을 얻지 못했습니다", code="daemon_lock")
+        time.sleep(1)
+
+
+def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
+    match arguments.command:
+        case "key":
+            return {"key": call_tool(launcher, "issue_key", {})}
+        case "search":
+            return call_tool(launcher, "search_documents", _search_arguments(arguments))
+        case "status":
+            return call_tool(launcher, "job_status", {"key": arguments.key})
+        case "cancel":
+            return call_tool(launcher, "cancel_job", {"key": arguments.key})
+        case "automate":
+            intent = Intent.model_validate_json(arguments.intent.read_bytes())
+            return call_tool(
+                launcher,
+                "request_change",
+                {"key": arguments.key, "intent": intent.model_dump(mode="json")},
+            )
+        case "collect":
+            return call_tool(
+                launcher, "collect", {"key": arguments.key, "text": _text(arguments)}
+            )
+        case "resolve":
+            return call_tool(
+                launcher,
+                "resolve_conflict",
+                {
+                    "key": arguments.key,
+                    "new_key": arguments.new_key,
+                    "choice": arguments.choice,
+                },
+            )
+    raise AssertionError("client command must be supported")
+
+
+def _search_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
+    values: dict[str, Any] = {
+        "query": arguments.query,
+        "folders": list(arguments.folders),
+    }
+    if arguments.limit:
+        values["limit"] = arguments.limit
+    if arguments.fallback_reason:
+        values["fallback_reason"] = arguments.fallback_reason
+    return values
+
+
+def _text(arguments: argparse.Namespace) -> str:
+    if arguments.file == "-":
+        return sys.stdin.read()
+    return Path(arguments.file).read_text(encoding="utf-8")
+
+
+def _local(arguments: argparse.Namespace, settings: Settings) -> object:
+    state: Path = arguments.state
+    with ExitStack() as stack:
+        engine = None
+        if settings.elasticsearch.managed and arguments.command in {"daemon", "serve"}:
+            engine = ElasticManager(_INSTALL_ROOT, state, settings)
+        url = arguments.search_url or (
+            engine.url
+            if engine is not None
+            else f"http://127.0.0.1:{settings.elasticsearch.port}"
+        )
+        index = stack.enter_context(
+            closing(SearchIndex(url, str(arguments.vault.resolve())))
+        )
+        synchronizer = Synchronizer(Documents(arguments.vault), index, settings)
+        planner = Planner(synchronizer, ClaudeModel(arguments.model))
+        trace = stack.enter_context(
+            closing(Trace(state / "trace.jsonl" if arguments.trace else None))
+        )
+        runtime = stack.enter_context(
+            Runtime(arguments.vault, state, planner, trace=trace, settings=settings)
+        )
+        if arguments.command in {"daemon", "serve"}:
+            return _serve(arguments, runtime, synchronizer, engine, settings)
+        return _execute(runtime, arguments, synchronizer)
+
+
+def _serve(
+    arguments: argparse.Namespace,
+    runtime: Runtime,
+    synchronizer: Synchronizer,
+    engine: ElasticManager | None,
+    settings: Settings,
+) -> object:
+    from markchain.daemon import Daemon
+
+    service = Service(runtime, synchronizer, engine)
+    if engine is not None:
+        engine.start()
+    service.start()
+    try:
+        if arguments.command == "daemon":
+            Daemon(service, arguments.state, settings.service.idle_minutes).run()
+        else:
+            service.mcp.run()
+    finally:
+        service.close()
+        if engine is not None:
+            engine.stop()
+    return _SILENT
 
 
 # cost: time O(n), heap O(n), stack O(1), io O(f)
@@ -110,8 +324,6 @@ def main() -> int:
 def _execute(
     runtime: Runtime, arguments: argparse.Namespace, synchronizer: Synchronizer
 ) -> object:
-    if arguments.command in {"sync", "watch", "audit", "search"}:
-        return _search(synchronizer, arguments)
     match arguments.command:
         case "key":
             return {"key": runtime.issue_key()}
@@ -125,39 +337,29 @@ def _execute(
         case "automate":
             intent = Intent.model_validate_json(arguments.intent.read_bytes())
             return {"status": runtime.submit_intent(arguments.key, intent)}
-        case "serve":
+        case "collect":
             service = Service(runtime, synchronizer)
-            service.start()
-            try:
-                service.mcp.run()
-            finally:
-                service.close()
-            return None
+            return service.collect(arguments.key, _text(arguments))
+        case "resolve":
+            service = Service(runtime, synchronizer)
+            return service.resolve_conflict(
+                arguments.key, arguments.new_key, arguments.choice
+            )
         case "status":
             return runtime.describe(arguments.key)
         case "cancel":
             return {"cancelled": runtime.cancel(arguments.key)}
-        case _:
-            raise AssertionError("parser must select a supported command")
-
-
-# cost: time O(n), heap O(b), stack O(d), io O(f)
-# vars: n = document bytes processed, b = result or batch bytes
-# vars: d = directory depth, f = files checked
-# basis: estimate
-def _search(synchronizer: Synchronizer, arguments: argparse.Namespace) -> object:
-    match arguments.command:
         case "sync":
             return synchronizer.reconcile()
         case "audit":
             return synchronizer.audit()
         case "search":
-            return synchronizer.search(
+            service = Service(runtime, synchronizer)
+            return service.search(
                 arguments.query,
                 arguments.limit,
-                fallback_offset=arguments.fallback_offset,
-                fallback_reason=arguments.fallback_reason,
-                folders=tuple(arguments.folders),
+                arguments.fallback_reason,
+                tuple(arguments.folders),
             )
         case "watch":
             stop = threading.Event()
@@ -166,7 +368,7 @@ def _search(synchronizer: Synchronizer, arguments: argparse.Namespace) -> object
             except KeyboardInterrupt:
                 stop.set()
             return {"status": "stopped"}
-    raise AssertionError("search command must be supported")
+    raise AssertionError("parser must select a supported command")
 
 
 if __name__ == "__main__":

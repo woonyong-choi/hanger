@@ -30,6 +30,7 @@ def test_cancel_running_model_never_applies_late_result(
         intent: Intent,
         cancelled: Callable[[], bool],
         previous: dict[str, Any] | None = None,
+        feedback: list[str] | None = None,
     ) -> dict[str, Any]:
         started.set()
         assert released.wait(5)
@@ -85,6 +86,7 @@ def test_parallel_proposals_recheck_shared_source(
         intent: Intent,
         cancelled: Callable[[], bool],
         previous: dict[str, Any] | None = None,
+        feedback: list[str] | None = None,
     ) -> dict[str, Any]:
         before = planner.synchronizer.documents.read_hash("a.md")
         barrier.wait(timeout=5)

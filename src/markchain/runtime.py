@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["Limits", "Runtime"]
 
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -10,6 +11,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,8 +25,15 @@ from langgraph.graph import END, START, StateGraph
 from persistqueue import SQLiteAckQueue
 from persistqueue.serializers import json as json_serializer
 
+from markchain.config import Settings
 from markchain.documents import Documents
-from markchain.errors import ConflictError, MarkchainError, RequestError
+from markchain.errors import (
+    ConflictError,
+    MarkchainError,
+    RequestError,
+    ReviewRejectedError,
+    SearchUnavailableError,
+)
 from markchain.model import Intent, Planner
 from markchain.requests import (
     KEY_LIFETIME_SECONDS,
@@ -34,6 +43,10 @@ from markchain.requests import (
     validate_key,
 )
 from markchain.trace import Trace
+
+logger = logging.getLogger(__name__)
+# Retry delays for unexpected job errors; the last value repeats.
+_BACKOFF_SECONDS = (2, 10, 30)
 
 
 @dataclass(frozen=True)
@@ -61,7 +74,12 @@ class _State(TypedDict):
     usage: dict[str, Any] | None
     search: dict[str, Any]
     error: str
+    error_code: str
     applied: dict[str, str | None]
+    prior_results: dict[str, str]
+    feedback: list[str]
+    review_attempt: int
+    model_attempt: int
 
 
 class Runtime:
@@ -76,6 +94,7 @@ class Runtime:
         *,
         limits: Limits | None = None,
         trace: Trace | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self.documents = Documents(vault, writer_id=str(state.resolve()))
         self.state = state.resolve()
@@ -88,6 +107,11 @@ class Runtime:
         if planner is not None:
             planner.trace = self._trace
         self._limits = limits or Limits()
+        if settings is None and planner is not None:
+            settings = planner.synchronizer.settings
+        self.settings = settings or Settings()
+        # Set by the service to report stalled workers or search recovery.
+        self.health: Callable[[], str | None] = lambda: None
         self._pending: dict[str, dict[str, Any]] = {}
         self._queue_ids: dict[str, int] = {}
         self._active: set[str] = set()
@@ -184,6 +208,10 @@ class Runtime:
     def issue_key(self) -> str:
         return issue_key(self._secret)
 
+    def pending_count(self) -> int:
+        with self._admission:
+            return len(self._pending)
+
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = proposal bytes
     # basis: estimate
@@ -204,9 +232,19 @@ class Runtime:
         deadline = validate_key(key, self._secret)
         if self._planner is None:
             raise RequestError("model planner is not configured")
-        payload = _intent_payload(intent)
+        self.settings.check_folders(intent.folders)
+        for path in intent.paths:
+            self.documents.resolve(path)
+            if self.settings.excluded(path):
+                raise RequestError(f"검색 제외 경로입니다: {path}", code="excluded")
+        payload = _intent_payload(self._resolved(intent))
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
         return self._enqueue(key, {"intent": payload}, fingerprint, deadline)
+
+    def _resolved(self, intent: Intent) -> Intent:
+        if intent.mode is not None:
+            return intent
+        return intent.model_copy(update={"mode": self.settings.jobs.default_mode})
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = prior proposal and observed effects bytes
@@ -215,7 +253,7 @@ class Runtime:
         deadline = validate_key(new_key, self._secret)
         previous = self.status(key)
         if previous.get("status") not in {"conflict", "failed"}:
-            raise RequestError("job must be conflicted or failed")
+            raise RequestError("충돌·실패한 작업만 재검토할 수 있습니다")
         if not previous.get("intent"):
             raise RequestError(
                 "job has no model instruction; submit a new request for current sources"
@@ -224,8 +262,12 @@ class Runtime:
         payload = {
             "intent": _intent_payload(intent),
             "prior": {
-                name: previous.get(name, {})
-                for name in ("proposal", "results", "applied")
+                "proposal": previous.get("proposal", {}),
+                "results": {
+                    **previous.get("prior_results", {}),
+                    **previous.get("results", {}),
+                },
+                "applied": previous.get("applied", {}),
             },
         }
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
@@ -320,31 +362,34 @@ class Runtime:
             return {
                 "key": key,
                 "status": "not_found",
-                "message": "key issued but request not accepted; send the request",
-                "next_actions": ["collect", "request_change"],
+                "message": "접수된 요청이 없습니다",
+                "next_actions": [{"tool": "request_change"}, {"tool": "collect"}],
             }
         status = state["status"]
+        actions: list[dict[str, Any]]
         if status in {"queued", "planning", "running"}:
-            message = "work is in progress; poll job_status or cancel remaining work"
-            actions = ["job_status", "cancel_job"]
+            message = self.health() or state.get("error") or "처리 중"
+            actions = [{"tool": "job_status"}, {"tool": "cancel_job"}]
         elif status in {"conflict", "failed"}:
-            message = state.get("error") or "work stopped; inspect current sources"
-            actions = ["read_document"]
-            if state.get("intent"):
-                actions.append("reconsider")
-            if state.get("proposal"):
-                actions.append("overwrite")
+            message = state.get("error") or "작업이 멈췄습니다"
+            actions = [{"tool": "read_document"}]
+            retryable = state.get("error_code") in _RETRYABLE
+            if state.get("intent") and (status == "conflict" or retryable):
+                actions += _resolution("reconsider")
+            if state.get("proposal") and status == "conflict":
+                actions += _resolution("overwrite")
         elif status == "completed":
-            message = "work completed; results list file effects, which may be empty"
-            actions = ["read_document"]
+            changed = len(state.get("results", {}))
+            message = f"완료: 파일 {changed}개 반영" if changed else "완료: 변경 없음"
+            actions = [{"tool": "read_document"}]
         elif status == "deferred":
-            message = state.get("decision", {}).get(
-                "reason", "more evidence is required"
-            )
-            actions = ["read_document", "issue_key", "request_change"]
+            message = "보류: " + state.get("decision", {}).get("reason", "근거 부족")
+            actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         else:
-            message = "work stopped; inspect results for any files already changed"
-            actions = ["read_document", "issue_key", "request_change"]
+            message = {"cancelled": "취소됨", "expired": "만료됨"}.get(
+                status, "중단됨"
+            ) + ". 이미 반영된 파일은 results를 확인하세요"
+            actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         return {**state, "message": message, "next_actions": actions}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
@@ -387,7 +432,13 @@ class Runtime:
             except InterruptedError:
                 self._queue.nack(id=item["pqid"])
                 raise
-            except (OSError, sqlite3.Error) as error:
+            except SearchUnavailableError as error:
+                # Search recovery is supervised separately; wait without spending
+                # the job's error attempts.
+                logger.warning("job=%s 검색 서버 대기: %s", _job(key), error)
+                self._defer(item, 10)
+                return self.status(key)
+            except Exception as error:  # noqa: BLE001 - any failure is retried
                 return self._retry(item, error)
             finally:
                 self._trace.end(trace_token)
@@ -415,26 +466,50 @@ class Runtime:
     # basis: estimate
     def _retry(self, item: dict[str, Any], error: Exception) -> dict[str, Any]:
         key = item["data"]["key"]
+        limit = self.settings.jobs.error_attempts
         with self._admission:
             request = dict(self._pending[key])
             attempts = request.get("attempts", 0) + 1
             self._trace.record("retry", {"attempt": attempts})
-            if attempts > 3:
+            reason = f"{type(error).__name__}: {error}"
+            if attempts >= limit:
+                logger.error(
+                    "job=%s 실패 (%d/%d): %s", _job(key), attempts, limit, reason
+                )
                 self._graph.update_state(
                     _config(key),
-                    {"status": "failed", "error": "I/O retry limit exhausted"},
+                    {
+                        "status": "failed",
+                        "error": f"처리 오류 {attempts}회: {reason}",
+                        "error_code": "internal",
+                    },
                     as_node="apply",
                 )
                 result = self.status(key)
                 self._finish(key, item["pqid"])
                 return result
-            request.update(
-                attempts=attempts, retry_at=time.time() + (2, 10, 30)[attempts - 1]
+            delay = _BACKOFF_SECONDS[min(attempts, len(_BACKOFF_SECONDS)) - 1]
+            logger.warning(
+                "job=%s 오류, %d초 후 재시도 (%d/%d): %s",
+                _job(key),
+                delay,
+                attempts,
+                limit,
+                reason,
             )
+            request.update(attempts=attempts, retry_at=time.time() + delay)
             self._queue.update(request, id=item["pqid"])
             self._pending[key] = request
             self._queue.nack(id=item["pqid"])
         raise error
+
+    def _defer(self, item: dict[str, Any], seconds: float) -> None:
+        key = item["data"]["key"]
+        with self._admission:
+            request = {**self._pending[key], "retry_at": time.time() + seconds}
+            self._queue.update(request, id=item["pqid"])
+            self._pending[key] = request
+            self._queue.nack(id=item["pqid"])
 
     # cost: time O(1), heap O(1), stack O(1), io O(1)
     # basis: estimate
@@ -517,11 +592,15 @@ class Runtime:
                 is_cancelled,
                 {
                     "proposal": state["proposal"],
-                    "observed": state["results"],
+                    "observed": {
+                        **state.get("prior_results", {}),
+                        **state["results"],
+                    },
                     "applied": state.get("applied", {}),
                 }
                 if state["proposal"]
                 else None,
+                state.get("feedback") or None,
             )
             if self._interrupted.is_set():
                 raise InterruptedError("runtime stopped while planning")
@@ -536,12 +615,16 @@ class Runtime:
                     len(json.dumps(planned["proposal"]).encode())
                     > self._limits.request_bytes
                 ):
-                    raise RequestError("model proposal byte limit exceeded")
+                    raise RequestError(
+                        "수정안이 요청 크기 한도를 넘습니다", code="proposal_too_large"
+                    )
                 self._validate_proposal(Proposal.model_validate(planned["proposal"]))
             return {
                 **planned,
                 "cursor": 0,
                 "error": "",
+                "error_code": "",
+                "feedback": [],
                 "status": "running"
                 if planned["proposal"]
                 else (
@@ -557,14 +640,75 @@ class Runtime:
                 return {"status": "cancelled"}
             if time.time() >= state["deadline"]:
                 return {"status": "expired"}
-            return {**self._conflict(state), "error": str(error)}
-        except RequestError as error:
-            return {"status": "failed", "error": str(error)}
+            return self._conflict(state, str(error))
+        except ReviewRejectedError as error:
+            return self._again(
+                state, "review_attempt", self.settings.jobs.review_attempts, error
+            )
+        except MarkchainError as error:
+            if isinstance(error, SearchUnavailableError):
+                raise
+            if error.retryable:
+                return self._again(
+                    state, "model_attempt", self.settings.jobs.error_attempts, error
+                )
+            logger.info("job=%s 실패 [%s]: %s", _job(state["key"]), error.code, error)
+            return {"status": "failed", "error": str(error), "error_code": error.code}
 
-    def _conflict(self, state: _State) -> dict[str, Any]:
-        if state["intent"].get("mode") == "bypass" and state["revision"] < 2:
-            return {"status": "planning", "revision": state["revision"] + 1}
-        return {"status": "conflict"}
+    def _again(
+        self, state: _State, counter: str, limit: int, error: MarkchainError
+    ) -> dict[str, Any]:
+        """Re-plan a retryable failure with feedback, up to the configured limit."""
+        attempt = int(state.get(counter, 0)) + 1  # type: ignore[call-overload]
+        label = "검토" if error.code == "review_rejected" else "모델 오류"
+        feedback = list(getattr(error, "issues", [str(error)]))
+        if attempt < limit:
+            logger.info(
+                "job=%s %s로 다시 작성 (%d/%d)",
+                _job(state["key"]),
+                label,
+                attempt,
+                limit,
+            )
+            return {
+                "status": "planning",
+                counter: attempt,
+                "feedback": feedback,
+                "error": f"{label}로 다시 작성 중 ({attempt}/{limit})",
+                "error_code": error.code,
+            }
+        detail = feedback[-1] if feedback else str(error)
+        verb = "거절" if error.code == "review_rejected" else "실패"
+        return {
+            "status": "failed",
+            counter: attempt,
+            "error": f"{label} {attempt}회 {verb}: {detail}",
+            "error_code": error.code,
+        }
+
+    def _conflict(self, state: _State, reason: str) -> dict[str, Any]:
+        mode = state["intent"].get("mode") or self.settings.jobs.default_mode
+        limit = self.settings.jobs.source_changed_retries
+        if mode == "bypass" and state["revision"] < limit:
+            revision = state["revision"] + 1
+            logger.info(
+                "job=%s 원문 변경으로 다시 시도 (%d/%d)",
+                _job(state["key"]),
+                revision,
+                limit,
+            )
+            return {
+                "status": "planning",
+                "revision": revision,
+                "error": f"원문 변경으로 다시 시도 중 ({revision}/{limit})",
+                "error_code": "source_changed",
+            }
+        prefix = "원문이 계속 바뀌어 중단" if mode == "bypass" else "원문 변경으로 중단"
+        return {
+            "status": "conflict",
+            "error": f"{prefix}: {reason}",
+            "error_code": "source_changed",
+        }
 
     # cost: time O(n), heap O(n), stack O(1), io O(f)
     # vars: n = target and proposal bytes, f = target count
@@ -582,7 +726,11 @@ class Runtime:
             try:
                 self._check_storage()
             except RequestError as error:
-                return {"status": "failed", "error": str(error)}
+                return {
+                    "status": "failed",
+                    "error": str(error),
+                    "error_code": "storage",
+                }
             change = proposal.changes[state["cursor"]]
             try:
                 targets = {change.path for change in proposal.changes}
@@ -590,7 +738,7 @@ class Runtime:
                     if path in targets:
                         continue
                     if self.documents.read_hash(path) != expected:
-                        raise ConflictError("supporting source changed")
+                        raise ConflictError(f"근거 문서 변경: {path}")
                 self.documents.check_proposal(proposal, state["cursor"])
                 with self._trace.measure("apply"):
                     outcome = self.documents.apply(change)
@@ -598,8 +746,7 @@ class Runtime:
                 stopped = self._stopped(proposal, "conflict")
                 return {
                     **stopped,
-                    **self._conflict(state),
-                    "error": str(error),
+                    **self._conflict(state, str(error)),
                     "applied": {**state.get("applied", {}), **stopped["applied"]},
                 }
             except RequestError:
@@ -642,6 +789,16 @@ class Runtime:
         return {"status": status, "results": results, "applied": applied}
 
 
+_RETRYABLE = {"review_rejected", "model_error", "source_changed", "internal"}
+
+
+def _resolution(choice: str) -> list[dict[str, Any]]:
+    return [
+        {"tool": "issue_key", "note": "새 키 발급"},
+        {"tool": "resolve_conflict", "args": {"choice": choice}},
+    ]
+
+
 def _config(key: str) -> RunnableConfig:
     return {"configurable": {"thread_id": key}, "recursion_limit": 2002}
 
@@ -653,7 +810,14 @@ def _intent_payload(intent: Intent) -> dict[str, Any]:
         payload.pop("folders")
     if intent.profile == "note":
         payload.pop("profile")
+    if not intent.allow_rewrite:
+        payload.pop("allow_rewrite")
     return payload
+
+
+def _job(key: str) -> str:
+    """Short log identifier that does not reveal the signed request key."""
+    return digest(key.encode())[:8]
 
 
 def _initial(request: dict[str, Any]) -> _State:
@@ -665,7 +829,12 @@ def _initial(request: dict[str, Any]) -> _State:
         "deadline": request["deadline"],
         "cursor": 0,
         "status": "planning" if "intent" in request else "running",
-        "results": prior.get("results", {}),
+        "results": {},
+        "prior_results": prior.get("results", {}),
+        "feedback": [],
+        "review_attempt": 0,
+        "model_attempt": 0,
+        "error_code": "",
         "intent": request.get("intent", {}),
         "dependencies": {},
         "revision": 0,
