@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
+from elasticsearch.helpers import BulkIndexError
 
 from markchain.config import Settings
 from markchain.documents import Documents
@@ -165,7 +166,7 @@ class Synchronizer:
                 raise RequestError(
                     "검색 요청이 거부됐습니다. 질의나 범위를 좁혀 주세요"
                 ) from error
-            except (TransportError, ApiError) as error:
+            except (TransportError, ApiError, BulkIndexError) as error:
                 raise SearchUnavailableError("search engine not responding") from error
             return {
                 "source": "elasticsearch",

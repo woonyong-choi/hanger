@@ -16,7 +16,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from markchain.context import shape
 from markchain.errors import RequestError, SearchUnavailableError
 from markchain.model import Intent
-from markchain.requests import Change, Proposal
+from markchain.requests import Change, Proposal, digest
 from markchain.runtime import Runtime
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
@@ -70,9 +70,9 @@ class Service:
 
     def start(self) -> None:
         self.runtime.cleanup()
-        watcher = VaultWatcher(self.synchronizer)
         self._targets = {
-            "markchain-watch": lambda: watcher.run(self._stop),
+            # A fresh watcher each time: a stopped observer cannot restart.
+            "markchain-watch": lambda: VaultWatcher(self.synchronizer).run(self._stop),
             "markchain-worker-1": lambda: self._work("markchain-worker-1"),
             "markchain-worker-2": lambda: self._work("markchain-worker-2"),
             "markchain-monitor": self._maintain,
@@ -127,7 +127,11 @@ class Service:
     def collect(self, key: str, text: str) -> dict[str, str]:
         """Save a memo, link or conversation unchanged under inbox/ (no model)."""
         self.touch()
-        if not text.strip() or len(text.encode()) > 1024 * 1024:
+        try:
+            size = len(text.encode())
+        except UnicodeEncodeError as error:
+            raise RequestError("수집할 내용이 올바른 유니코드가 아닙니다") from error
+        if not text.strip() or size > 1024 * 1024:
             raise RequestError("수집할 내용은 1바이트~1MiB여야 합니다")
         path = f"inbox/{key.split('.')[1]}.md" if "." in key else "inbox/invalid.md"
         status = self.runtime.submit(
@@ -189,7 +193,7 @@ class Service:
         settings = self.synchronizer.settings
         result = self.synchronizer.search(
             query,
-            limit or settings.search.candidates,
+            settings.search.candidates if limit is None else limit,
             fallback_reason=fallback_reason,
             folders=folders,
         )
@@ -204,7 +208,12 @@ class Service:
     def read_document(self, path: str) -> dict[str, str]:
         """Read one local Markdown document as it is now."""
         self.touch()
-        return self.synchronizer.read(path)
+        if self.synchronizer.settings.excluded(path):
+            raise RequestError(f"관리 범위 밖 문서입니다: {path}", code="excluded")
+        try:
+            return self.synchronizer.read(path)
+        except FileNotFoundError as error:
+            raise RequestError(f"문서가 없습니다: {path}", code="not_found") from error
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = intent bytes
@@ -251,17 +260,20 @@ class Service:
                 "no saved proposal to overwrite; use reconsider to read current sources"
             )
         proposal = Proposal.model_validate(state["proposal"])
-        changes = tuple(
-            Change(
-                path=c.path,
-                before=self.runtime.documents.read_hash(c.path),
-                after=c.after,
+        changes = []
+        for change in proposal.changes:
+            current = self.runtime.documents.read_hash(change.path)
+            target = None if change.after is None else digest(change.after.encode())
+            if current == target:
+                continue  # already in the proposed state
+            changes.append(Change(path=change.path, before=current, after=change.after))
+        if not changes:
+            raise RequestError(
+                "저장된 수정안이 이미 모두 반영되어 있습니다", code="already_applied"
             )
-            for c in proposal.changes
-        )
         return {
             "key": new_key,
-            "status": self.runtime.submit(new_key, Proposal(changes=changes)),
+            "status": self.runtime.submit(new_key, Proposal(changes=tuple(changes))),
         }
 
     # cost: time O(n), heap O(n), stack O(1), io O(f), tokens O(n)

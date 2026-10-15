@@ -100,5 +100,11 @@ class VaultWatcher(FileSystemEventHandler):
                 except (OSError, MarkchainError, TransportError, ApiError) as error:
                     logger.warning("search sync will retry: %s", error)
                     stop.wait(10)
+                except Exception:
+                    # Keep the index updating; the next pass rescans everything.
+                    logger.exception("search sync failed unexpectedly, will retry")
+                    with self._lock:
+                        self._rescan = True
+                    stop.wait(10)
         finally:
             self.close()
