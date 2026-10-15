@@ -19,10 +19,11 @@ from pydantic import ValidationError
 
 from markchain.config import Settings, load_settings
 from markchain.documents import Documents
-from markchain.elastic import ElasticManager
+from markchain.elastic import ES_VERSION, ElasticManager
 from markchain.errors import MarkchainError
 from markchain.logs import configure
 from markchain.model import ClaudeModel, Intent, Planner
+from markchain.progress import Progress
 from markchain.proxy import Launcher, Relay, call_tool
 from markchain.requests import Proposal
 from markchain.runtime import Runtime
@@ -180,7 +181,11 @@ def _dispatch(
         return {"stopped": launcher.stop()}
     if command == "setup":
         engine = ElasticManager(_INSTALL_ROOT, arguments.state, settings)
-        return {"installed": str(engine.install())}
+        if engine.installed():
+            print(f"Elasticsearch {ES_VERSION} is already installed: {engine.home}")
+            return _SILENT
+        engine.install(Progress())
+        return _SILENT
     if command == "daemon":
         return _daemon(arguments, settings, launcher)
     if command in _CLIENT:
