@@ -57,6 +57,7 @@ class _State(TypedDict):
     dependencies: dict[str, str]
     revision: int
     decision: dict[str, Any]
+    review: dict[str, Any]
     usage: dict[str, Any] | None
     search: dict[str, Any]
     error: str
@@ -203,7 +204,7 @@ class Runtime:
         deadline = validate_key(key, self._secret)
         if self._planner is None:
             raise RequestError("model planner is not configured")
-        payload = intent.model_dump(mode="json")
+        payload = _intent_payload(intent)
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
         return self._enqueue(key, {"intent": payload}, fingerprint, deadline)
 
@@ -217,7 +218,7 @@ class Runtime:
             raise RequestError("job must be conflicted or failed")
         intent = Intent.model_validate(previous["intent"])
         payload = {
-            "intent": intent.model_dump(mode="json"),
+            "intent": _intent_payload(intent),
             "prior": {
                 name: previous.get(name, {})
                 for name in ("proposal", "results", "applied")
@@ -499,7 +500,13 @@ class Runtime:
             return {
                 **planned,
                 "cursor": 0,
-                "status": "running" if planned["proposal"] else "completed",
+                "status": "running"
+                if planned["proposal"]
+                else (
+                    "deferred"
+                    if planned.get("decision", {}).get("action") == "defer"
+                    else "completed"
+                ),
             }
         except ConflictError:
             if self._interrupted.is_set():
@@ -596,6 +603,16 @@ def _config(key: str) -> RunnableConfig:
     return {"configurable": {"thread_id": key}, "recursion_limit": 2002}
 
 
+def _intent_payload(intent: Intent) -> dict[str, Any]:
+    payload = intent.model_dump(mode="json")
+    # Omitted new defaults preserve identities issued before folder/profile support.
+    if not intent.folders:
+        payload.pop("folders")
+    if intent.profile == "note":
+        payload.pop("profile")
+    return payload
+
+
 def _initial(request: dict[str, Any]) -> _State:
     prior = request.get("prior", {})
     return {
@@ -610,6 +627,7 @@ def _initial(request: dict[str, Any]) -> _State:
         "dependencies": {},
         "revision": 0,
         "decision": {},
+        "review": {},
         "usage": None,
         "search": {},
         "error": "",

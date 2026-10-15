@@ -63,6 +63,23 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
             result.structuredContent["documents"][0]["content"]
             == "# 결제\n멱등 키로 중복 방지"
         )
+        scoped = await session.call_tool(
+            "search_documents",
+            {
+                "query": "결제",
+                "folders": ["missing/a", "missing/b", "inbox", "missing/c"],
+            },
+        )
+        assert scoped.structuredContent is not None
+        assert (
+            scoped.structuredContent["documents"]
+            == result.structuredContent["documents"]
+        )
+        empty = await session.call_tool(
+            "search_documents", {"query": "결제", "folders": ["docs"]}
+        )
+        assert empty.structuredContent is not None
+        assert empty.structuredContent["documents"] == []
         if os.environ.get("MARKCHAIN_TEST_LIVE_MODEL"):
             key = await _key(session)
             requested = await session.call_tool(

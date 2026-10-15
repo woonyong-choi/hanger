@@ -26,6 +26,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
         *,
         fallback_offset: int = 0,
         fallback_reason: str | None = None,
+        folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         return {"documents": [], "coverage": "synthetic"}
 
@@ -41,7 +42,11 @@ def test_trace_records_metrics_without_source_or_extra_calls(
                 "sources": [],
                 "uncertainties": [],
                 "changes": [
-                    {"path": "docs/a.md", "content": "private synthetic content"}
+                    {
+                        "path": "docs/a.md",
+                        "operation": "create",
+                        "content": "private synthetic content",
+                    }
                 ],
             },
             "usage": {"input_tokens": 50, "output_tokens": 20},
@@ -49,6 +54,14 @@ def test_trace_records_metrics_without_source_or_extra_calls(
 
     monkeypatch.setattr(Synchronizer, "search", search)
     monkeypatch.setattr(ClaudeModel, "generate", generate)
+    monkeypatch.setattr(
+        ClaudeModel,
+        "review",
+        lambda self, prompt, cancelled: {
+            "review": {"approved": True, "issues": []},
+            "usage": {"input_tokens": 40, "output_tokens": 10},
+        },
+    )
     contents = []
     for enabled in (False, True):
         root = tmp_path / str(enabled) / "vault"
@@ -76,7 +89,12 @@ def test_trace_records_metrics_without_source_or_extra_calls(
                 continue
             raw = log.read_text()
             records = [json.loads(line) for line in raw.splitlines()]
-            assert {row["stage"] for row in records} == {"search", "model", "apply"}
+            assert {row["stage"] for row in records} == {
+                "search",
+                "model",
+                "review",
+                "apply",
+            }
             assert len({row["job"] for row in records}) == 1
             assert records[0]["job"]
             model = next(row for row in records if row["stage"] == "model")

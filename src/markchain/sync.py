@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from elastic_transport import TransportError
-from elasticsearch import ApiError
+from elasticsearch import ApiError, BadRequestError
 
 from markchain.documents import Documents
 from markchain.errors import ConflictError, RequestError
 from markchain.requests import digest
+from markchain.scope import SearchScope
 from markchain.search import SearchIndex
 
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
@@ -120,18 +121,22 @@ class Synchronizer:
         fallback_offset: int = 0,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
+        folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         if not query.strip() or not 1 <= limit <= 100 or fallback_offset < 0:
             raise RequestError("query and a limit between 1 and 100 are required")
         reason = "no_hits"
+        scope = SearchScope(folders)
         with self._writer:
             try:
-                hits = self.index.find(query, limit)
-                results, stale = self._read_hits(hits)
+                hits = self.index.find(query, limit, folders=scope.folders)
+                results, stale = self._read_hits(hits, scope)
                 if stale:
                     self.sync_paths(stale, force=True)
                     self.index.refresh()
-                    results, stale = self._read_hits(self.index.find(query, limit))
+                    results, stale = self._read_hits(
+                        self.index.find(query, limit, folders=scope.folders), scope
+                    )
                 if (
                     results
                     and not stale
@@ -143,11 +148,16 @@ class Synchronizer:
                         "documents": results,
                         "candidate_limit": limit,
                         "coverage": "ranked_candidates",
+                        "folders": list(scope.folders),
                     }
                 reason = fallback_reason or ("stale_results" if stale else "no_hits")
+            except BadRequestError as error:
+                raise RequestError(
+                    "search rejected the request; narrow the query or scope"
+                ) from error
             except (TransportError, ApiError):
                 reason = "search_unavailable"
-            fallback = self._local_search(query, limit, fallback_offset)
+            fallback = self._local_search(query, limit, fallback_offset, scope)
             results = fallback["documents"]
             if results and reason != "search_unavailable":
                 self.sync_paths([r["path"] for r in results], force=True)
@@ -156,13 +166,17 @@ class Synchronizer:
                 "source": "local_fallback",
                 "reason": reason,
                 **fallback,
-                "diagnostics": list(self.diagnostics),
+                "diagnostics": [
+                    d for d in self.diagnostics if scope.contains(d["path"])
+                ],
+                "folders": list(scope.folders),
             }
 
     # cost: time O(f), heap O(w), stack O(d), io O(f)
     # vars: f = filesystem entries, w = directory width, d = directory depth
     # basis: estimate
-    def paths(self) -> Iterator[str]:
+    def paths(self, folders: tuple[str, ...] = ()) -> Iterator[str]:
+        scope = SearchScope(folders)
         for parent, directories, files in os.walk(
             self.documents.root, followlinks=False
         ):
@@ -173,11 +187,18 @@ class Synchronizer:
                     if not d.startswith(".")
                     and d not in _EXCLUDED
                     and not (Path(parent) / d).is_symlink()
+                    and scope.can_descend(
+                        (Path(parent) / d).relative_to(self.documents.root).as_posix()
+                    )
                 ]
             )
             for name in sorted(files):
                 path = (Path(parent) / name).relative_to(self.documents.root).as_posix()
-                if _included(path) and not (Path(parent) / name).is_symlink():
+                if (
+                    _included(path)
+                    and scope.contains(path)
+                    and not (Path(parent) / name).is_symlink()
+                ):
                     yield path
 
     # cost: time O(f), heap O(1), stack O(1), io O(f)
@@ -259,10 +280,14 @@ class Synchronizer:
     # vars: n = result content bytes, k = result count
     # basis: estimate
     def _read_hits(
-        self, hits: list[dict[str, Any]]
+        self, hits: list[dict[str, Any]], scope: SearchScope
     ) -> tuple[list[dict[str, str]], list[str]]:
         results, stale = [], []
         for hit in hits:
+            if not scope.contains(hit["path"]):
+                raise RequestError(
+                    "search returned a document outside requested folders"
+                )
             try:
                 current = self.read(hit["path"])
                 if current["hash"] == hit["hash"]:
@@ -276,11 +301,13 @@ class Synchronizer:
     # cost: time O(n), heap O(k), stack O(d), io O(f)
     # vars: n = corpus bytes, k = bounded result bytes, f = files, d = depth
     # basis: estimate
-    def _local_search(self, query: str, limit: int, offset: int) -> dict[str, Any]:
+    def _local_search(
+        self, query: str, limit: int, offset: int, scope: SearchScope
+    ) -> dict[str, Any]:
         terms = query.casefold().split()
         results: list[dict[str, str]] = []
         deadline, initial_bytes = time.monotonic() + 5, self.read_bytes
-        for number, path in enumerate(self.paths()):
+        for number, path in enumerate(self.paths(scope.folders)):
             if number < offset:
                 continue
             if (
@@ -303,7 +330,7 @@ class Synchronizer:
                     }
         return {
             "documents": results,
-            "complete": not self.diagnostics,
+            "complete": not any(scope.contains(d["path"]) for d in self.diagnostics),
             "next_offset": None,
         }
 

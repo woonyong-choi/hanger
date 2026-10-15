@@ -84,6 +84,7 @@ class Service:
         fallback_offset: int = 0,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
+        folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Search Elasticsearch first and return verified local source text."""
         return self.synchronizer.search(
@@ -91,6 +92,7 @@ class Service:
             limit,
             fallback_offset=fallback_offset,
             fallback_reason=fallback_reason,
+            folders=folders,
         )
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)

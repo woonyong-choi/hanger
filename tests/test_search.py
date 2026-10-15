@@ -1,4 +1,7 @@
+import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -8,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from markchain.documents import Documents
+from markchain.errors import RequestError
 from markchain.search import SearchIndex
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
@@ -217,3 +221,135 @@ def test_fallback_can_continue_after_result_limit(sync: Synchronizer) -> None:
     assert not first["complete"]
     second = sync.search("결제", 1, fallback_offset=first["next_offset"])
     assert first["documents"][0]["path"] != second["documents"][0]["path"]
+
+
+# #9: folder filtering precedes top-k and is identical in fallback and continuation.
+@pytest.mark.parametrize("source", ["indexed", "stale", "unindexed", "unavailable"])
+def test_search_folders_preserve_union_and_boundaries(
+    sync: Synchronizer, source: str
+) -> None:
+    root = sync.documents.root
+    selected = [
+        "docs/api/a.md",
+        "docs/api/child/b.md",
+        "worktree/app/docs/c.md",
+        "legacy/d.md",
+    ]
+    outside = ["docs/api-old/e.md", "docs/api.md", "private/f.md"]
+    for path in selected + outside:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# 재시도\n멱등성 키")
+    if source != "unindexed":
+        sync.reconcile()
+    if source == "stale":
+        for path in selected:
+            (root / path).write_text("# 재시도\n현재의 멱등성 키")
+    if source == "unavailable":
+        sync.index.client.close()
+    folders = ("docs/api/", "docs/api/child", "docs/api", "worktree/app/docs", "legacy")
+
+    result = sync.search("재시도", folders=folders)
+
+    assert {d["path"] for d in result["documents"]} == set(selected)
+    assert result["folders"] == ["docs/api", "legacy", "worktree/app/docs"]
+    if source == "stale":
+        assert all("현재의" in d["content"] for d in result["documents"])
+    if source == "unavailable":
+        sync.index.client = SearchIndex(
+            os.environ["MARKCHAIN_TEST_SEARCH_URL"], str(root)
+        ).client
+    page = sync.search(
+        "재시도", 1, folders=folders, fallback_reason="insufficient_evidence"
+    )
+    found: set[str] = set()
+    while page["next_offset"] is not None:
+        found.update(d["path"] for d in page["documents"])
+        page = sync.search(
+            "재시도",
+            1,
+            folders=folders,
+            fallback_offset=page["next_offset"],
+            fallback_reason="insufficient_evidence",
+        )
+    found.update(d["path"] for d in page["documents"])
+    assert found == set(selected)
+    assert not sync.search("재시도", folders=("missing",))["documents"]
+
+
+# #9: many absent folders must not broaden the selected scope.
+def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    for folder in ("chosen", "unrelated"):
+        (root / folder).mkdir()
+        (root / folder / "a.md").write_text("# retry\nretry key")
+    sync.reconcile()
+
+    result = sync.search(
+        "retry", 1, folders=tuple(f"absent/{n}" for n in range(1100)) + ("chosen",)
+    )
+
+    assert [d["path"] for d in result["documents"]] == ["chosen/a.md"]
+    assert len(result["folders"]) == 1101
+
+
+# #9: invalid scopes fail rather than silently reverting to the full vault.
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "",
+        "/docs",
+        "../docs",
+        "docs/../private",
+        "docs//api",
+        "docs/./api",
+        ".hidden",
+        "docs\\api",
+    ],
+)
+def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> None:
+    with pytest.raises(RequestError, match="vault-relative"):
+        sync.search("retry", folders=(folder,))
+
+
+# #9: CLI folder flags are repeatable and errors in other folders stay out of scope.
+def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    for folder in ("문서/개발", "docs/[api]", "private"):
+        (root / folder).mkdir(parents=True)
+    (root / "문서/개발/a.md").write_text("# retry\nkey")
+    (root / "docs/[api]/b.md").write_text("# retry\nkey")
+    (root / "private/c.md").write_bytes(b"\xff")
+    sync.reconcile()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "markchain.cli",
+            "--vault",
+            str(root),
+            "--state",
+            str(root.parent / "cli-state"),
+            "--search-url",
+            os.environ["MARKCHAIN_TEST_SEARCH_URL"],
+            "search",
+            "retry",
+            "--folder",
+            "문서/개발",
+            "--folder",
+            "docs/[api]",
+            "--folder",
+            "missing",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert {d["path"] for d in json.loads(result.stdout)["documents"]} == {
+        "문서/개발/a.md",
+        "docs/[api]/b.md",
+    }
+    local = sync.search(
+        "absent", folders=("문서/개발",), fallback_reason="insufficient_evidence"
+    )
+    assert local["complete"] and local["diagnostics"] == []

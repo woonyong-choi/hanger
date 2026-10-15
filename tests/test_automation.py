@@ -139,13 +139,22 @@ class EditingModel(ClaudeModel):
                 "changes": [
                     {
                         "path": "docs/payment.md",
-                        "content": self.target.read_text()
-                        + "\n## 재시도\n멱등 키 사용",
+                        "operation": "replace",
+                        "replacements": [
+                            {
+                                "old": self.target.read_text(),
+                                "new": self.target.read_text()
+                                + "\n## 재시도\n멱등 키 사용",
+                            }
+                        ],
                     }
                 ],
             },
             "usage": None,
         }
+
+    def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
+        return {"review": {"approved": True, "issues": []}, "usage": None}
 
 
 # #4: normal mode preserves external edits; bypass regenerates from the new source.
@@ -196,7 +205,8 @@ def test_live_claude_returns_structured_change() -> None:
     model = ClaudeModel()
     result = model.generate(
         'Return a Decision: action new, reason "test", sources [], uncertainties [], '
-        'changes [{"path":"docs/example.md","content":"# Example\\nSynthetic test"}]. '
+        'changes [{"path":"docs/example.md","operation":"create",'
+        '"content":"# Example\\nSynthetic test"}]. '
         "Do not use tools or access files.",
         lambda: False,
     )
@@ -277,9 +287,18 @@ def test_partial_replan_preserves_applied_context(
                 "changes": [
                     {
                         "path": f"docs/{name}.md",
-                        "content": None
+                        "operation": "delete"
                         if (delete_first and name == "a")
-                        else (root / f"docs/{name}.md").read_text() + "\n추가",
+                        else "replace",
+                        "replacements": []
+                        if (delete_first and name == "a")
+                        else [
+                            {
+                                "old": (root / f"docs/{name}.md").read_text(),
+                                "new": (root / f"docs/{name}.md").read_text()
+                                + "\n추가",
+                            }
+                        ],
                     }
                     for name in names
                 ],
@@ -296,6 +315,14 @@ def test_partial_replan_preserves_applied_context(
         return result
 
     monkeypatch.setattr(model, "generate", generate)
+    monkeypatch.setattr(
+        model,
+        "review",
+        lambda prompt, cancelled: {
+            "review": {"approved": True, "issues": []},
+            "usage": None,
+        },
+    )
     monkeypatch.setattr(Documents, "apply", external_after_first)
     try:
         with Runtime(root, tmp_path / "state", Planner(sync, model)) as runtime:

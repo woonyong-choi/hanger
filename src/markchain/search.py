@@ -7,7 +7,9 @@ from typing import Any
 
 from elasticsearch import Elasticsearch, helpers
 
+from markchain.errors import RequestError
 from markchain.requests import digest
+from markchain.scope import SearchScope
 
 
 class SearchIndex:
@@ -110,16 +112,32 @@ class SearchIndex:
     def refresh(self) -> None:
         self.client.indices.refresh(index=self.name)
 
-    # cost: time O(k), heap O(k), stack O(1), io 1
-    # vars: k = result metadata bytes; server retrieval cost depends on postings
+    # cost: time O(k+s), heap O(k+s), stack O(1), io 1
+    # vars: k = result metadata bytes, s = scope bytes; server cost depends on postings
     # basis: estimate
-    def find(self, query: str, limit: int) -> list[dict[str, Any]]:
+    def find(
+        self, query: str, limit: int, *, folders: tuple[str, ...] = ()
+    ) -> list[dict[str, Any]]:
+        scope = SearchScope(folders)
+        filters: list[dict[str, Any]] = [{"term": {"kind": "document"}}]
+        if scope.folders:
+            filters.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"prefix": {"path": folder + "/"}}
+                            for folder in scope.folders
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
         response = self.client.search(
             index=self.name,
             size=limit,
             query={
                 "bool": {
-                    "filter": [{"term": {"kind": "document"}}],
+                    "filter": filters,
                     "must": [
                         {
                             "multi_match": {
@@ -132,6 +150,8 @@ class SearchIndex:
                 }
             },
         )
+        if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
+            raise RequestError("search did not evaluate the complete requested scope")
         return [
             dict(hit["_source"], score=hit["_score"])
             for hit in response["hits"]["hits"]

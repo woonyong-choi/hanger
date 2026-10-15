@@ -55,6 +55,7 @@ def main() -> int:
     search = commands.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
+    search.add_argument("--folder", action="append", default=[], dest="folders")
     search.add_argument("--fallback-offset", type=int, default=0)
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
@@ -142,6 +143,7 @@ def _search(synchronizer: Synchronizer, arguments: argparse.Namespace) -> object
                 arguments.limit,
                 fallback_offset=arguments.fallback_offset,
                 fallback_reason=arguments.fallback_reason,
+                folders=tuple(arguments.folders),
             )
         case "watch":
             stop = threading.Event()
