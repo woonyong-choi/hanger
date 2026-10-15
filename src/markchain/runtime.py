@@ -435,7 +435,7 @@ class Runtime:
             except SearchUnavailableError as error:
                 # Search recovery is supervised separately; wait without spending
                 # the job's error attempts.
-                logger.warning("job=%s 검색 서버 대기: %s", _job(key), error)
+                logger.warning("job=%s waiting for search: %s", _job(key), error)
                 self._defer(item, 10)
                 return self.status(key)
             except Exception as error:  # noqa: BLE001 - any failure is retried
@@ -652,7 +652,7 @@ class Runtime:
                 return self._again(
                     state, "model_attempt", self.settings.jobs.error_attempts, error
                 )
-            logger.info("job=%s 실패 [%s]: %s", _job(state["key"]), error.code, error)
+            logger.info("job=%s failed [%s]: %s", _job(state["key"]), error.code, error)
             return {"status": "failed", "error": str(error), "error_code": error.code}
 
     def _again(

@@ -52,7 +52,7 @@ def socket_path(state: Path) -> Path:
         candidate = folder / f"{name}.sock"
         if len(str(candidate).encode()) < _SOCKET_LIMIT:
             return candidate
-    raise RequestError(f"소켓 경로를 만들 수 없습니다: {path}")
+    raise RequestError(f"cannot create socket path: {path}")
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ class Daemon:
         DaemonInfo(os.getpid(), __version__).write(self.state)
         listener = await anyio.create_unix_listener(self.path)
         os.chmod(self.path, 0o600)
-        logger.info("본체 시작 pid=%d socket=%s", os.getpid(), self.path)
+        logger.info("service started pid=%d socket=%s", os.getpid(), self.path)
         async with anyio.create_task_group() as group:
             group.start_soon(self._accept, listener)
             await self._wait_for_exit()
@@ -132,7 +132,7 @@ class Daemon:
             await listener.aclose()
             self.path.unlink(missing_ok=True)
             group.cancel_scope.cancel()
-        logger.info("본체 종료")
+        logger.info("service stopped")
 
     async def _accept(self, listener: anyio.abc.Listener[Any]) -> None:
         try:
@@ -147,7 +147,7 @@ class Daemon:
                 continue
             quiet = time.monotonic() - self.service.last_activity
             if quiet >= self.idle_seconds and self.service.idle():
-                logger.info("유휴 %d초, 본체 종료", int(quiet))
+                logger.info("idle for %ds, stopping", int(quiet))
                 return
 
     async def _session(self, stream: anyio.abc.SocketStream) -> None:
@@ -156,7 +156,7 @@ class Daemon:
         try:
             await self._run_session(stream)
         except Exception:
-            logger.exception("세션 오류")
+            logger.exception("client session failed")
         finally:
             self._connections -= 1
             self.service.touch()

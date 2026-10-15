@@ -29,7 +29,7 @@ def configure(state: Path, *, console: int | None = logging.WARNING) -> None:
         handler.setFormatter(logging.Formatter(_FORMAT, "%Y-%m-%d %H:%M:%S"))
         root.addHandler(handler)
     except OSError as error:
-        print(f"로그 파일을 열 수 없습니다: {error}", file=sys.stderr)
+        print(f"markchain: cannot open log file: {error}", file=sys.stderr)
     if console is not None:
         stream = logging.StreamHandler(sys.stderr)
         stream.setLevel(console)

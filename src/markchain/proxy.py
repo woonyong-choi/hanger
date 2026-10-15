@@ -12,11 +12,13 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO
 
 import mcp.types as types
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 from markchain import __version__
 from markchain.daemon import DaemonInfo, socket_path
@@ -41,6 +43,7 @@ def _reap() -> None:
 
 
 def _alive(pid: int) -> bool:
+    """Return whether pid runs; an exited process awaiting its parent counts as gone."""
     _reap()
     try:
         os.kill(pid, 0)
@@ -48,7 +51,16 @@ def _alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    try:
+        status = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        return True
+    return bool(status) and not status.startswith("Z")
 
 
 def _is_daemon(pid: int) -> bool:
@@ -95,6 +107,8 @@ class Launcher:
                 start_new_session=True,
             )
             _children.append(child)
+        # Collect the exit status at once so a stopped daemon never lingers.
+        threading.Thread(target=child.wait, name="daemon-reaper", daemon=True).start()
 
     # cost: time O(s), heap O(1), stack O(1), io O(s)
     # vars: s = daemon start or replacement time
@@ -103,13 +117,22 @@ class Launcher:
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         info = DaemonInfo.read(self.state)
         if info is not None and info.version != __version__ and _alive(info.pid):
-            logger.info("본체 버전 %s → %s 교체", info.version, __version__)
+            logger.info("replacing service %s with %s", info.version, __version__)
             self.stop()
         client = self.connect()
         if client is not None:
             return client
-        # One client at a time decides whether to start a daemon.
-        with FileLock(self.state / "spawn.lock", timeout=_CONNECT_SECONDS * 2):
+        # One client at a time decides whether to start a daemon; setup and
+        # stop hold the same lock so nothing restarts the daemon meanwhile.
+        try:
+            lock = FileLock(self.state / "spawn.lock", timeout=_CONNECT_SECONDS * 2)
+            lock.acquire()
+        except Timeout as error:
+            raise MarkchainError(
+                "background service is being set up; try again shortly",
+                code="daemon_busy",
+            ) from error
+        try:
             client = self.connect()
             if client is not None:
                 return client
@@ -122,9 +145,11 @@ class Launcher:
                 self.kill()
             self.spawn()
             client = self._wait(_CONNECT_SECONDS)
+        finally:
+            lock.release()
         if client is None:
             raise MarkchainError(
-                f"본체를 시작하지 못했습니다. 로그: {self.state / 'logs'}",
+                f"background service did not start; see {self.state / 'logs'}",
                 code="daemon_start",
             )
         return client
@@ -138,7 +163,15 @@ class Launcher:
             time.sleep(0.2)
         return None
 
+    @contextmanager
+    def hold(self) -> Iterator[None]:
+        """Keep clients from starting a daemon while setup changes things."""
+        self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with FileLock(self.state / "spawn.lock"):
+            yield
+
     def stop(self) -> bool:
+        """Stop the daemon; call inside hold() to keep it from restarting."""
         info = DaemonInfo.read(self.state)
         if info is None or not _alive(info.pid) or not _is_daemon(info.pid):
             return False
@@ -153,7 +186,7 @@ class Launcher:
     def kill(self) -> None:
         info = DaemonInfo.read(self.state)
         if info is not None and _alive(info.pid) and _is_daemon(info.pid):
-            logger.warning("응답 없는 본체 강제 종료 pid=%d", info.pid)
+            logger.warning("background service did not stop; killed pid %d", info.pid)
             os.kill(info.pid, signal.SIGKILL)
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline and _alive(info.pid):
@@ -174,6 +207,8 @@ class Relay:
 
     The client's initialize handshake and unanswered requests are replayed
     after a reconnect. Request keys make replayed mutations idempotent.
+    After a disconnect the relay reconnects only when the client sends
+    something, so a stopped daemon stays stopped until it is needed.
     """
 
     def __init__(self, launcher: Launcher, source: BinaryIO, sink: BinaryIO) -> None:
@@ -189,6 +224,7 @@ class Relay:
         self._closing = threading.Event()
         self._connected = threading.Event()
         self._pong = threading.Event()
+        self._demand = threading.Event()
         self._sequence = 0
         self._generation = 0
 
@@ -221,6 +257,8 @@ class Relay:
                 self._initialized = line
             if "id" in message and "method" in message:
                 self._pending[json.dumps(message["id"])] = line
+        if not self._connected.is_set():
+            self._demand.set()
         self._send(line)
 
     def _send(self, line: bytes) -> None:
@@ -248,7 +286,14 @@ class Relay:
                     pass
             if self._closing.is_set():
                 return
-            logger.warning("본체 연결 끊김, 다시 연결")
+            logger.info("service connection closed")
+            self._disconnect()
+            while not self._pending and not self._closing.is_set():
+                if self._demand.wait(1):
+                    break
+            self._demand.clear()
+            if self._closing.is_set():
+                return
             self._reconnect()
 
     def _receive(self, line: bytes) -> None:
@@ -265,12 +310,15 @@ class Relay:
             self._pending.pop(json.dumps(identifier), None)
         self._emit(line)
 
-    def _reconnect(self) -> None:
+    def _disconnect(self) -> None:
         self._connected.clear()
         with self._send_lock:
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
+
+    def _reconnect(self) -> None:
+        self._disconnect()
         while not self._closing.is_set():
             connection: socket.socket | None = None
             try:
@@ -291,7 +339,7 @@ class Relay:
                 self._connected.set()
                 return
             except (OSError, ValueError, MarkchainError) as error:
-                logger.error("본체 재연결 실패: %s", error)
+                logger.error("service reconnect failed: %s", error)
                 if connection is not None:
                     connection.close()
                 time.sleep(2)
@@ -305,7 +353,7 @@ class Relay:
             try:
                 self._check_alive()
             except OSError as error:
-                logger.warning("상태 확인 실패: %s", error)
+                logger.warning("service health check failed: %s", error)
 
     def _check_alive(self) -> None:
         if self._initialize is None or not self._connected.is_set():
@@ -318,7 +366,7 @@ class Relay:
             return
         if generation != self._generation or not self._connected.is_set():
             return  # the connection changed meanwhile; ping the new daemon next
-        logger.error("본체가 %d초 동안 응답하지 않음, 다시 시작", _PING_TIMEOUT)
+        logger.error("service unresponsive for %ds, restarting", _PING_TIMEOUT)
         self.launcher.kill()
         with self._send_lock:
             if self._socket is not None:
@@ -348,9 +396,13 @@ def call_tool(launcher: Launcher, name: str, arguments: dict[str, Any]) -> Any:
                 reply = json.loads(line)
                 if reply.get("id") == identifier:
                     if "error" in reply:
-                        raise RequestError(reply["error"].get("message", "요청 실패"))
+                        raise RequestError(
+                            reply["error"].get("message", "request failed")
+                        )
                     return reply["result"]
-            raise MarkchainError("본체 연결이 끊겼습니다", code="daemon_lost")
+            raise MarkchainError(
+                "background service connection lost", code="daemon_lost"
+            )
 
         request(
             1,
@@ -372,7 +424,7 @@ def call_tool(launcher: Launcher, name: str, arguments: dict[str, Any]) -> Any:
     )
     if result.get("isError"):
         prefix = f"Error executing tool {name}: "
-        raise RequestError(text.removeprefix(prefix) or "요청 실패")
+        raise RequestError(text.removeprefix(prefix) or "request failed")
     if "structuredContent" in result:
         structured = result["structuredContent"]
         if isinstance(structured, dict) and set(structured) == {"result"}:

@@ -388,7 +388,7 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
         service._threads["markchain-worker-1"].join(5)
         service._stop.clear()
         service._beats["markchain-worker-1"] = time.monotonic() - 3600
-        assert service.health() == "작업 처리 멈춤"
+        assert service.health() == "job workers stalled"
         dead = threading.Thread(target=lambda: None)
         dead.start()
         dead.join()
@@ -455,7 +455,5 @@ def test_search_waits_for_starting_server_with_progress(
         assert context.logs[0].startswith("검색 서버 시작 중")
         monkeypatch.setattr(service_module, "SEARCH_WAIT_SECONDS", 2)
         service.engine = _Engine(ready_after=100)  # type: ignore[assignment]
-        with pytest.raises(
-            SearchUnavailableError, match="2초 안에 준비되지 않았습니다"
-        ):
+        with pytest.raises(SearchUnavailableError, match="not ready after 2s"):
             asyncio.run(service.search_documents("결제", ctx=_Context()))  # type: ignore[arg-type]

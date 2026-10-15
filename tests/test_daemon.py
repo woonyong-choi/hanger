@@ -197,6 +197,53 @@ def test_relay_survives_crash_and_hang(
         stream.close()
 
 
+# #3: stop with a client attached is quick, and the daemon stays stopped
+# until that client sends another request.
+def test_stop_with_attached_relay_is_quick_and_lazy(
+    env: tuple[Path, Path, Launcher],
+) -> None:
+    _, state, launcher = env
+    client_in, relay_in = os.pipe()
+    relay_out, client_out = os.pipe()
+    source = os.fdopen(client_in, "rb")
+    sink = os.fdopen(client_out, "wb")
+    relay = Relay(launcher, source, sink)
+    thread = threading.Thread(target=relay.run, daemon=True)
+    thread.start()
+    writer = os.fdopen(relay_in, "wb")
+    reader = os.fdopen(relay_out, "rb")
+
+    def ask(identifier: int, method: str, params: dict[str, object]) -> None:
+        message = {"jsonrpc": "2.0", "id": identifier, "method": method}
+        writer.write(json.dumps({**message, "params": params}).encode() + b"\n")
+        writer.flush()
+        while json.loads(reader.readline()).get("id") != identifier:
+            pass
+
+    ask(
+        1,
+        "initialize",
+        {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0"},
+        },
+    )
+    first = _pid(state)
+    started = time.monotonic()
+    with launcher.hold():
+        assert launcher.stop()
+    assert time.monotonic() - started < 15
+    time.sleep(3)
+    assert DaemonInfo.read(state) is None
+    ask(2, "tools/call", {"name": "issue_key", "arguments": {}})
+    assert _pid(state) != first
+    writer.close()
+    thread.join(timeout=10)
+    for stream in (source, sink, reader):
+        stream.close()
+
+
 # #3: a state path too long for a Unix socket falls back to a short temp path.
 def test_long_state_path_uses_short_socket(tmp_path: Path) -> None:
     state = tmp_path / ("x" * 120)

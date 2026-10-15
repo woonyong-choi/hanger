@@ -111,9 +111,9 @@ class Service:
                 continue
             started = self._busy.get(name)
             if started is not None and now - started > _BUSY_STALL_SECONDS:
-                return "작업 처리가 오래 멈춰 있습니다"
+                return "a job has been running too long"
             if started is None and now - beat > _IDLE_STALL_SECONDS:
-                return "작업 처리 멈춤"
+                return "job workers stalled"
         return None
 
     def issue_key(self) -> str:
@@ -160,8 +160,8 @@ class Service:
             message = self.engine.message()
             if waited >= SEARCH_WAIT_SECONDS:
                 raise SearchUnavailableError(
-                    f"{message}. {SEARCH_WAIT_SECONDS}초 안에 준비되지 않았습니다. "
-                    "잠시 후 다시 시도하세요"
+                    f"{message}; not ready after {SEARCH_WAIT_SECONDS}s, "
+                    "try again shortly"
                 )
             if ctx is not None:
                 await ctx.report_progress(waited, SEARCH_WAIT_SECONDS, message)
@@ -278,7 +278,7 @@ class Service:
             except InterruptedError:
                 return
             except Exception:
-                logger.exception("%s 작업 시도 실패", name)
+                logger.exception("%s: job attempt failed", name)
                 self._stop.wait(2)
             finally:
                 self._busy.pop(name, None)
@@ -292,11 +292,11 @@ class Service:
             self._beats["markchain-monitor"] = time.monotonic()
             for name, thread in list(self._threads.items()):
                 if not thread.is_alive() and not self._stop.is_set():
-                    logger.error("%s 종료 감지, 다시 시작", name)
+                    logger.error("%s stopped unexpectedly, restarting", name)
                     self._spawn(name)
             if time.monotonic() >= next_cleanup:
                 next_cleanup = time.monotonic() + _CLEANUP_SECONDS
                 try:
                     self.runtime.cleanup()
                 except Exception:
-                    logger.exception("청소 실패")
+                    logger.exception("cleanup failed")
