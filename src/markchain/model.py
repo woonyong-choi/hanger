@@ -8,12 +8,15 @@ import time
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
+from markchain.editing import Decision, Review
 from markchain.errors import ConflictError, RequestError
-from markchain.requests import Change, Proposal
+from markchain.profiles import Profile, policies
+from markchain.scope import SearchScope
 from markchain.sync import Synchronizer
 from markchain.trace import Trace
+from markchain.workflows import run_workflow
 
 
 class Intent(BaseModel):
@@ -22,26 +25,18 @@ class Intent(BaseModel):
     instruction: str = Field(min_length=1, max_length=16000)
     query: str = Field(min_length=1, max_length=1000)
     paths: tuple[str, ...] = Field(default=(), max_length=100)
+    folders: tuple[str, ...] = ()
+    profile: Profile = "note"
     mode: Literal["normal", "bypass"] = "normal"
     allow_delete: bool = False
     fallback_reason: (
         Literal["insufficient_evidence", "user_reported_missing"] | None
     ) = None
 
-
-class _Edit(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    path: str
-    content: str | None
-
-
-class Decision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    action: Literal["keep", "link", "supplement", "merge", "new", "defer"]
-    reason: str
-    sources: list[str]
-    uncertainties: list[str]
-    changes: list[_Edit] = Field(max_length=100)
+    @field_validator("folders")
+    @classmethod
+    def validate_folders(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return SearchScope(value).folders
 
 
 class ClaudeModel:
@@ -53,6 +48,22 @@ class ClaudeModel:
     # vars: t = provider latency, n = bounded request and response bytes
     # basis: estimate
     def generate(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
+        response = self._invoke(prompt, is_cancelled, Decision)
+        return {"decision": response["value"], "usage": response["usage"]}
+
+    # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
+    # vars: t = provider latency, n = bounded request and response bytes
+    # basis: estimate
+    def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
+        response = self._invoke(prompt, is_cancelled, Review)
+        return {"review": response["value"], "usage": response["usage"]}
+
+    # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
+    # vars: t = provider latency, n = bounded request and response bytes
+    # basis: estimate
+    def _invoke(
+        self, prompt: str, is_cancelled: Callable[[], bool], schema: type[BaseModel]
+    ) -> dict[str, Any]:
         if is_cancelled():
             raise ConflictError("model call invalidated or cancelled")
         command = [
@@ -64,7 +75,7 @@ class ClaudeModel:
             "--output-format",
             "json",
             "--json-schema",
-            json.dumps(Decision.model_json_schema()),
+            json.dumps(schema.model_json_schema()),
             "--tools",
             "",
             "--strict-mcp-config",
@@ -112,10 +123,10 @@ class ClaudeModel:
             envelope = json.loads(output)
             if envelope.get("is_error"):
                 raise RequestError("model returned an error")
-            decision = Decision.model_validate(envelope.get("structured_output"))
+            value = schema.model_validate(envelope.get("structured_output"))
         except (ValueError, ValidationError, AttributeError) as error:
             raise RequestError("model returned invalid structured output") from error
-        return {"decision": decision.model_dump(), "usage": envelope.get("usage")}
+        return {"value": value.model_dump(), "usage": envelope.get("usage")}
 
 
 class Planner:
@@ -136,7 +147,9 @@ class Planner:
     ) -> dict[str, Any]:
         with self.trace.measure("search") as metrics:
             search = self.synchronizer.search(
-                intent.query, fallback_reason=intent.fallback_reason
+                intent.query,
+                fallback_reason=intent.fallback_reason,
+                folders=intent.folders,
             )
             if self.trace.enabled:
                 metrics["candidates"] = len(search["documents"])
@@ -162,87 +175,26 @@ class Planner:
         encoded = json.dumps(list(documents.values()), ensure_ascii=False)
         if len(encoded.encode()) > 256 * 1024:
             raise RequestError("retrieved context exceeds 256 KiB; narrow the request")
-        dependencies = {path: doc["hash"] for path, doc in documents.items()}
-        signatures = {path: doc["signature"] for path, doc in documents.items()}
-
-        def invalidated() -> bool:
-            if is_cancelled():
-                return True
-            return not self.synchronizer.matches(signatures)
-
         prompt = _prompt(intent, encoded, search.get("coverage", search.get("reason")))
         if previous:
             prompt += (
                 "\nPRIOR ATTEMPT AND OBSERVED EFFECTS: "
                 + json.dumps(previous, ensure_ascii=False)
-                + "\nReconcile the original intent with current files. Do not repeat "
-                "already applied additions. Repair only remaining or invalidated work."
+                + "\nReconcile prior effects. Do not repeat already applied changes."
             )
-        if len(prompt.encode()) > 512 * 1024:
-            raise RequestError("planning context exceeds 512 KiB")
-        with self.trace.measure("model") as metrics:
-            response = self.model.generate(prompt, invalidated)
-            if self.trace.enabled:
-                metrics["input_bytes"] = len(prompt.encode())
-                usage = response.get("usage") or {}
-                for name in (
-                    "input_tokens",
-                    "output_tokens",
-                    "cache_read_input_tokens",
-                    "cache_creation_input_tokens",
-                ):
-                    if isinstance(usage.get(name), (int, float)):
-                        metrics[name] = usage[name]
-        if invalidated():
-            raise ConflictError("source changed while model was running")
-        try:
-            decision = Decision.model_validate(response["decision"])
-            proposal = self._proposal(decision, dependencies)
-        except ValidationError as error:
-            raise RequestError(
-                "model proposed inconsistent document changes"
-            ) from error
-        if not intent.allow_delete and any(
-            edit.content is None for edit in decision.changes
-        ):
-            raise RequestError("deletion requires explicit request permission")
+        context = {
+            "request": intent.model_dump(mode="json"),
+            "prompt": prompt,
+            "documents": documents,
+            "signatures": {path: doc["signature"] for path, doc in documents.items()},
+        }
+        planned = run_workflow(
+            context, self.model, self.synchronizer, self.trace, is_cancelled
+        )
         return {
-            "proposal": proposal,
-            "dependencies": dependencies,
-            "decision": decision.model_dump(),
-            "usage": response["usage"],
+            **planned,
             "search": {k: v for k, v in search.items() if k != "documents"},
         }
-
-    # cost: time O(n), heap O(n), stack O(1), io O(f)
-    # vars: n = proposal bytes, f = model-selected paths
-    # basis: estimate
-    def _proposal(
-        self, decision: Decision, dependencies: dict[str, str]
-    ) -> dict[str, Any]:
-        if any(source not in dependencies for source in decision.sources):
-            raise RequestError("model cited a source outside the retrieved context")
-        if decision.action in {"keep", "defer"} and decision.changes:
-            raise RequestError("keep or defer decision cannot mutate documents")
-        changes = []
-        for edit in decision.changes:
-            target = self.synchronizer.documents.resolve(edit.path)
-            if not edit.path.startswith(("docs/", "inbox/", "legacy/", "worktree/")):
-                raise RequestError("model write target is outside document workspaces")
-            if "/agent/" in edit.path:
-                raise RequestError("model cannot alter agent instructions")
-            if target.exists() and edit.path not in dependencies:
-                raise RequestError("model cannot overwrite an unread document")
-            changes.append(
-                Change(
-                    path=edit.path,
-                    before=dependencies.get(edit.path),
-                    after=edit.content,
-                )
-            )
-        if not changes:
-            return {}
-        return Proposal(changes=tuple(changes)).model_dump(mode="json")
 
 
 def _prompt(intent: Intent, documents: str, coverage: object) -> str:
@@ -254,12 +206,19 @@ def _prompt(intent: Intent, documents: str, coverage: object) -> str:
         "Compare the question each document answers. Keywords alone cannot justify "
         "merging. Prefer supplementing a canonical document over duplication. "
         "Do not delete inputs unless explicitly requested. Do not publish. New files "
-        "belong in docs/. Every change contains the complete replacement content. "
+        "belong in docs/. For existing files use operation replace and replacements "
+        "containing exact unique old text and new text. Include enough unchanged "
+        "anchor text to locate insertions. All anchors refer to the ORIGINAL version, "
+        "must not overlap, and must preserve untouched text. Only create uses full "
+        "content. Delete requires explicit permission and operation delete. "
+        "Cite every changed source and provide exact supporting quotes in evidence. "
         "Keep/defer cannot have changes. Search candidates are not exhaustive.\n"
         + json.dumps(
             {"request": intent.model_dump(), "search_coverage": coverage},
             ensure_ascii=False,
         )
+        + "\nDOCUMENT POLICY: "
+        + policies[intent.profile]
         + "\nSOURCE DOCUMENTS:\n"
         + documents
     )
