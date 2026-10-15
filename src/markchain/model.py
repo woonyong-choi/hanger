@@ -23,9 +23,20 @@ class Intent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     kind: Literal["write", "edit", "organize"]
     instruction: str = Field(min_length=1, max_length=16000)
-    query: str = Field(min_length=1, max_length=1000)
-    paths: tuple[str, ...] = Field(default=(), max_length=100)
-    folders: tuple[str, ...] = ()
+    query: str = Field(
+        min_length=1,
+        max_length=1000,
+        description="Question or source text for search; not a required document title",
+    )
+    paths: tuple[str, ...] = Field(
+        default=(),
+        max_length=100,
+        description="Explicit source paths read independently of the search folders",
+    )
+    folders: tuple[str, ...] = Field(
+        default=(),
+        description="Vault-relative folder array with OR scope; empty means all",
+    )
     profile: Profile = "note"
     mode: Literal["normal", "bypass"] = "normal"
     allow_delete: bool = False

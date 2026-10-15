@@ -14,11 +14,13 @@ import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from markchain.documents import Documents
+from markchain.errors import RequestError
 from markchain.model import ClaudeModel, Intent, Planner
 from markchain.profiles import Profile
 from markchain.requests import digest
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
+from markchain.service import Service
 from markchain.sync import Synchronizer
 
 
@@ -199,6 +201,17 @@ def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) 
 
     assert result["status"] == "conflict"
     assert not model.reviews
+    assert path.read_text() == "사용자 변경"
+    with closing(
+        SearchIndex("http://127.0.0.1:19200", str(runtime.documents.root))
+    ) as index:
+        service = Service(runtime, Synchronizer(runtime.documents, index))
+        status = service.job_status(result["key"])
+        assert status["error"] and status["message"]
+        assert "reconsider" in status["next_actions"]
+        assert "overwrite" not in status["next_actions"]
+        with pytest.raises(RequestError, match="no saved proposal.*reconsider"):
+            service.resolve_conflict(result["key"], runtime.issue_key(), "overwrite")
     assert path.read_text() == "사용자 변경"
 
 

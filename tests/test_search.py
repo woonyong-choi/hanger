@@ -88,6 +88,20 @@ def test_search_korean_particle_and_typo_excludes_unrelated(
     assert [hit["path"] for hit in sync.index.find(query, 20)] == ["payment.md"]
 
 
+# #9: Nori split '재시도 횟수' differently and omitted a required edit target.
+def test_search_same_korean_word_in_different_contexts(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    (root / "retry.md").write_text("# 재시도\n기본 재시도는 2회다.")
+    (root / "operations.md").write_text("# 운영\n재시도 횟수: 2회")
+    (root / "garden.md").write_text("# 정원\n나무와 사진")
+    sync.reconcile()
+
+    assert {hit["path"] for hit in sync.index.find("재시도", 20)} == {
+        "retry.md",
+        "operations.md",
+    }
+
+
 # #3: missing indexed results allow a reasoned local fallback and index repair.
 def test_search_unindexed_file_uses_and_records_fallback(sync: Synchronizer) -> None:
     target = sync.documents.root / "a.md"

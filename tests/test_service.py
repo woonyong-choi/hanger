@@ -52,11 +52,18 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
             tool.name for tool in tools.tools
         }
         key = await _key(session)
+        unused = await session.call_tool("job_status", {"key": key})
+        assert unused.structuredContent is not None
+        assert unused.structuredContent["status"] == "not_found"
+        assert "collect" in unused.structuredContent["next_actions"]
+        invalid = await session.call_tool("job_status", {"key": "unknown"})
+        assert invalid.isError
         collected = await session.call_tool(
             "collect", {"key": key, "text": "# 결제\n멱등 키로 중복 방지"}
         )
         assert not collected.isError
-        await _completed(session, key)
+        status = await _completed(session, key)
+        assert status["message"] and status["next_actions"] == ["read_document"]
         result = await session.call_tool("search_documents", {"query": "결제"})
         assert result.structuredContent is not None
         assert (

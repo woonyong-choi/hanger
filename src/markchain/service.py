@@ -86,7 +86,7 @@ class Service:
         | None = None,
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        """Search Elasticsearch first and return verified local source text."""
+        """Search within any listed vault-relative folders (OR); empty means all."""
         return self.synchronizer.search(
             query,
             limit,
@@ -114,7 +114,7 @@ class Service:
     # basis: estimate
     def job_status(self, key: str) -> dict[str, Any]:
         """Read the proposal, evidence, progress and any conflict from durable state."""
-        return self.runtime.status(key)
+        return self.runtime.describe(key)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = queued job bytes
@@ -129,12 +129,16 @@ class Service:
     def resolve_conflict(
         self, key: str, new_key: str, choice: Literal["reconsider", "overwrite"]
     ) -> dict[str, str]:
-        """Reconsider current sources or explicitly approve a saved replacement."""
+        """Use an offered action with a fresh key; overwrite needs a saved draft."""
         state = self.runtime.status(key)
         if state.get("status") not in {"conflict", "failed"}:
             raise RequestError("job must be conflicted or failed")
         if choice == "reconsider":
             return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
+        if not state.get("proposal"):
+            raise RequestError(
+                "no saved proposal to overwrite; use reconsider to read current sources"
+            )
         proposal = Proposal.model_validate(state["proposal"])
         changes = tuple(
             Change(

@@ -14,7 +14,7 @@ from markchain.scope import SearchScope
 
 class SearchIndex:
     def __init__(self, url: str, vault_identity: str) -> None:
-        self.name = "markchain-" + digest(vault_identity.encode())[:24] + "-v1"
+        self.name = "markchain-" + digest(vault_identity.encode())[:24] + "-v2"
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
 
     def close(self) -> None:
@@ -52,8 +52,16 @@ class SearchIndex:
                     "path": {"type": "keyword"},
                     "hash": {"type": "keyword"},
                     "signature": {"type": "keyword"},
-                    "title": {"type": "text", "analyzer": "document"},
-                    "content": {"type": "text", "analyzer": "document"},
+                    **{
+                        field: {
+                            "type": "text",
+                            "analyzer": "document",
+                            "fields": {
+                                "surface": {"type": "text", "analyzer": "standard"}
+                            },
+                        }
+                        for field in ("title", "content")
+                    },
                     "cursor": {"type": "keyword"},
                 },
             },
@@ -138,15 +146,22 @@ class SearchIndex:
             query={
                 "bool": {
                     "filter": filters,
-                    "must": [
+                    "should": [
                         {
                             "multi_match": {
                                 "query": query,
                                 "fields": ["title^3", "content"],
                                 "fuzziness": "AUTO",
                             }
-                        }
+                        },
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["title.surface^3", "content.surface"],
+                            }
+                        },
                     ],
+                    "minimum_should_match": 1,
                 }
             },
         )

@@ -216,6 +216,10 @@ class Runtime:
         previous = self.status(key)
         if previous.get("status") not in {"conflict", "failed"}:
             raise RequestError("job must be conflicted or failed")
+        if not previous.get("intent"):
+            raise RequestError(
+                "job has no model instruction; submit a new request for current sources"
+            )
         intent = Intent.model_validate(previous["intent"])
         payload = {
             "intent": _intent_payload(intent),
@@ -305,6 +309,43 @@ class Runtime:
         if request is None:
             return {}
         return {"key": key, "fingerprint": request["fingerprint"], "status": "queued"}
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1)
+    # vars: n = saved graph state bytes
+    # basis: estimate
+    def describe(self, key: str) -> dict[str, Any]:
+        state = self.status(key)
+        if not state:
+            validate_key(key, self._secret)
+            return {
+                "key": key,
+                "status": "not_found",
+                "message": "key issued but request not accepted; send the request",
+                "next_actions": ["collect", "request_change"],
+            }
+        status = state["status"]
+        if status in {"queued", "planning", "running"}:
+            message = "work is in progress; poll job_status or cancel remaining work"
+            actions = ["job_status", "cancel_job"]
+        elif status in {"conflict", "failed"}:
+            message = state.get("error") or "work stopped; inspect current sources"
+            actions = ["read_document"]
+            if state.get("intent"):
+                actions.append("reconsider")
+            if state.get("proposal"):
+                actions.append("overwrite")
+        elif status == "completed":
+            message = "work completed; results list file effects, which may be empty"
+            actions = ["read_document"]
+        elif status == "deferred":
+            message = state.get("decision", {}).get(
+                "reason", "more evidence is required"
+            )
+            actions = ["read_document", "issue_key", "request_change"]
+        else:
+            message = "work stopped; inspect results for any files already changed"
+            actions = ["read_document", "issue_key", "request_change"]
+        return {**state, "message": message, "next_actions": actions}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = queued request bytes
@@ -500,6 +541,7 @@ class Runtime:
             return {
                 **planned,
                 "cursor": 0,
+                "error": "",
                 "status": "running"
                 if planned["proposal"]
                 else (
@@ -508,14 +550,14 @@ class Runtime:
                     else "completed"
                 ),
             }
-        except ConflictError:
+        except ConflictError as error:
             if self._interrupted.is_set():
                 raise InterruptedError("runtime stopped while planning") from None
             if self._pending[state["key"]]["cancelled"]:
                 return {"status": "cancelled"}
             if time.time() >= state["deadline"]:
                 return {"status": "expired"}
-            return self._conflict(state)
+            return {**self._conflict(state), "error": str(error)}
         except RequestError as error:
             return {"status": "failed", "error": str(error)}
 
@@ -552,11 +594,12 @@ class Runtime:
                 self.documents.check_proposal(proposal, state["cursor"])
                 with self._trace.measure("apply"):
                     outcome = self.documents.apply(change)
-            except ConflictError:
+            except ConflictError as error:
                 stopped = self._stopped(proposal, "conflict")
                 return {
                     **stopped,
                     **self._conflict(state),
+                    "error": str(error),
                     "applied": {**state.get("applied", {}), **stopped["applied"]},
                 }
             except RequestError:
