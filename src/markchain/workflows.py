@@ -80,11 +80,13 @@ def run_workflow(
             cast(_State, initial), durability="sync"
         )
     except (ValidationError, KeyError) as error:
-        raise ModelError("모델 출력이 수정 형식과 맞지 않습니다") from error
+        raise ModelError("모델 출력이 수정안 형식과 맞지 않습니다.") from error
     workflow.guard(cast(_State, result))
     check = result.get("review", {})
     if result["proposal"] and (not check["approved"] or check["issues"]):
-        raise ReviewRejectedError(list(check["issues"]) or ["승인되지 않음"])
+        raise ReviewRejectedError(
+            list(check["issues"]) or ["검토에서 승인되지 않았습니다."]
+        )
     return {
         "proposal": result["proposal"],
         "decision": result["decision"],
@@ -113,7 +115,7 @@ class _Workflow:
 
     def guard(self, state: _State) -> None:
         if self.is_cancelled() or not self.synchronizer.matches(state["signatures"]):
-            raise ConflictError("작업 중 원문이 바뀌었거나 작업이 취소됐습니다")
+            raise ConflictError("작업 중 원문이 변경되었거나 작업이 취소되었습니다.")
 
     def _invalidated(self, state: _State) -> bool:
         return self.is_cancelled() or not self.synchronizer.matches(state["signatures"])
@@ -203,7 +205,9 @@ class _Workflow:
             ),
         )
         if len(json.dumps(proposal).encode()) > 2 * 1024 * 1024:
-            raise RequestError("수정안이 2MiB를 넘습니다", code="proposal_too_large")
+            raise RequestError(
+                "수정안이 크기 한도(2MiB)를 넘습니다.", code="proposal_too_large"
+            )
         return {"proposal": proposal, "decision": decision.model_dump()}
 
     # cost: time O(n+t), heap O(n), stack O(1), io O(f), tokens O(n)
@@ -249,7 +253,8 @@ def _call(
 ) -> dict[str, Any]:
     if len(prompt.encode()) > 512 * 1024:
         raise RequestError(
-            "검색된 문서가 모델 입력 한도(512KiB)를 넘습니다. 폴더를 좁혀 주세요",
+            "검색된 문서가 모델 입력 한도(512KiB)를 넘습니다. 폴더 "
+            "범위를 좁혀 다시 요청하십시오.",
             code="context_limit",
         )
     with trace.measure(stage) as metrics:

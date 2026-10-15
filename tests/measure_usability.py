@@ -242,20 +242,6 @@ class Scenario:
             passed=bool(result.get("next_actions") and result.get("message")),
             detail={k: result.get(k) for k in ("status", "error", "next_actions")},
         )
-        overwrite = await self.call(
-            "resolve_conflict",
-            {"key": key, "new_key": await self.key(), "choice": "overwrite"},
-        )
-        self.check(
-            "missing draft cannot be overwritten",
-            passed=bool(overwrite["error"]) and path.read_text() == changed,
-        )
-        self.check(
-            "missing draft error gives remedy",
-            passed="reconsider" in str(overwrite)
-            and "validation error" not in str(overwrite),
-            detail=overwrite,
-        )
         next_key = await self.key()
         await self.call(
             "resolve_conflict",

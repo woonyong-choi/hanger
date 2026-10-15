@@ -117,10 +117,14 @@ def _parser() -> argparse.ArgumentParser:
     collect = commands.add_parser("collect", help="save text unchanged under inbox/")
     collect.add_argument("key")
     collect.add_argument("file", help="text file, or - for stdin")
-    resolve = commands.add_parser("resolve", help="reconsider or overwrite a job")
+    resolve = commands.add_parser(
+        "resolve", help="re-plan a conflicted job from current sources"
+    )
     resolve.add_argument("key")
     resolve.add_argument("new_key")
-    resolve.add_argument("choice", choices=("reconsider", "overwrite"))
+    resolve.add_argument(
+        "choice", choices=("reconsider",), nargs="?", default="reconsider"
+    )
     for name in ("status", "cancel"):
         commands.add_parser(name).add_argument("key")
     submit = commands.add_parser("submit")
@@ -255,21 +259,14 @@ def _setup(
 ) -> object:
     state: Path = arguments.state.expanduser().resolve()
 
-    def check(chosen: Settings) -> None:
-        recorded = state / "vault.path"
-        if recorded.exists() and recorded.read_text() != chosen.vault.root:
-            raise SetupAbortedError(
-                f"{state} already belongs to {recorded.read_text()}; "
-                "use another --state for a different vault"
-            )
-
+    recorded = state / "vault.path"
+    previous = recorded.read_text() if recorded.exists() else None
     try:
         settings = run_setup(
             _config_path(arguments),
             settings,
             vault=arguments.vault,
             managed=arguments.managed,
-            confirm=check,
         )
     except SetupAbortedError as error:
         print(f"\n  {error}. Nothing was changed.\n", file=sys.stderr)
@@ -278,23 +275,32 @@ def _setup(
     engine = ElasticManager(_INSTALL_ROOT, state, settings)
     # Hold the start lock so connected clients cannot restart the service
     # (which would install or start the search engine) until setup ends.
+    root = str(Path(str(settings.vault.root)).resolve())
+    changed = previous is not None and previous != root
     with launcher.hold():
         install = arguments.reinstall or not engine.installed()
-        total = 1 + (INSTALL_STEPS if install else 1)
+        first = 2 + changed
+        total = first - 1 + (INSTALL_STEPS if install else 1)
         step = ui.step(1, total, "Stop background service")
         stopped = launcher.stop()
         if arguments.reinstall:
             # A fresh engine starts from an empty index rebuilt from the vault.
             shutil.rmtree(state / "elasticsearch", ignore_errors=True)
         step.done("stopped" if stopped else "not running")
+        if changed:
+            step = ui.step(2, total, "Reset for the new vault")
+            # Opening the job store for the new root clears the old one; the
+            # old search index is removed when the engine next starts.
+            Runtime(Path(root), state, settings=settings).close()
+            step.done("previous vault jobs removed; its index goes on next start")
         # A stopped service may have finished installing in the meantime.
         install = arguments.reinstall or not engine.installed()
         if install:
             engine.install(
-                ui, reinstall=arguments.reinstall, title=None, first=2, total=total
+                ui, reinstall=arguments.reinstall, title=None, first=first, total=total
             )
         else:
-            step = ui.step(2, total, "Check search engine")
+            step = ui.step(first, total, "Check search engine")
             step.done(f"Elasticsearch {ES_VERSION} already installed")
     ui.stream.write("\n")
     ui.line("done", "Markchain is ready", str(settings.vault.root))
@@ -395,7 +401,11 @@ def _local(arguments: argparse.Namespace, settings: Settings) -> object:
             else f"http://127.0.0.1:{settings.elasticsearch.port}"
         )
         index = stack.enter_context(
-            closing(SearchIndex(url, str(arguments.vault.resolve())))
+            closing(
+                SearchIndex(
+                    url, str(arguments.vault.resolve()), owned=engine is not None
+                )
+            )
         )
         synchronizer = Synchronizer(Documents(arguments.vault), index, settings)
         planner = Planner(synchronizer, ClaudeModel(arguments.model))

@@ -232,12 +232,14 @@ class Runtime:
     def submit_intent(self, key: str, intent: Intent) -> str:
         deadline = validate_key(key, self._secret)
         if self._planner is None:
-            raise RequestError("model planner is not configured")
+            raise RequestError("모델 실행기가 설정되지 않았습니다.")
         self.settings.check_folders(intent.folders)
         for path in intent.paths:
             self.documents.resolve(path)
             if self.settings.excluded(path):
-                raise RequestError(f"검색 제외 경로입니다: {path}", code="excluded")
+                raise RequestError(
+                    f"관리 범위 밖이거나 제외된 경로입니다: {path}", code="excluded"
+                )
         payload = _intent_payload(self._resolved(intent))
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
         return self._enqueue(key, {"intent": payload}, fingerprint, deadline)
@@ -255,12 +257,13 @@ class Runtime:
         previous = self.status(key)
         if previous.get("status") != "conflict":
             raise RequestError(
-                "충돌로 멈춘 작업만 재검토할 수 있습니다. "
-                "실패한 작업은 새 키로 다시 요청하세요"
+                "충돌로 중단된 작업만 재검토할 수 있습니다. "
+                "실패한 작업은 issue_key로 새 키를 발급받아 다시 요청하십시오."
             )
         if not previous.get("intent"):
             raise RequestError(
-                "job has no model instruction; submit a new request for current sources"
+                "모델 지시가 없는 작업은 재검토할 수 없습니다. 현재 원문 "
+                "기준으로 새로 요청하십시오."
             )
         intent = Intent.model_validate(previous["intent"])
         payload = {
@@ -283,11 +286,12 @@ class Runtime:
             self.documents.resolve(change.path)
             if not self.settings.writable(change.path):
                 raise RequestError(
-                    f"쓰기 허용 범위 밖입니다: {change.path}", code="write_denied"
+                    f"쓰기 허용 범위 밖의 경로입니다: {change.path}",
+                    code="write_denied",
                 )
             canonical = unicodedata.normalize("NFC", change.path).casefold()
             if canonical in canonical_paths:
-                raise RequestError("duplicate portable document path")
+                raise RequestError("같은 문서를 가리키는 경로가 중복되었습니다.")
             canonical_paths.add(canonical)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
@@ -300,7 +304,10 @@ class Runtime:
             previous = self.status(key)
             if previous:
                 if previous["fingerprint"] != fingerprint:
-                    raise RequestError("request key reused with different content")
+                    raise RequestError(
+                        "이미 다른 내용으로 사용된 요청 키입니다. "
+                        "issue_key로 새 키를 발급받으십시오."
+                    )
                 return "duplicate"
             request = {
                 "key": key,
@@ -313,7 +320,9 @@ class Runtime:
             self._check_capacity(request["size_bytes"])
             queue_id = self._queue.put(request)
             if queue_id is None:
-                raise RequestError("queue did not confirm persisted request")
+                raise RequestError(
+                    "요청을 큐에 저장하지 못했습니다. 잠시 후 다시 요청하십시오."
+                )
             self._pending[key] = request
             self._queue_ids[key] = int(queue_id)
         return "accepted"
@@ -324,15 +333,21 @@ class Runtime:
     def _check_capacity(self, incoming_bytes: int) -> None:
         limits = self._limits
         if len(self._pending) >= limits.pending_jobs:
-            raise RequestError("pending job limit reached; retry after completion")
+            raise RequestError(
+                "대기 중인 작업이 한도(256건)에 도달했습니다. 진행 중인 "
+                "작업이 끝난 뒤 다시 요청하십시오."
+            )
         if incoming_bytes > limits.request_bytes:
-            raise RequestError("request byte limit exceeded")
+            raise RequestError("요청 크기가 한도(2MiB)를 넘습니다.")
         pending_bytes = sum(
             item.get("size_bytes", limits.request_bytes)
             for item in self._pending.values()
         )
         if pending_bytes + incoming_bytes > limits.pending_bytes:
-            raise RequestError("pending byte limit reached")
+            raise RequestError(
+                "대기 중인 요청의 총량이 한도(64MiB)에 도달했습니다. "
+                "잠시 후 다시 요청하십시오."
+            )
         self._check_storage()
 
     # cost: time O(f), heap O(f), stack O(d), io O(f)
@@ -344,9 +359,12 @@ class Runtime:
             path.stat().st_size for path in self.state.rglob("*") if path.is_file()
         )
         if state_bytes + 8 * limits.request_bytes >= limits.state_bytes:
-            raise RequestError("state byte limit reached; cleanup is required")
+            raise RequestError(
+                "작업 기록 저장 공간이 한도에 도달했습니다. 만료 기록 "
+                "정리 후 다시 요청하십시오."
+            )
         if shutil.disk_usage(self.state).free < limits.free_bytes:
-            raise RequestError("insufficient free disk space")
+            raise RequestError("디스크 여유 공간이 부족합니다(5GiB 이상 필요).")
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = saved graph state bytes
@@ -374,7 +392,7 @@ class Runtime:
         ):
             # Waiting for an internal retry; the caller relays this to the user.
             record["error"] = (
-                f"오류로 {_RETRY_SECONDS}초 뒤 다시 시도 "
+                f"처리 중 오류가 발생해 {_RETRY_SECONDS}초 후 다시 시도합니다 "
                 f"({request['attempts']}/{self.settings.jobs.error_attempts}): "
                 f"{request.get('retry_reason', '')}"
             )
@@ -390,38 +408,50 @@ class Runtime:
             return {
                 "key": key,
                 "status": "not_found",
-                "message": "접수된 요청이 없습니다",
+                "message": "이 키로 접수된 작업이 없습니다.",
                 "next_actions": [{"tool": "request_change"}, {"tool": "collect"}],
             }
         status = state["status"]
         actions: list[dict[str, Any]]
         if status in {"queued", "planning", "running"}:
-            message = self.health() or state.get("error") or "처리 중"
+            message = self.health() or state.get("error") or "작업을 처리하고 있습니다."
             actions = [{"tool": "job_status"}, {"tool": "cancel_job"}]
         elif status == "failed":
-            message = state.get("error") or "작업이 실패했습니다"
+            message = state.get("error") or "작업이 실패했습니다."
             actions = [
                 {"tool": "issue_key", "note": "새 키 발급"},
                 {"tool": "request_change", "note": "같은 내용으로 다시 요청"},
             ]
         elif status == "conflict":
-            message = state.get("error") or "원문이 바뀌어 멈췄습니다"
+            message = state.get("error") or "원문이 변경되어 작업을 중단했습니다."
             actions = [{"tool": "read_document"}]
             if state.get("intent"):
                 actions += _resolution("reconsider")
-            if state.get("proposal"):
-                actions += _resolution("overwrite")
+            else:
+                actions += [
+                    {"tool": "issue_key", "note": "새 키 발급"},
+                    {"tool": "request_change", "note": "현재 원문 기준으로 다시 요청"},
+                ]
         elif status == "completed":
             changed = len(state.get("results", {}))
-            message = f"완료: 파일 {changed}개 반영" if changed else "완료: 변경 없음"
+            message = (
+                f"작업을 완료했습니다. 반영한 파일: {changed}개."
+                if changed
+                else "작업을 완료했습니다. 변경한 파일은 없습니다."
+            )
             actions = [{"tool": "read_document"}]
         elif status == "deferred":
-            message = "보류: " + state.get("decision", {}).get("reason", "근거 부족")
+            message = "근거가 부족해 반영을 보류했습니다: " + state.get(
+                "decision", {}
+            ).get("reason", "사유 미기재")
             actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         else:
-            message = {"cancelled": "취소됨", "expired": "만료됨"}.get(
-                status, "중단됨"
-            ) + ". 이미 반영된 파일은 results를 확인하세요"
+            message = {
+                "cancelled": "작업이 취소되었습니다.",
+                "expired": "요청 키의 유효 기간이 지나 작업을 중단했습니다.",
+            }.get(
+                status, "작업이 중단되었습니다."
+            ) + " 이미 반영된 파일은 results에서 확인하십시오."
             actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         return {**state, "message": message, "next_actions": actions}
 
@@ -515,7 +545,10 @@ class Runtime:
                     _config(key),
                     {
                         "status": "failed",
-                        "error": f"{limit}번 다시 시도했지만 실패: {reason}",
+                        "error": (
+                            f"처리 중 오류가 발생해 {limit}회 재시도했으나 "
+                            f"실패했습니다: {reason}"
+                        ),
                         "error_code": "internal",
                     },
                     as_node="apply",
@@ -565,6 +598,30 @@ class Runtime:
         self._saver.delete_thread(key)
         self._graph.update_state(_config(key), record, as_node="apply")
 
+    def _rebind(self, previous: str, identity: str) -> None:
+        """Start over for a new vault root; nothing of the old one is kept.
+
+        Jobs of the old vault cannot apply to the new one, so the queue and
+        job history are removed, and Markchain's unfinished files in the old
+        vault are cleaned up. The search index is replaced on first use.
+        """
+        logger.warning(
+            "vault changed from %s to %s; resetting jobs", previous, identity
+        )
+        old = Path(previous)
+        if old.is_dir():
+            try:
+                Documents(old).release()
+            except OSError as error:
+                logger.warning("could not clean the previous vault: %s", error)
+        shutil.rmtree(self.state / "queue", ignore_errors=True)
+        for name in ("graph.sqlite", "graph.sqlite-wal", "graph.sqlite-shm"):
+            (self.state / name).unlink(missing_ok=True)
+        (self.state / "cleaned.date").unlink(missing_ok=True)
+        temporary = self.state / "vault.path.tmp"
+        temporary.write_text(identity)
+        os.replace(temporary, self.state / "vault.path")
+
     def _finish(self, key: str, queue_id: int) -> None:
         with self._admission:
             self._queue.ack(id=queue_id)
@@ -582,8 +639,9 @@ class Runtime:
                 output.write(identity)
                 output.flush()
                 os.fsync(output.fileno())
-        if identity_path.read_text() != identity:
-            raise RequestError("runtime state belongs to a different vault")
+        previous = identity_path.read_text()
+        if previous != identity:
+            self._rebind(previous, identity)
         secret_path = self.state / "request.key"
         if not secret_path.exists():
             with secret_path.open("xb") as output:
@@ -628,7 +686,7 @@ class Runtime:
     # basis: estimate
     def _prepare(self, state: _State) -> dict[str, Any]:
         if self._planner is None:
-            raise RequestError("model planner is not configured")
+            raise RequestError("모델 실행기가 설정되지 않았습니다.")
 
         def is_cancelled() -> bool:
             return (
@@ -668,7 +726,8 @@ class Runtime:
                     > self._limits.request_bytes
                 ):
                     raise RequestError(
-                        "수정안이 요청 크기 한도를 넘습니다", code="proposal_too_large"
+                        "수정안이 요청 크기 한도(2MiB)를 넘습니다.",
+                        code="proposal_too_large",
                     )
                 self._validate_proposal(Proposal.model_validate(planned["proposal"]))
             return {
@@ -714,7 +773,7 @@ class Runtime:
     ) -> dict[str, Any]:
         """Re-plan a retryable failure with feedback, up to the configured limit."""
         attempt = int(state.get(counter, 0)) + 1  # type: ignore[call-overload]
-        label = "검토" if error.code == "review_rejected" else "모델 오류"
+        label = "검토 거절" if error.code == "review_rejected" else "모델 출력 오류"
         feedback = list(getattr(error, "issues", [str(error)]))
         if attempt < limit:
             logger.info(
@@ -728,15 +787,16 @@ class Runtime:
                 "status": "planning",
                 counter: attempt,
                 "feedback": feedback,
-                "error": f"{label}로 다시 작성 중 ({attempt}/{limit})",
+                "error": (
+                    f"{label}로 수정안을 다시 작성하고 있습니다 ({attempt}/{limit})."
+                ),
                 "error_code": error.code,
             }
         detail = feedback[-1] if feedback else str(error)
-        verb = "거절" if error.code == "review_rejected" else "실패"
         return {
             "status": "failed",
             counter: attempt,
-            "error": f"{label} {attempt}회 {verb}: {detail}",
+            "error": f"{label}로 {attempt}회 다시 작성했으나 실패했습니다: {detail}",
             "error_code": error.code,
         }
 
@@ -754,10 +814,17 @@ class Runtime:
             return {
                 "status": "planning",
                 "revision": revision,
-                "error": f"원문 변경으로 다시 시도 중 ({revision}/{limit})",
+                "error": (
+                    "원문이 변경되어 최신 원문으로 다시 계획하고 있습니다 "
+                    f"({revision}/{limit})."
+                ),
                 "error_code": "source_changed",
             }
-        prefix = "원문이 계속 바뀌어 중단" if mode == "bypass" else "원문 변경으로 중단"
+        prefix = (
+            "원문이 계속 변경되어 작업을 중단했습니다"
+            if mode == "bypass"
+            else "원문이 변경되어 작업을 중단했습니다"
+        )
         return {
             "status": "conflict",
             "error": f"{prefix}: {reason}",
@@ -803,7 +870,9 @@ class Runtime:
                         if path in targets:
                             continue
                         if self.documents.read_hash(path) != expected:
-                            raise ConflictError(f"근거 문서 변경: {path}")
+                            raise ConflictError(
+                                f"근거로 사용한 문서가 변경되었습니다: {path}"
+                            )
                     self.documents.check_proposal(proposal, cursor)
                     with self._trace.measure("apply"):
                         outcome = self.documents.apply(change)
@@ -818,7 +887,7 @@ class Runtime:
                 except RequestError as error:
                     return {
                         **self._stopped(proposal, "failed"),
-                        "error": f"반영할 수 없는 대상: {error}",
+                        "error": f"반영할 수 없는 대상입니다: {error}",
                         "error_code": "invalid_target",
                     }
                 results[change.path] = outcome

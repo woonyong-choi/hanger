@@ -16,7 +16,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from markchain.context import shape
 from markchain.errors import RequestError, SearchUnavailableError
 from markchain.model import Intent
-from markchain.requests import Change, Proposal, digest
+from markchain.requests import Change, Proposal
 from markchain.runtime import Runtime
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
@@ -130,9 +130,11 @@ class Service:
         try:
             size = len(text.encode())
         except UnicodeEncodeError as error:
-            raise RequestError("수집할 내용이 올바른 유니코드가 아닙니다") from error
+            raise RequestError(
+                "수집할 내용에 올바르지 않은 유니코드 문자가 있습니다."
+            ) from error
         if not text.strip() or size > 1024 * 1024:
-            raise RequestError("수집할 내용은 1바이트~1MiB여야 합니다")
+            raise RequestError("수집할 내용은 비어 있지 않고 1MiB 이하여야 합니다.")
         path = f"inbox/{key.split('.')[1]}.md" if "." in key else "inbox/invalid.md"
         status = self.runtime.submit(
             key, Proposal(changes=(Change(path=path, after=text),))
@@ -164,8 +166,8 @@ class Service:
             message = self.engine.message()
             if waited >= SEARCH_WAIT_SECONDS:
                 raise SearchUnavailableError(
-                    f"{message}; not ready after {SEARCH_WAIT_SECONDS}s, "
-                    "try again shortly"
+                    f"{message} {SEARCH_WAIT_SECONDS}초 안에 준비되지 않았습니다. "
+                    "잠시 후 다시 검색하십시오."
                 )
             if ctx is not None:
                 await ctx.report_progress(waited, SEARCH_WAIT_SECONDS, message)
@@ -198,7 +200,12 @@ class Service:
             folders=folders,
         )
         full, listed = shape(
-            result["documents"], {}, settings, self.synchronizer.terms(query)
+            result["documents"],
+            {},
+            settings,
+            self.synchronizer.terms(query),
+            load=self.synchronizer.read,
+            peek=self.synchronizer.peek,
         )
         return {**result, "documents": list(full.values()), "listed": listed}
 
@@ -209,11 +216,15 @@ class Service:
         """Read one local Markdown document as it is now."""
         self.touch()
         if self.synchronizer.settings.excluded(path):
-            raise RequestError(f"관리 범위 밖 문서입니다: {path}", code="excluded")
+            raise RequestError(
+                f"관리 범위 밖이거나 제외된 문서입니다: {path}", code="excluded"
+            )
         try:
             return self.synchronizer.read(path)
         except FileNotFoundError as error:
-            raise RequestError(f"문서가 없습니다: {path}", code="not_found") from error
+            raise RequestError(
+                f"문서를 찾을 수 없습니다: {path}", code="not_found"
+            ) from error
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = intent bytes
@@ -243,41 +254,23 @@ class Service:
     # vars: n = proposal and source bytes, f = modified paths
     # basis: estimate
     def resolve_conflict(
-        self, key: str, new_key: str, choice: Literal["reconsider", "overwrite"]
+        self, key: str, new_key: str, choice: Literal["reconsider"] = "reconsider"
     ) -> dict[str, str]:
-        """Re-plan from current sources, or overwrite with the saved proposal.
+        """Re-plan a job stopped by a source conflict from the current sources.
 
-        Use a fresh key from issue_key as new_key.
+        Use a fresh key from issue_key as new_key. Saved proposals are never
+        forced over newer content.
         """
         self.touch()
         state = self.runtime.status(key)
         if state.get("status") != "conflict":
             raise RequestError(
-                "충돌로 멈춘 작업만 처리할 수 있습니다. "
-                "실패한 작업은 새 키로 다시 요청하세요"
+                "충돌로 중단된 작업만 재검토할 수 있습니다. "
+                "실패한 작업은 issue_key로 새 키를 발급받아 다시 요청하십시오."
             )
-        if choice == "reconsider":
-            return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
-        if not state.get("proposal"):
-            raise RequestError(
-                "no saved proposal to overwrite; use reconsider to read current sources"
-            )
-        proposal = Proposal.model_validate(state["proposal"])
-        changes = []
-        for change in proposal.changes:
-            current = self.runtime.documents.read_hash(change.path)
-            target = None if change.after is None else digest(change.after.encode())
-            if current == target:
-                continue  # already in the proposed state
-            changes.append(Change(path=change.path, before=current, after=change.after))
-        if not changes:
-            raise RequestError(
-                "저장된 수정안이 이미 모두 반영되어 있습니다", code="already_applied"
-            )
-        return {
-            "key": new_key,
-            "status": self.runtime.submit(new_key, Proposal(changes=tuple(changes))),
-        }
+        if choice != "reconsider":
+            raise RequestError("지원하는 처리 방식은 reconsider뿐입니다.")
+        return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
 
     # cost: time O(n), heap O(n), stack O(1), io O(f), tokens O(n)
     # vars: n = work bytes over service lifetime, f = work I/O count

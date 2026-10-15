@@ -76,24 +76,31 @@ def materialize(
 ) -> dict[str, Any]:
     policy = policy or EditPolicy()
     if any(path not in sources for path in decision.sources):
-        raise RequestError("decision cited an unread source", code="model_output")
+        raise RequestError(
+            "읽지 않은 문서를 근거로 인용했습니다. 제공된 문서만 인용하십시오.",
+            code="model_output",
+        )
     for evidence in decision.evidence:
         if (
             evidence.path not in decision.sources
             or evidence.quote not in sources[evidence.path]["content"]
         ):
             raise RequestError(
-                "evidence does not match its cited source", code="model_output"
+                "인용한 문장이 해당 원문에 없습니다. 원문의 문장을 "
+                "그대로 인용하십시오.",
+                code="model_output",
             )
     if decision.action in {"keep", "defer"} and decision.changes:
         raise RequestError(
-            "keep or defer decision cannot mutate documents", code="model_output"
+            "유지·보류 판정에는 문서 변경을 포함할 수 없습니다.", code="model_output"
         )
     changes = []
     for edit in decision.changes:
         target = documents.resolve(edit.path)
         if not policy.settings.writable(edit.path):
-            raise RequestError(f"쓰기 금지 경로: {edit.path}", code="write_denied")
+            raise RequestError(
+                f"쓰기 허용 범위 밖의 경로입니다: {edit.path}", code="write_denied"
+            )
         source = sources.get(edit.path)
         if edit.operation == "create":
             if (
@@ -103,7 +110,7 @@ def materialize(
                 or edit.replacements
             ):
                 raise RequestError(
-                    "create requires a new path and complete content",
+                    "새 문서는 존재하지 않는 경로와 전체 본문이 필요합니다.",
                     code="model_output",
                 )
             after = edit.content
@@ -114,13 +121,16 @@ def materialize(
                 or edit.content is not None
             ):
                 raise RequestError(
-                    "change requires a cited current source and no full replacement",
+                    "기존 문서 수정은 읽고 인용한 원문에 대해 구간 "
+                    "교체로만 할 수 있습니다.",
                     code="model_output",
                 )
             if edit.operation == "delete":
                 if not policy.allow_delete or edit.replacements:
                     raise RequestError(
-                        f"삭제 권한 없음: {edit.path}", code="delete_denied"
+                        f"삭제가 허용되지 않은 요청입니다: {edit.path}. 삭제하려면 "
+                        "allow_delete가 필요합니다.",
+                        code="delete_denied",
                     )
                 after = None
             else:
@@ -152,7 +162,7 @@ def _replace(
 ) -> str:
     if not replacements:
         raise RequestError(
-            "replace requires at least one anchored change", code="model_output"
+            "수정에는 교체할 원문 구간이 하나 이상 필요합니다.", code="model_output"
         )
     spans = []
     changed = 0
@@ -160,7 +170,9 @@ def _replace(
         start = content.find(replacement.old)
         if start < 0 or content.find(replacement.old, start + 1) >= 0:
             raise RequestError(
-                "replacement anchor must match exactly once", code="model_output"
+                "교체할 원문 구간이 문서에서 정확히 한 번 나타나야 합니다. 앞뒤 "
+                "문장을 포함해 구간을 늘리십시오.",
+                code="model_output",
             )
         removed, inserted = _core(replacement.old, replacement.new)
         changed += max(len(removed), len(inserted))
@@ -170,7 +182,9 @@ def _replace(
             and len(inserted) > len(removed)
             and inserted.strip() in content
         ):
-            raise ReviewRejectedError([f"이미 반영된 내용을 다시 추가: {path}"])
+            raise ReviewRejectedError(
+                [f"이전 시도에서 이미 반영된 내용을 다시 추가했습니다: {path}"]
+            )
         spans.append((start, start + len(replacement.old), replacement.new))
     limit = max(
         len(content) * policy.settings.jobs.max_change_ratio, _CHANGE_FLOOR_CHARS
@@ -178,8 +192,8 @@ def _replace(
     if changed > limit and not policy.allow_rewrite:
         ratio = round(100 * changed / max(len(content), 1))
         raise RequestError(
-            f"변경량이 커서 보류: {path} ({ratio}%). "
-            "전면 수정이면 allow_rewrite를 켜세요",
+            f"변경량이 한도를 넘어 반영하지 않았습니다: {path} ({ratio}%). "
+            "전면 수정이 의도라면 allow_rewrite를 지정하십시오.",
             code="change_too_large",
         )
     spans.sort()
@@ -187,13 +201,16 @@ def _replace(
     cursor = 0
     for start, end, text in spans:
         if start < cursor:
-            raise RequestError("replacement ranges overlap", code="model_output")
+            raise RequestError(
+                "교체 구간이 서로 겹칩니다. 겹치지 않게 나누십시오.",
+                code="model_output",
+            )
         pieces.extend((content[cursor:start], text))
         cursor = end
     pieces.append(content[cursor:])
     result = "".join(pieces)
     if result == content:
-        raise RequestError("replacement must change the document", code="model_output")
+        raise RequestError("교체 결과가 원문과 같습니다.", code="model_output")
     return result
 
 

@@ -15,6 +15,7 @@ from elasticsearch import ApiError, BadRequestError
 from elasticsearch.helpers import BulkIndexError
 
 from markchain.config import Settings
+from markchain.context import snippets
 from markchain.documents import Documents
 from markchain.errors import ConflictError, RequestError, SearchUnavailableError
 from markchain.requests import digest
@@ -142,7 +143,7 @@ class Synchronizer:
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         if not query.strip() or not 1 <= limit <= 100:
-            raise RequestError("query and a limit between 1 and 100 are required")
+            raise RequestError("검색어가 필요하며 limit은 1에서 100 사이여야 합니다.")
         scope = SearchScope(folders)
         self.settings.check_folders(scope.folders)
         with self._writer:
@@ -164,10 +165,13 @@ class Synchronizer:
                     )
             except BadRequestError as error:
                 raise RequestError(
-                    "검색 요청이 거부됐습니다. 질의나 범위를 좁혀 주세요"
+                    "검색 서버가 요청을 거부했습니다. 질의나 폴더 범위를 "
+                    "좁혀 다시 검색하십시오."
                 ) from error
             except (TransportError, ApiError, BulkIndexError) as error:
-                raise SearchUnavailableError("search engine not responding") from error
+                raise SearchUnavailableError(
+                    "검색 서버가 응답하지 않습니다."
+                ) from error
             return {
                 "source": "elasticsearch",
                 "documents": results,
@@ -223,17 +227,17 @@ class Synchronizer:
         target = self.documents.resolve(path)
         before = _signature(target)
         if target.stat().st_size > MAX_DOCUMENT_BYTES:
-            raise RequestError(f"document exceeds size limit: {path}")
+            raise RequestError(f"문서가 크기 한도(2MiB)를 넘습니다: {path}")
         with target.open("rb") as source:
             data = source.read(MAX_DOCUMENT_BYTES + 1)
         self.read_count += 1
         self.read_bytes += len(data)
         if len(data) > MAX_DOCUMENT_BYTES or _signature(target) != before:
-            raise ConflictError(f"document changed while reading: {path}")
+            raise ConflictError(f"읽는 도중 문서가 변경되었습니다: {path}")
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise RequestError(f"document is not utf-8: {path}") from error
+            raise RequestError(f"UTF-8 문서가 아닙니다: {path}") from error
         title = next(
             (
                 line.lstrip("# ")
@@ -284,22 +288,43 @@ class Synchronizer:
     # basis: estimate
     def _read_hits(
         self, hits: list[dict[str, Any]], scope: SearchScope
-    ) -> tuple[list[dict[str, str]], list[str]]:
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Check each hit against the file on disk without reading it.
+
+        A hit is current when the file's identity, size and timestamps match
+        what was indexed. Bodies are read later, only for the documents that
+        are returned in full, and always from disk.
+        """
         results, stale = [], []
         for hit in hits:
             if not scope.contains(hit["path"]):
-                raise RequestError(
-                    "search returned a document outside requested folders"
-                )
+                raise RequestError("검색 결과에 요청 범위 밖 문서가 포함되었습니다.")
             try:
-                current = self.read(hit["path"])
-                if current["hash"] == hit["hash"]:
-                    results.append(current)
-                else:
-                    stale.append(hit["path"])
-            except (OSError, RequestError, ConflictError):
+                target = self.documents.resolve(hit["path"])
+                signature = _signature(target)
+            except (OSError, RequestError):
                 stale.append(hit["path"])
+                continue
+            if signature != hit.get("signature"):
+                stale.append(hit["path"])
+                continue
+            results.append(
+                {
+                    "path": hit["path"],
+                    "title": hit.get("title") or target.stem,
+                    "bytes": target.stat().st_size,
+                }
+            )
         return results, stale
+
+    # cost: time O(n), heap O(w), stack O(1), io O(n)
+    # vars: n = bytes read until enough matched lines, w = longest line
+    # basis: estimate
+    def peek(self, path: str, terms: list[str]) -> list[str]:
+        """Return a few matched lines, reading only as far as needed."""
+        target = self.documents.resolve(path)
+        with target.open("r", encoding="utf-8", errors="replace") as source:
+            return snippets(source, terms)
 
 
 # cost: time O(1), heap O(1), stack O(1), io 1

@@ -85,7 +85,9 @@ class ClaudeModel:
         self, prompt: str, is_cancelled: Callable[[], bool], schema: type[BaseModel]
     ) -> dict[str, Any]:
         if is_cancelled():
-            raise ConflictError("model call invalidated or cancelled")
+            raise ConflictError(
+                "원문이 변경되었거나 작업이 취소되어 모델 호출을 중단했습니다."
+            )
         command = [
             "claude",
             "--safe-mode",
@@ -119,9 +121,12 @@ class ClaudeModel:
             try:
                 while True:
                     if is_cancelled():
-                        raise ConflictError("model call invalidated or cancelled")
+                        raise ConflictError(
+                            "원문이 변경되었거나 작업이 취소되어 모델 호출을 "
+                            "중단했습니다."
+                        )
                     if time.monotonic() >= deadline:
-                        raise ModelError("모델 응답 시간 초과")
+                        raise ModelError("모델 응답이 제한 시간을 넘었습니다.")
                     try:
                         output, _ = process.communicate(pending, timeout=0.2)
                         break
@@ -136,14 +141,16 @@ class ClaudeModel:
                         process.kill()
                         process.communicate()
         if process.returncode != 0:
-            raise ModelError(f"모델 실행 실패 (종료 코드 {process.returncode})")
+            raise ModelError(
+                f"모델 실행에 실패했습니다(종료 코드 {process.returncode})."
+            )
         try:
             envelope = json.loads(output)
             if envelope.get("is_error"):
-                raise ModelError("모델이 오류를 반환했습니다")
+                raise ModelError("모델이 오류를 반환했습니다.")
             value = schema.model_validate(envelope.get("structured_output"))
         except (ValueError, ValidationError, AttributeError) as error:
-            raise ModelError("모델 출력 형식 오류") from error
+            raise ModelError("모델 출력이 정해진 형식과 맞지 않습니다.") from error
         return {"value": value.model_dump(), "usage": envelope.get("usage")}
 
 
@@ -177,7 +184,7 @@ class Planner:
                 metrics["source"] = str(search.get("source", "unknown"))
                 metrics["reason"] = str(search.get("reason", "ranked"))
                 metrics["source_bytes"] = sum(
-                    len(doc["content"].encode()) for doc in search["documents"]
+                    doc["bytes"] for doc in search["documents"]
                 )
         required: dict[str, dict[str, Any]] = {}
         applied = previous.get("applied", {}) if previous else {}
@@ -187,7 +194,7 @@ class Planner:
             except FileNotFoundError as error:
                 if path not in applied or applied[path] is not None:
                     raise RequestError(
-                        f"입력 문서가 없습니다: {path}", code="input_missing"
+                        f"입력 문서를 찾을 수 없습니다: {path}", code="input_missing"
                     ) from error
         if previous:
             for change in previous.get("proposal", {}).get("changes", []):
@@ -196,7 +203,14 @@ class Planner:
                 except FileNotFoundError:
                     required.pop(change["path"], None)
         terms = self.synchronizer.terms(intent.query)
-        documents, listed = shape(search["documents"], required, settings, terms)
+        documents, listed = shape(
+            search["documents"],
+            required,
+            settings,
+            terms,
+            load=self.synchronizer.read,
+            peek=self.synchronizer.peek,
+        )
         context = {
             "request": intent.model_dump(mode="json"),
             "documents": documents,
