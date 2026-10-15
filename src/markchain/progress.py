@@ -94,7 +94,9 @@ class Step:
         self._drawn = 0.0
         self._decile = -1
         self._finished = threading.Event()
-        self._bar = False
+        # Latest bar text; the spinner thread redraws it at a steady rate so
+        # the spinner keeps turning between slow progress reports.
+        self._detail: str | None = None
         self._spinner: threading.Thread | None = None
         if progress.tty:
             self._spinner = threading.Thread(target=self._spin, daemon=True)
@@ -103,10 +105,11 @@ class Step:
     def _spin(self) -> None:
         frame = 0
         while not self._finished.wait(_REFRESH_SECONDS):
-            if self._bar:
-                continue
-            elapsed = _duration(time.monotonic() - self.started)
-            self._live(_FRAMES[frame % len(_FRAMES)], self.progress.style(elapsed, "2"))
+            detail = self._detail
+            if detail is None:
+                elapsed = _duration(time.monotonic() - self.started)
+                detail = self.progress.style(elapsed, "2")
+            self._live(_FRAMES[frame % len(_FRAMES)], detail)
             frame += 1
 
     def _live(self, kind: str, detail: str) -> None:
@@ -142,7 +145,6 @@ class Step:
                 )
                 self.progress.stream.flush()
             return
-        self._bar = True
         elapsed = max(now - self.started, 1e-6)
         rate = done / elapsed
         rate_text = (
@@ -167,8 +169,7 @@ class Step:
         bar_width = max(10, min(_BAR, width - fixed - len(tail) - 4))
         filled = int(ratio * bar_width)
         bar = "█" * filled + "░" * (bar_width - filled)
-        frame = _FRAMES[int(elapsed / _REFRESH_SECONDS) % len(_FRAMES)]
-        self._live(frame, f"{self.progress.style(bar, '36')}  {tail}")
+        self._detail = f"{self.progress.style(bar, '36')}  {tail}"
 
     def _stop(self) -> None:
         with self.progress.lock:
