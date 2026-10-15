@@ -1,5 +1,6 @@
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,22 @@ def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
     try:
         asyncio.run(_scenario(root, tmp_path / "state", url))
     finally:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "markchain.cli",
+                "--vault",
+                str(root),
+                "--state",
+                str(tmp_path / "state"),
+                "--search-url",
+                url,
+                "stop",
+            ],
+            check=False,
+            timeout=120,
+        )
         index = SearchIndex(url, str(root))
         index.client.options(ignore_status=404).indices.delete(index=index.name)
         index.close()
@@ -55,7 +72,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         unused = await session.call_tool("job_status", {"key": key})
         assert unused.structuredContent is not None
         assert unused.structuredContent["status"] == "not_found"
-        assert "collect" in unused.structuredContent["next_actions"]
+        assert {"tool": "collect"} in unused.structuredContent["next_actions"]
         invalid = await session.call_tool("job_status", {"key": "unknown"})
         assert invalid.isError
         collected = await session.call_tool(
@@ -63,7 +80,9 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         )
         assert not collected.isError
         status = await _completed(session, key)
-        assert status["message"] and status["next_actions"] == ["read_document"]
+        assert status["message"] and status["next_actions"] == [
+            {"tool": "read_document"}
+        ]
         result = await session.call_tool("search_documents", {"query": "결제"})
         assert result.structuredContent is not None
         assert (

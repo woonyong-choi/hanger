@@ -4,7 +4,6 @@ __all__ = ["Synchronizer"]
 
 import os
 import threading
-import time
 from collections import deque
 from collections.abc import Callable, Iterator
 from itertools import batched
@@ -14,25 +13,33 @@ from typing import Any, Literal
 from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
 
+from markchain.config import Settings
 from markchain.documents import Documents
-from markchain.errors import ConflictError, RequestError
+from markchain.errors import ConflictError, RequestError, SearchUnavailableError
 from markchain.requests import digest
 from markchain.scope import SearchScope
 from markchain.search import SearchIndex
 
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
-_EXCLUDED = {"tooling", "agent", "node_modules", "AGENTS.md", "CLAUDE.md"}
 
 
 class Synchronizer:
-    def __init__(self, documents: Documents, index: SearchIndex) -> None:
+    def __init__(
+        self,
+        documents: Documents,
+        index: SearchIndex,
+        settings: Settings | None = None,
+    ) -> None:
         self.documents = documents
+        self.settings = settings or Settings()
         self.index = index
         self.read_count = 0
         self.read_bytes = 0
         self.diagnostics: deque[dict[str, str]] = deque(maxlen=100)
         self._writer = threading.RLock()
         self._retry_paths: set[str] = set()
+        # Until one full reconcile finishes, the index may miss files.
+        self.reconciled = False
 
     # cost: time O(f+n), heap O(b), stack O(d), io O(f+n/b)
     # vars: f = file count, n = changed bytes, b = batch bytes, d = directory depth
@@ -61,11 +68,12 @@ class Synchronizer:
                         exists = self.documents.resolve(path).is_file()
                     except RequestError:
                         exists = False
-                    if not _included(path) or not exists:
+                    if not self._included(path) or not exists:
                         removed.append({"path": path})
                 self.index.write(removed)
         with self._writer:
             self.index.refresh()
+            self.reconciled = True
             return {
                 "checked": checked,
                 "read": self.read_count - reads,
@@ -77,9 +85,19 @@ class Synchronizer:
     # basis: estimate
     def sync_paths(self, paths: list[str], *, force: bool = False) -> None:
         with self._writer:
-            selected = [p for p in paths if _included(p)]
+            selected = [p for p in paths if self._included(p)]
             previous = self.index.metadata(selected)
             self.index.write(self._updates(selected, previous, force=force))
+
+    def _included(self, path: str) -> bool:
+        return path.lower().endswith(".md") and not self.settings.excluded(path)
+
+    def terms(self, query: str) -> list[str]:
+        """Return query terms as the index analyzes them, for matched lines."""
+        try:
+            return self.index.analyze(query)
+        except (TransportError, ApiError):
+            return sorted(set(query.casefold().split()), key=len, reverse=True)
 
     def drain_retries(self) -> list[str]:
         with self._writer:
@@ -109,67 +127,55 @@ class Synchronizer:
             self.index.save_audit_cursor(selected[-1]["path"] if selected else "")
             return {"checked": len(selected), "read": self.read_count - reads}
 
-    # cost: time O(n), heap O(k), stack O(d), io O(f)
-    # vars: n = selected bytes or fallback corpus bytes, k = result bytes
-    # vars: f = files read, d = directory depth
+    # cost: time O(k+f), heap O(k), stack O(d), io O(k+f)
+    # vars: k = result bytes, f = scoped files checked when evidence is missing
+    # vars: d = directory depth
     # basis: estimate
     def search(
         self,
         query: str,
         limit: int = 20,
         *,
-        fallback_offset: int = 0,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        if not query.strip() or not 1 <= limit <= 100 or fallback_offset < 0:
+        if not query.strip() or not 1 <= limit <= 100:
             raise RequestError("query and a limit between 1 and 100 are required")
-        reason = "no_hits"
         scope = SearchScope(folders)
+        self.settings.check_folders(scope.folders)
         with self._writer:
             try:
-                hits = self.index.find(query, limit, folders=scope.folders)
-                results, stale = self._read_hits(hits, scope)
+                if fallback_reason is not None or not self.reconciled:
+                    # Missing evidence or a fresh index: sync the scope first.
+                    self.index.ensure()
+                    for batch in batched(self.paths(scope.folders), 256):
+                        self.sync_paths(list(batch))
+                    self.index.refresh()
+                results, stale = self._read_hits(
+                    self.index.find(query, limit, folders=scope.folders), scope
+                )
                 if stale:
                     self.sync_paths(stale, force=True)
                     self.index.refresh()
                     results, stale = self._read_hits(
                         self.index.find(query, limit, folders=scope.folders), scope
                     )
-                if (
-                    results
-                    and not stale
-                    and fallback_offset == 0
-                    and fallback_reason is None
-                ):
-                    return {
-                        "source": "elasticsearch",
-                        "documents": results,
-                        "candidate_limit": limit,
-                        "coverage": "ranked_candidates",
-                        "folders": list(scope.folders),
-                    }
-                reason = fallback_reason or ("stale_results" if stale else "no_hits")
             except BadRequestError as error:
                 raise RequestError(
-                    "search rejected the request; narrow the query or scope"
+                    "검색 요청이 거부됐습니다. 질의나 범위를 좁혀 주세요"
                 ) from error
-            except (TransportError, ApiError):
-                reason = "search_unavailable"
-            fallback = self._local_search(query, limit, fallback_offset, scope)
-            results = fallback["documents"]
-            if results and reason != "search_unavailable":
-                self.sync_paths([r["path"] for r in results], force=True)
-                self.index.refresh()
+            except (TransportError, ApiError) as error:
+                raise SearchUnavailableError("검색 서버 응답 없음") from error
             return {
-                "source": "local_fallback",
-                "reason": reason,
-                **fallback,
-                "diagnostics": [
-                    d for d in self.diagnostics if scope.contains(d["path"])
-                ],
+                "source": "elasticsearch",
+                "documents": results,
+                "candidate_limit": limit,
+                "coverage": "ranked_candidates",
+                "reason": fallback_reason or "ranked",
+                "unverified": stale,
                 "folders": list(scope.folders),
+                "excluded_names": list(self.settings.vault.exclude),
             }
 
     # cost: time O(f), heap O(w), stack O(d), io O(f)
@@ -184,8 +190,7 @@ class Synchronizer:
                 [
                     d
                     for d in directories
-                    if not d.startswith(".")
-                    and d not in _EXCLUDED
+                    if not self.settings.excluded(d)
                     and not (Path(parent) / d).is_symlink()
                     and scope.can_descend(
                         (Path(parent) / d).relative_to(self.documents.root).as_posix()
@@ -195,7 +200,7 @@ class Synchronizer:
             for name in sorted(files):
                 path = (Path(parent) / name).relative_to(self.documents.root).as_posix()
                 if (
-                    _included(path)
+                    self._included(path)
                     and scope.contains(path)
                     and not (Path(parent) / name).is_symlink()
                 ):
@@ -297,49 +302,6 @@ class Synchronizer:
             except (OSError, RequestError, ConflictError):
                 stale.append(hit["path"])
         return results, stale
-
-    # cost: time O(n), heap O(k), stack O(d), io O(f)
-    # vars: n = corpus bytes, k = bounded result bytes, f = files, d = depth
-    # basis: estimate
-    def _local_search(
-        self, query: str, limit: int, offset: int, scope: SearchScope
-    ) -> dict[str, Any]:
-        terms = query.casefold().split()
-        results: list[dict[str, str]] = []
-        deadline, initial_bytes = time.monotonic() + 5, self.read_bytes
-        for number, path in enumerate(self.paths(scope.folders)):
-            if number < offset:
-                continue
-            if (
-                time.monotonic() >= deadline
-                or self.read_bytes - initial_bytes >= 8 * 1024 * 1024
-            ):
-                return {"documents": results, "complete": False, "next_offset": number}
-            try:
-                document = self.read(path)
-            except (OSError, RequestError, ConflictError) as error:
-                self.diagnostics.append({"path": path, "reason": str(error)})
-                continue
-            if any(term in document["content"].casefold() for term in terms):
-                results.append(document)
-                if len(results) == limit:
-                    return {
-                        "documents": results,
-                        "complete": False,
-                        "next_offset": number + 1,
-                    }
-        return {
-            "documents": results,
-            "complete": not any(scope.contains(d["path"]) for d in self.diagnostics),
-            "next_offset": None,
-        }
-
-
-def _included(path: str) -> bool:
-    parts = Path(path).parts
-    return path.lower().endswith(".md") and not any(
-        p.startswith(".") or p in _EXCLUDED for p in parts
-    )
 
 
 # cost: time O(1), heap O(1), stack O(1), io 1

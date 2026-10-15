@@ -215,14 +215,14 @@ def test_retry_limit_survives_restart_and_allows_other_work(
         result = runtime.run_next()
         assert result is not None and result["status"] == "completed"
         assert (root / "b.md").read_text() == "independent"
-    for delay in (3, 11):
-        clock += delay
-        with Runtime(root, state) as runtime, pytest.raises(OSError, match="synthetic"):
-            runtime.run_next()
-    clock += 31
+    clock += 3
+    with Runtime(root, state) as runtime, pytest.raises(OSError, match="synthetic"):
+        runtime.run_next()
+    clock += 11
     with Runtime(root, state) as runtime:
         result = runtime.run_next()
         assert result is not None and result["status"] == "failed"
-        assert "retry limit" in result["error"]
+        assert result["error"].startswith("처리 오류 3회")
+        assert result["error_code"] == "internal"
         assert runtime.run_next() is None
         assert not (root / "a.md").exists()

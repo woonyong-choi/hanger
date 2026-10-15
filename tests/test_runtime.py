@@ -95,8 +95,9 @@ def test_apply_modified_source_stops_without_overwrite(
         assert result is not None and result["status"] == "conflict"
         assert target.read_text() == "user change"
         status = runtime.describe(key)
-        assert "overwrite" in status["next_actions"]
-        assert "reconsider" not in status["next_actions"]
+        choices = [a.get("args", {}).get("choice") for a in status["next_actions"]]
+        assert "overwrite" in choices
+        assert "reconsider" not in choices
         with pytest.raises(RequestError, match="no model instruction"):
             runtime.reconsider(key, runtime.issue_key())
 
@@ -197,6 +198,8 @@ def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None
         str(paths[0]),
         "--state",
         str(paths[1]),
+        "--search-url",
+        "http://127.0.0.1:19200",
     ]
     key_result = subprocess.run(
         [*base, "key"], capture_output=True, check=True, timeout=30
