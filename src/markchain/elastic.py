@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__all__ = ["ElasticManager", "ES_VERSION"]
+__all__ = ["ES_VERSION", "INSTALL_STEPS", "ElasticManager"]
 
 import hashlib
 import json
@@ -30,6 +30,7 @@ from markchain.progress import Progress, Step
 logger = logging.getLogger(__name__)
 
 ES_VERSION = "9.5.1"
+INSTALL_STEPS = 5
 _BASE = "https://artifacts.elastic.co/downloads"
 _ARCHIVES = {
     ("darwin", "arm64"): (
@@ -154,7 +155,9 @@ class ElasticManager:
         progress: Progress | None = None,
         *,
         reinstall: bool = False,
-        title: str = "Markchain search engine setup",
+        title: str | None = "Markchain search engine setup",
+        first: int = 1,
+        total: int = INSTALL_STEPS,
     ) -> Path:
         """Download, verify and unpack the pinned server once per version.
 
@@ -169,7 +172,7 @@ class ElasticManager:
             if marker.exists() and not reinstall:
                 return self.home
             suffix, checksum = _archive()
-            if progress is not None:
+            if progress is not None and title:
                 progress.title(
                     title,
                     f"Elasticsearch {ES_VERSION} ({suffix}) + Nori Korean analyzer",
@@ -178,7 +181,7 @@ class ElasticManager:
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir()
             try:
-                self._install_into(work, suffix, checksum, progress)
+                self._install_into(work, suffix, checksum, progress, first - 1, total)
             except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
                 raise MarkchainError(
                     f"Search engine install failed: {error}", code="search_install"
@@ -192,15 +195,21 @@ class ElasticManager:
     # vars: a = archive bytes
     # basis: estimate
     def _install_into(
-        self, work: Path, suffix: str, checksum: str, progress: Progress | None
+        self,
+        work: Path,
+        suffix: str,
+        checksum: str,
+        progress: Progress | None,
+        offset: int,
+        steps: int,
     ) -> None:
-        steps = 5
-
         def step(
             index: int, label: str, status: str, unit: str = "bytes"
         ) -> Step | None:
             self._set("installing", status)
-            return progress.step(index, steps, label, unit) if progress else None
+            if progress is None:
+                return None
+            return progress.step(offset + index, steps, label, unit)
 
         archive = work / "elasticsearch.tar.gz"
         nori = work / "analysis-nori.zip"
@@ -269,7 +278,6 @@ class ElasticManager:
         extracted.rename(self.home)
         if current:
             current.done("analysis-nori")
-            progress.note(f"Ready: {self.home}")  # type: ignore[union-attr]
 
     # -- process ---------------------------------------------------------------
 

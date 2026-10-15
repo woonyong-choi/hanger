@@ -28,7 +28,7 @@ def test_three_invalid_vaults_abort(tmp_path: Path) -> None:
     out = io.StringIO()
     with pytest.raises(SetupAbortedError, match="3 attempts"):
         run_setup(config, Settings(), source=answers, out=out)
-    assert out.getvalue().count("Vault root folder") == 3
+    assert out.getvalue().count("?    Vault root folder") == 3
     assert "2 attempts left" in out.getvalue()
     assert not config.exists()
 
@@ -37,7 +37,7 @@ def test_three_invalid_vaults_abort(tmp_path: Path) -> None:
 def test_folder_selection_is_saved_and_applied(tmp_path: Path) -> None:
     vault = _vault(tmp_path / "vault")
     config = tmp_path / "state" / "config.toml"
-    answers = io.StringIO(f"/missing\n{vault}\n1\n\n")
+    answers = io.StringIO(f"/missing\n{vault}\n1\n\n\n")
     out = io.StringIO()
     settings = run_setup(config, Settings(), source=answers, out=out)
     text = out.getvalue()
@@ -59,12 +59,12 @@ def test_rerun_keeps_previous_answers(tmp_path: Path) -> None:
     vault = _vault(tmp_path / "vault")
     config = tmp_path / "state" / "config.toml"
     first = run_setup(
-        config, Settings(), source=io.StringIO(f"{vault}\n3\n\n"), out=io.StringIO()
+        config, Settings(), source=io.StringIO(f"{vault}\n3\n\n\n"), out=io.StringIO()
     )
     out = io.StringIO()
-    second = run_setup(config, first, source=io.StringIO("\n\n"), out=out)
+    second = run_setup(config, first, source=io.StringIO("\n\n\n"), out=out)
     assert second.vault.managed == first.vault.managed == ("career", "docs")
-    assert f"[{vault.resolve()}]" in out.getvalue()
+    assert f"({vault.resolve()})" in out.getvalue()
 
 
 # cli: commands without a configured vault point to setup.
@@ -75,3 +75,24 @@ def test_cli_requires_setup_or_vault(
     assert "markchain setup" in capsys.readouterr().err
     assert main(["--state", str(tmp_path / "s"), "config"]) == 0
     assert "Run: markchain setup" in capsys.readouterr().out
+
+
+# setup: declining the confirmation saves nothing.
+def test_declined_confirmation_saves_nothing(tmp_path: Path) -> None:
+    vault = _vault(tmp_path / "vault")
+    config = tmp_path / "state" / "config.toml"
+    with pytest.raises(SetupAbortedError, match="cancelled"):
+        run_setup(
+            config, Settings(), source=io.StringIO(f"{vault}\n\nn\n"), out=io.StringIO()
+        )
+    assert not config.exists()
+
+
+# setup: choosing every folder stores an empty list so new folders are included.
+def test_all_folders_means_future_folders_too(tmp_path: Path) -> None:
+    vault = _vault(tmp_path / "vault")
+    config = tmp_path / "state" / "config.toml"
+    settings = run_setup(
+        config, Settings(), source=io.StringIO(f"{vault}\n\n\n"), out=io.StringIO()
+    )
+    assert settings.vault.managed == ()

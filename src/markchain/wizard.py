@@ -1,8 +1,8 @@
-"""Interactive first-run setup: vault root, managed folders, then install."""
+"""Interactive setup questions: vault root, managed folders, confirmation."""
 
 from __future__ import annotations
 
-__all__ = ["SetupAbortedError", "choose_folders", "edit_command", "run_setup"]
+__all__ = ["SetupAbortedError", "edit_command", "run_setup"]
 
 import os
 import shlex
@@ -12,21 +12,15 @@ from pathlib import Path
 from typing import TextIO
 
 from markchain.config import Settings, dump_settings
+from markchain.progress import Progress
 
 _ATTEMPTS = 3
 _WINDOW = 15
+_ALL = "All folders"
 
 
 class SetupAbortedError(Exception):
     """The user cancelled setup or gave no usable answer."""
-
-
-class _Style:
-    def __init__(self, stream: TextIO) -> None:
-        self.tty = stream.isatty() and "NO_COLOR" not in os.environ
-
-    def __call__(self, text: str, code: str) -> str:
-        return f"\033[{code}m{text}\033[0m" if self.tty else text
 
 
 def _notes(folder: Path) -> int:
@@ -35,6 +29,10 @@ def _notes(folder: Path) -> int:
         directories[:] = [d for d in directories if not d.startswith(".")]
         count += sum(1 for name in files if name.lower().endswith(".md"))
     return count
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count:,} {word}" + ("" if count == 1 else "s")
 
 
 def edit_command(config: Path) -> str:
@@ -46,44 +44,204 @@ def edit_command(config: Path) -> str:
     return f"nano {shlex.quote(str(config))}"
 
 
-# cost: time O(a), heap O(1), stack O(1), io O(a)
-# vars: a = answers read, at most three
-# basis: estimate
-def _ask_vault(
-    ask: Callable[[str], str],
-    out: TextIO,
-    style: _Style,
-    default: str | None,
-) -> Path:
-    for attempt in range(1, _ATTEMPTS + 1):
-        hint = f" [{default}]" if default else ""
-        answer = ask(f"  Vault root folder{hint}: ").strip() or (default or "")
-        if not answer:
-            problem = "a path is required"
-        else:
-            path = Path(answer).expanduser()
-            if path.is_dir() and os.access(path, os.R_OK | os.W_OK | os.X_OK):
-                return path.resolve()
-            problem = "not readable and writable" if path.is_dir() else "no such folder"
-        left = _ATTEMPTS - attempt
-        if left:
-            out.write(
-                "  "
-                + style(f"{problem}: {answer or '(empty)'}", "31")
-                + style(f"  ({left} attempt{'s' if left > 1 else ''} left)", "2")
-                + "\n"
+class _Questions:
+    def __init__(self, ui: Progress, source: TextIO) -> None:
+        self.ui = ui
+        self.source = source
+        self.interactive = source.isatty() and ui.tty
+
+    def ask(self, label: str, default: str | None = None) -> str:
+        hint = " " + self.ui.style(f"({default})", "2") if default else ""
+        self.ui.stream.write(
+            f"  {self.ui.mark('ask')}{self.ui.style(label, '1')}{hint}: "
+        )
+        self.ui.stream.flush()
+        line = self.source.readline()
+        if not line:
+            raise SetupAbortedError("Setup cancelled (no input)")
+        if self.ui.tty:
+            # Replace the prompt with its result line.
+            self.ui.stream.write("\033[1A\r\033[2K")
+        return line.rstrip("\n").strip() or (default or "")
+
+    # cost: time O(a), heap O(1), stack O(1), io O(a)
+    # vars: a = answers read, at most three
+    # basis: estimate
+    def vault(self, default: str | None) -> Path:
+        label = "Vault root folder"
+        for attempt in range(1, _ATTEMPTS + 1):
+            answer = self.ask(label, default)
+            path = Path(answer).expanduser() if answer else None
+            if (
+                path is not None
+                and path.is_dir()
+                and os.access(path, os.R_OK | os.W_OK)
+            ):
+                resolved = path.resolve()
+                self.ui.line("done", label, str(resolved))
+                return resolved
+            if not answer:
+                problem = "a path is required"
+            elif path is not None and path.is_dir():
+                problem = "not readable and writable"
+            else:
+                problem = "no such folder"
+            left = _ATTEMPTS - attempt
+            remain = (
+                f"  ({left} attempt{'s' if left != 1 else ''} left)" if left else ""
             )
-    raise SetupAbortedError(f"No valid vault folder after {_ATTEMPTS} attempts")
+            self.ui.line(
+                "fail",
+                label,
+                f"{answer or '(empty)'}  {problem}{self.ui.style(remain, '2')}",
+            )
+        raise SetupAbortedError(f"No valid vault folder after {_ATTEMPTS} attempts")
+
+    def confirm(self, label: str) -> bool:
+        answer = self.ask(label + " (Y/n)").lower()
+        return answer in {"", "y", "yes"}
+
+    def folders(self, root: Path, current: Sequence[str]) -> list[str]:
+        names = sorted(
+            entry.name
+            for entry in root.iterdir()
+            if entry.is_dir()
+            and not entry.name.startswith(".")
+            and not entry.is_symlink()
+        )
+        if not names:
+            self.ui.line("done", "Managed folders", "entire vault (no subfolders)")
+            return []
+        counts = [_notes(root / name) for name in names]
+        selected = [not current or name in current for name in names]
+        if self.interactive:
+            selected = self._select_keys(names, counts, selected)
+        else:
+            selected = self._select_lines(names, counts, selected)
+        chosen = [n for n, keep in zip(names, selected, strict=True) if keep]
+        everything = len(chosen) == len(names)
+        shown = (
+            "all, including folders added later" if everything else ", ".join(chosen)
+        )
+        self.ui.line(
+            "done",
+            "Managed folders",
+            f"{shown}  " + self.ui.style(f"({len(chosen)} of {len(names)})", "2"),
+        )
+        # An empty list means every top-level folder, now and later.
+        return [] if everything else chosen
+
+    def _row(self, *, pointer: bool, checked: bool, name: str, count: int) -> str:
+        ui = self.ui
+        mark = ui.style("[x]", "32") if checked else ui.style("[ ]", "2")
+        arrow = ui.style(">", "36") if pointer else " "
+        label = f"{name:<28}"
+        label = ui.style(label, "1") if pointer else label
+        return f"       {arrow} {mark} {label} {ui.style(_plural(count, 'note'), '2')}"
+
+    # cost: time O(k*f), heap O(f), stack O(1)
+    # vars: k = key presses, f = folders shown
+    # basis: estimate
+    def _select_keys(
+        self, names: list[str], counts: list[int], selected: list[bool]
+    ) -> list[bool]:
+        import termios
+        import tty
+
+        ui, out = self.ui, self.ui.stream
+        rows = [_ALL, *names]
+        totals = [sum(counts), *counts]
+        cursor, top, drawn = 0, 0, 0
+        descriptor = self.source.fileno()
+        saved = termios.tcgetattr(descriptor)
+        header = f"  {ui.mark('ask')}{ui.style('Managed folders', '1')}  " + ui.style(
+            "↑/↓ move   ←/→ select   enter confirm   q quit", "2"
+        )
+        try:
+            tty.setraw(descriptor)
+            out.write("\033[?25l" + header + "\r\n")
+            drawn = 1
+            while True:
+                if drawn > 1:
+                    out.write(f"\033[{drawn - 1}A")
+                top = min(max(top, cursor - _WINDOW + 1), cursor)
+                visible = range(top, min(len(rows), top + _WINDOW))
+                lines = [
+                    self._row(
+                        pointer=index == cursor,
+                        checked=all(selected) if index == 0 else selected[index - 1],
+                        name=rows[index],
+                        count=totals[index],
+                    )
+                    for index in visible
+                ]
+                more = (
+                    f"  showing {visible.start + 1}-{visible.stop} of {len(rows)}"
+                    if len(rows) > _WINDOW
+                    else ""
+                )
+                summary = f"{sum(selected)} of {len(names)} selected{more}"
+                lines.append("       " + ui.style(summary, "2"))
+                for line in lines:
+                    out.write("\r\033[2K" + line + "\r\n")
+                drawn = 1 + len(lines)
+                out.flush()
+                key = _read_key(descriptor)
+                if key == "up":
+                    cursor = (cursor - 1) % len(rows)
+                elif key == "down":
+                    cursor = (cursor + 1) % len(rows)
+                elif key in {"select", "clear"}:
+                    state = key == "select"
+                    if cursor == 0:
+                        selected = [state] * len(names)
+                    else:
+                        selected[cursor - 1] = state
+                elif key == "quit":
+                    raise SetupAbortedError("Setup cancelled")
+                elif key == "enter" and any(selected):
+                    return selected
+        finally:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+            # Collapse the list; the caller prints a one-line result.
+            out.write(f"\033[{drawn}A\r\033[J\033[?25h")
+            out.flush()
+
+    def _select_lines(
+        self, names: list[str], counts: list[int], selected: list[bool]
+    ) -> list[bool]:
+        out = self.ui.stream
+        while True:
+            out.write(f"  {'0':>3}. [{'x' if all(selected) else ' '}] {_ALL}\n")
+            for index, name in enumerate(names, start=1):
+                mark = "x" if selected[index - 1] else " "
+                note = _plural(counts[index - 1], "note")
+                out.write(f"  {index:>3}. [{mark}] {name:<28} {note}\n")
+            out.write("  Numbers to select or clear (0 for all), Enter to confirm: ")
+            out.flush()
+            line = self.source.readline()
+            if not line:
+                raise SetupAbortedError("Setup cancelled (no input)")
+            tokens = line.replace(",", " ").split()
+            if not tokens:
+                if any(selected):
+                    return selected
+                out.write("  Select at least one folder.\n")
+            for token in tokens:
+                if token == "0":
+                    state = not all(selected)
+                    selected = [state] * len(names)
+                elif token.isdigit() and 1 <= int(token) <= len(names):
+                    selected[int(token) - 1] = not selected[int(token) - 1]
 
 
 def _read_key(descriptor: int) -> str:
     character = os.read(descriptor, 1).decode(errors="ignore")
     if character == "\x1b":
         sequence = os.read(descriptor, 2).decode(errors="ignore")
-        return {"[A": "up", "[B": "down"}.get(sequence, "")
+        arrows = {"[A": "up", "[B": "down", "[C": "select", "[D": "clear"}
+        return arrows.get(sequence, "")
     return {
-        " ": "toggle",
-        "a": "all",
         "\r": "enter",
         "\n": "enter",
         "q": "quit",
@@ -91,137 +249,6 @@ def _read_key(descriptor: int) -> str:
         "k": "up",
         "j": "down",
     }.get(character, "")
-
-
-# cost: time O(k*f), heap O(f), stack O(1)
-# vars: k = key presses, f = folders shown
-# basis: estimate
-def _toggle_tty(
-    names: Sequence[str],
-    counts: Sequence[int],
-    selected: list[bool],
-    source: TextIO,
-    out: TextIO,
-    style: _Style,
-) -> list[bool]:
-    import termios
-    import tty
-
-    cursor, top = 0, 0
-    descriptor = source.fileno()
-    saved = termios.tcgetattr(descriptor)
-    drawn = 0
-    try:
-        tty.setraw(descriptor)
-        out.write("\033[?25l")
-        while True:
-            if drawn:
-                out.write(f"\033[{drawn}A")
-            top = min(max(top, cursor - _WINDOW + 1), cursor)
-            rows = range(top, min(len(names), top + _WINDOW))
-            lines = []
-            for index in rows:
-                mark = style("[x]", "32") if selected[index] else style("[ ]", "2")
-                pointer = style(">", "36") if index == cursor else " "
-                label = f"{names[index]:<28}"
-                label = style(label, "1") if index == cursor else label
-                notes = style(f"{counts[index]:>6,} notes", "2")
-                lines.append(f"  {pointer} {mark} {label} {notes}")
-            chosen = sum(selected)
-            lines.append(
-                "  "
-                + style(
-                    f"{chosen} of {len(names)} selected"
-                    + (
-                        f"  (showing {rows.start + 1}-{rows.stop})"
-                        if len(names) > _WINDOW
-                        else ""
-                    ),
-                    "2",
-                )
-            )
-            for line in lines:
-                out.write("\r\033[2K" + line + "\r\n")
-            drawn = len(lines)
-            out.flush()
-            key = _read_key(descriptor)
-            if key == "up":
-                cursor = (cursor - 1) % len(names)
-            elif key == "down":
-                cursor = (cursor + 1) % len(names)
-            elif key == "toggle":
-                selected[cursor] = not selected[cursor]
-            elif key == "all":
-                state = not all(selected)
-                selected[:] = [state] * len(names)
-            elif key == "quit":
-                raise SetupAbortedError("Setup cancelled")
-            elif key == "enter" and any(selected):
-                return selected
-    finally:
-        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
-        out.write("\033[?25h")
-        out.flush()
-
-
-def _toggle_lines(
-    names: Sequence[str],
-    counts: Sequence[int],
-    selected: list[bool],
-    ask: Callable[[str], str],
-    out: TextIO,
-) -> list[bool]:
-    while True:
-        for index, name in enumerate(names, start=1):
-            mark = "[x]" if selected[index - 1] else "[ ]"
-            out.write(
-                f"  {index:>3}. {mark} {name:<28} {counts[index - 1]:>6,} notes\n"
-            )
-        answer = ask("  Toggle numbers (e.g. 1 3), 'a' for all, Enter to accept: ")
-        answer = answer.strip().lower()
-        if not answer:
-            if any(selected):
-                return selected
-            out.write("  Select at least one folder.\n")
-            continue
-        if answer == "a":
-            state = not all(selected)
-            selected[:] = [state] * len(names)
-            continue
-        for token in answer.replace(",", " ").split():
-            if token.isdigit() and 1 <= int(token) <= len(names):
-                selected[int(token) - 1] = not selected[int(token) - 1]
-
-
-def choose_folders(
-    root: Path,
-    current: Sequence[str],
-    *,
-    source: TextIO,
-    out: TextIO,
-    ask: Callable[[str], str],
-    interactive: bool,
-) -> list[str]:
-    names = sorted(
-        entry.name
-        for entry in root.iterdir()
-        if entry.is_dir() and not entry.name.startswith(".") and not entry.is_symlink()
-    )
-    if not names:
-        return []
-    counts = [_notes(root / name) for name in names]
-    selected = [not current or name in current for name in names]
-    style = _Style(out)
-    if interactive:
-        out.write(
-            "  "
-            + style("↑/↓ move   space toggle   a all   enter confirm   q quit", "2")
-            + "\n"
-        )
-        result = _toggle_tty(names, counts, selected, source, out, style)
-    else:
-        result = _toggle_lines(names, counts, selected, ask, out)
-    return [name for name, chosen in zip(names, result, strict=True) if chosen]
 
 
 # cost: time O(f), heap O(f), stack O(1), io O(f)
@@ -235,61 +262,33 @@ def run_setup(
     managed: Sequence[str] | None = None,
     source: TextIO | None = None,
     out: TextIO | None = None,
+    confirm: Callable[[Settings], None] | None = None,
 ) -> Settings:
-    """Ask for the vault and managed folders, then save the settings file."""
-    source = source or sys.stdin
-    out = out or sys.stdout
-    style = _Style(out)
-    interactive = source.isatty() and out.isatty()
+    """Ask for the vault and managed folders, confirm, then save settings.
 
-    def ask(prompt: str) -> str:
-        out.write(prompt)
-        out.flush()
-        line = source.readline()
-        if not line:
-            raise SetupAbortedError("Setup cancelled (no input)")
-        return line.rstrip("\n")
-
-    out.write("\n" + style("Markchain setup", "1") + "\n\n")
-    out.write(style("  1/3  Vault", "1") + "\n")
-    default = str(vault) if vault else current.vault.root
+    Nothing is written until the user confirms. ``confirm`` runs checks that
+    must pass before saving.
+    """
+    ui = Progress(out or sys.stdout)
+    questions = _Questions(ui, source or sys.stdin)
+    ui.title("Markchain setup")
     if managed is not None and vault is not None:
         root = vault.expanduser().resolve()
         if not root.is_dir():
             raise SetupAbortedError(f"No such vault folder: {root}")
-    else:
-        root = _ask_vault(ask, out, style, default)
-    out.write("  " + style("using", "2") + f" {root}\n\n")
-
-    out.write(style("  2/3  Managed folders", "1") + "\n")
-    out.write(
-        "  "
-        + style(
-            "Markchain searches and edits only the folders you select.",
-            "2",
-        )
-        + "\n  "
-        + style("You can change this later in the settings file.", "2")
-        + "\n"
-    )
-    if managed is not None:
-        folders = list(managed)
-        missing = [name for name in folders if not (root / name).is_dir()]
+        missing = [name for name in managed if not (root / name).is_dir()]
         if missing:
             raise SetupAbortedError("Unknown folders: " + ", ".join(missing))
+        ui.line("done", "Vault root folder", str(root))
+        folders = list(managed)
+        ui.line("done", "Managed folders", ", ".join(folders) or "all")
     else:
+        default = str(vault) if vault else current.vault.root
+        root = questions.vault(default)
         same_root = current.vault.root == str(root)
-        folders = choose_folders(
-            root,
-            current.vault.managed if same_root else (),
-            source=source,
-            out=out,
-            ask=ask,
-            interactive=interactive,
-        )
-    shown = ", ".join(folders) if folders else "(entire vault)"
-    out.write("  " + style("managing", "2") + f" {shown}\n\n")
-
+        folders = questions.folders(root, current.vault.managed if same_root else ())
+        if not questions.confirm("Save settings and install the search engine?"):
+            raise SetupAbortedError("Setup cancelled")
     updated = current.model_copy(
         update={
             "vault": current.vault.model_copy(
@@ -297,17 +296,14 @@ def run_setup(
             )
         }
     )
+    if confirm is not None:
+        confirm(updated)
     config.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = config.with_name(config.name + ".tmp")
     temporary.write_text(dump_settings(updated))
     os.replace(temporary, config)
-    out.write("  " + style("saved", "32") + f" {config}\n")
-    out.write(
-        "  "
-        + style("edit later:", "2")
-        + " markchain config --edit   "
-        + style("or", "2")
-        + f" {edit_command(config)}\n\n"
-    )
-    out.flush()
+    ui.line("done", "Settings saved", str(config))
+    ui.note(f"edit later: markchain config --edit   or   {edit_command(config)}")
+    ui.stream.write("\n")
+    ui.stream.flush()
     return updated
