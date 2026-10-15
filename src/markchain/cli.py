@@ -43,19 +43,29 @@ def main() -> int:
     submit = commands.add_parser("submit")
     submit.add_argument("key")
     submit.add_argument("proposal", type=Path)
-    commands.add_parser("run")
+    commands.add_parser("run", help="execute one queued job, then exit")
     commands.add_parser("sync")
     commands.add_parser("watch")
     commands.add_parser("audit")
-    commands.add_parser("serve")
+    commands.add_parser("serve", help="run MCP, file watch and queue workers together")
     commands.add_parser("cleanup")
-    automate = commands.add_parser("automate")
+    automate = commands.add_parser(
+        "automate", help="queue an intent; use run or serve to execute"
+    )
     automate.add_argument("key")
-    automate.add_argument("intent", type=Path)
+    automate.add_argument(
+        "intent", type=Path, help="JSON with kind, instruction and query"
+    )
     search = commands.add_parser("search")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=20)
-    search.add_argument("--folder", action="append", default=[], dest="folders")
+    search.add_argument(
+        "--folder",
+        action="append",
+        default=[],
+        dest="folders",
+        help="vault-relative folder; repeat for OR scope; omit to search all",
+    )
     search.add_argument("--fallback-offset", type=int, default=0)
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
@@ -81,8 +91,12 @@ def main() -> int:
                 result = _execute(runtime, arguments, synchronizer)
         if arguments.command != "serve":
             print(json.dumps(result, ensure_ascii=False))
-    except ValidationError:
-        logger.error("invalid proposal format")
+    except ValidationError as error:
+        details = "; ".join(
+            f"{'.'.join(map(str, item['loc'])) or 'input'}: {item['msg']}"
+            for item in error.errors(include_input=False, include_url=False)
+        )
+        logger.error("invalid input: %s", details)
         return 1
     except (MarkchainError, OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
@@ -120,7 +134,7 @@ def _execute(
                 service.close()
             return None
         case "status":
-            return runtime.status(arguments.key)
+            return runtime.describe(arguments.key)
         case "cancel":
             return {"cancelled": runtime.cancel(arguments.key)}
         case _:

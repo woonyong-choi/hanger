@@ -347,6 +347,7 @@ def test_partial_replan_preserves_applied_context(
                 result = runtime.run_next()
             assert result is not None and result["status"] == "completed"
             assert set(result["applied"]) == {"docs/a.md", "docs/b.md"}
+            assert result["error"] == ""
             if delete_first:
                 assert not (root / "docs/a.md").exists()
             else:

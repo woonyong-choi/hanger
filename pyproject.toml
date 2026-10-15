@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "markchain"
-version = "0.1.0.dev1"
+version = "0.1.0.dev2"
 description = "Durable local Markdown document workflows"
 requires-python = ">=3.12"
 dependencies = [

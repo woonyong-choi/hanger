@@ -94,6 +94,11 @@ def test_apply_modified_source_stops_without_overwrite(
         result = runtime.run_next()
         assert result is not None and result["status"] == "conflict"
         assert target.read_text() == "user change"
+        status = runtime.describe(key)
+        assert "overwrite" in status["next_actions"]
+        assert "reconsider" not in status["next_actions"]
+        with pytest.raises(RequestError, match="no model instruction"):
+            runtime.reconsider(key, runtime.issue_key())
 
 
 # #2: a killed writer must reconcile its completed replacement before resuming.
@@ -197,12 +202,42 @@ def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None
         [*base, "key"], capture_output=True, check=True, timeout=30
     )
     key = json.loads(key_result.stdout)["key"]
+    status = subprocess.run(
+        [*base, "status", key], capture_output=True, check=True, timeout=30
+    )
+    assert json.loads(status.stdout)["status"] == "not_found"
     proposal = tmp_path / "proposal.json"
     proposal.write_text(json.dumps({"changes": [{"path": "a.md", "after": "hello"}]}))
     subprocess.run([*base, "submit", key, str(proposal)], check=True, timeout=30)
     result = subprocess.run([*base, "run"], check=True, capture_output=True, timeout=30)
     assert json.loads(result.stdout)["status"] == "completed"
     assert (paths[0] / "a.md").read_text() == "hello"
+
+
+# #9: CLI input failures identify the missing field without leaking source text.
+def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> None:
+    intent = paths[1].parent / "intent.json"
+    intent.write_text(json.dumps({"kind": "edit", "instruction": "private-source"}))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "markchain.cli",
+            "--vault",
+            str(paths[0]),
+            "--state",
+            str(paths[1]),
+            "automate",
+            "unused",
+            str(intent),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 1
+    assert "query: Field required" in result.stderr
+    assert "private-source" not in result.stderr
 
 
 # #2: a forged identity or escaping path must fail before queue admission.
