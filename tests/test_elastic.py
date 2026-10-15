@@ -73,7 +73,7 @@ def test_supervisor_restarts_killed_server(
     first = _es_pid(tmp_path / "state")
     os.kill(first, signal.SIGKILL)
     _wait(lambda: not manager.ready(), 30)
-    assert "복구" in manager.message() or "시작" in manager.message()
+    assert "recovering" in manager.message() or "starting" in manager.message()
     _wait(manager.ready, 180)
     assert _es_pid(tmp_path / "state") != first
 
@@ -145,7 +145,7 @@ def test_foreign_server_on_port_is_reported(manager: ElasticManager) -> None:
     thread.start()
     try:
         manager.start()
-        _wait(lambda: "포트 사용 중" in manager.message(), 60)
+        _wait(lambda: "in use" in manager.message(), 60)
         assert not manager.ready()
     finally:
         manager.stop()

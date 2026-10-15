@@ -78,7 +78,7 @@ def _archive() -> tuple[str, str]:
         return _ARCHIVES[(system, machine)]
     except KeyError as error:
         raise MarkchainError(
-            f"지원하지 않는 플랫폼입니다: {system}-{machine}", code="platform"
+            f"unsupported platform: {system}-{machine}", code="platform"
         ) from error
 
 
@@ -119,15 +119,15 @@ class ElasticManager:
 
     def message(self) -> str:
         text = {
-            "stopped": "검색 서버가 꺼져 있습니다",
-            "installing": "검색 서버 설치 중",
-            "starting": "검색 서버 시작 중",
-            "ready": "검색 서버 정상",
-            "recovering": "검색 서버 복구 중",
-            "failed": "검색 서버 복구 실패, 다시 시도 중",
+            "stopped": "search engine is stopped",
+            "installing": "search engine is installing",
+            "starting": "search engine is starting",
+            "ready": "search engine is ready",
+            "recovering": "search engine is recovering",
+            "failed": "search engine failed, retrying",
         }[self._status]
         if self._status in {"installing", "starting", "recovering"}:
-            text += f" ({int(time.monotonic() - self._since)}초 경과)"
+            text += f" ({int(time.monotonic() - self._since)}s)"
         return text + (f": {self._detail}" if self._detail else "")
 
     def require(self) -> None:
@@ -366,11 +366,11 @@ class ElasticManager:
             if identity is not None:
                 if identity.get("cluster_name") != self.cluster:
                     raise MarkchainError(
-                        f"{self.settings.port} 포트 사용 중 (Markchain 검색 서버 아님)",
+                        f"port {self.settings.port} is in use by another program",
                         code="port_in_use",
                     )
                 if self._healthy():
-                    logger.info("이전 검색 서버를 이어서 사용합니다")
+                    logger.info("reusing the running search engine")
                     self._set("ready")
                     return
                 self._kill_recorded()
@@ -379,14 +379,15 @@ class ElasticManager:
         while time.monotonic() < deadline and not self._stop.is_set():
             if self._process is not None and self._process.poll() is not None:
                 raise MarkchainError(
-                    f"검색 서버가 시작 중 종료됨 (코드 {self._process.returncode})",
+                    "search engine exited during start "
+                    f"(code {self._process.returncode})",
                     code="search_start",
                 )
             if self._healthy():
                 self._set("ready")
                 return
             time.sleep(1)
-        raise MarkchainError("검색 서버 시작 시간 초과", code="search_start")
+        raise MarkchainError("search engine did not start in time", code="search_start")
 
     def _terminate(self) -> None:
         with self._lock:
@@ -428,7 +429,7 @@ class ElasticManager:
                 if exited or not self._healthy():
                     failures += 1
                     if exited or failures >= _HEALTH_FAILURES:
-                        self._set("recovering", "응답 없음, 다시 시작")
+                        self._set("recovering", "not responding, restarting")
                         self._terminate()
                         failures = 0
                         continue
@@ -438,11 +439,11 @@ class ElasticManager:
             except MarkchainError as error:
                 delay = _RESTART_BACKOFF[min(restarts, len(_RESTART_BACKOFF) - 1)]
                 restarts += 1
-                self._set("failed", f"{error} ({delay}초 후 재시도)")
+                self._set("failed", f"{error} (retry in {delay}s)")
                 self._terminate()
                 self._stop.wait(delay)
             except Exception as error:
-                logger.exception("검색 서버 감시 오류")
+                logger.exception("search engine supervisor error")
                 self._set("failed", str(error))
                 self._stop.wait(_RESTART_BACKOFF[0])
 

@@ -154,7 +154,8 @@ def _global_arguments(arguments: argparse.Namespace) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     state: Path = arguments.state
-    quiet = arguments.command in {"serve", "daemon"}
+    # The relay and daemon talk over stdio; setup draws its own status lines.
+    quiet = arguments.command in {"serve", "daemon", "setup"}
     configure(state, console=None if quiet else logging.WARNING)
     try:
         settings = load_settings(arguments.config or state / "config.toml")
@@ -191,11 +192,11 @@ def main(argv: list[str] | None = None) -> int:
             for item in error.errors(include_input=False, include_url=False)
         )
         logger.error("invalid input: %s", details)
-        print(f"입력 오류: {details}", file=sys.stderr)
+        print(f"markchain: invalid input: {details}", file=sys.stderr)
         return 1
     except (MarkchainError, OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
-        print(f"오류: {error}", file=sys.stderr)
+        print(f"markchain: {error}", file=sys.stderr)
         return 1
     return 0
 
@@ -213,7 +214,8 @@ def _dispatch(
         Relay(launcher, sys.stdin.buffer, sys.stdout.buffer).run()
         return _SILENT
     if command == "stop":
-        return {"stopped": launcher.stop()}
+        with launcher.hold():
+            return {"stopped": launcher.stop()}
     if command == "setup":
         return _setup(arguments, settings, launcher)
     if command == "config":
@@ -274,17 +276,26 @@ def _setup(
         raise SystemExit(1) from None
     ui = Progress(sys.stdout)
     engine = ElasticManager(_INSTALL_ROOT, state, settings)
-    install = arguments.reinstall or not engine.installed()
-    total = 1 + (INSTALL_STEPS if install else 1)
-    step = ui.step(1, total, "Stop background service")
-    step.done("stopped" if launcher.stop() else "not running")
-    if install:
-        engine.install(
-            ui, reinstall=arguments.reinstall, title=None, first=2, total=total
-        )
-    else:
-        step = ui.step(2, total, "Check search engine")
-        step.done(f"Elasticsearch {ES_VERSION} ready")
+    # Hold the start lock so connected clients cannot restart the service
+    # (which would install or start the search engine) until setup ends.
+    with launcher.hold():
+        install = arguments.reinstall or not engine.installed()
+        total = 1 + (INSTALL_STEPS if install else 1)
+        step = ui.step(1, total, "Stop background service")
+        stopped = launcher.stop()
+        if arguments.reinstall:
+            # A fresh engine starts from an empty index rebuilt from the vault.
+            shutil.rmtree(state / "elasticsearch", ignore_errors=True)
+        step.done("stopped" if stopped else "not running")
+        # A stopped service may have finished installing in the meantime.
+        install = arguments.reinstall or not engine.installed()
+        if install:
+            engine.install(
+                ui, reinstall=arguments.reinstall, title=None, first=2, total=total
+            )
+        else:
+            step = ui.step(2, total, "Check search engine")
+            step.done(f"Elasticsearch {ES_VERSION} already installed")
     ui.stream.write("\n")
     ui.line("done", "Markchain is ready", str(settings.vault.root))
     command = f"{shutil.which('markchain') or 'markchain'} serve"
@@ -311,10 +322,12 @@ def _daemon(
         connection = launcher.connect()
         if connection is not None:
             connection.close()
-            logger.info("다른 본체가 이미 실행 중입니다")
+            logger.info("another service instance is already running")
             return _SILENT
         if time.monotonic() >= deadline:
-            raise MarkchainError("상태 폴더 잠금을 얻지 못했습니다", code="daemon_lock")
+            raise MarkchainError(
+                "state folder is locked by another process", code="daemon_lock"
+            )
         time.sleep(1)
 
 
