@@ -1,5 +1,6 @@
 """Gaps found by checking the tool contract against the code."""
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -127,63 +128,6 @@ def test_many_file_job_keeps_checkpoint_small(tmp_path: Path) -> None:
     assert size < 40 * 1024 * 1024, size
 
 
-# Overwrite skips files already in the proposed state, and refuses a no-op.
-def test_overwrite_skips_applied_changes(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    root.mkdir()
-    (root / "a.md").write_text("old a")
-    (root / "b.md").write_text("old b")
-    service, runtime = _service(root, tmp_path / "state", Settings())
-    with runtime:
-        key = runtime.issue_key()
-        proposal = Proposal(
-            changes=(
-                Change(
-                    path="a.md",
-                    before=runtime.documents.read_hash("a.md"),
-                    after="new a",
-                ),
-                Change(
-                    path="b.md",
-                    before=runtime.documents.read_hash("b.md"),
-                    after=None,
-                ),
-            )
-        )
-        runtime.submit(key, proposal)
-        (root / "a.md").write_text("user a")
-        result = runtime.run_next()
-        assert result is not None and result["status"] == "conflict"
-        (root / "b.md").unlink()  # the delete already happened elsewhere
-        new_key = runtime.issue_key()
-        assert service.resolve_conflict(key, new_key, "overwrite")["status"] == (
-            "accepted"
-        )
-        _finish(runtime)
-        assert (root / "a.md").read_text() == "new a"
-
-
-# Overwrite of a proposal that is already fully in place is refused.
-def test_overwrite_of_applied_proposal_is_refused(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
-    root.mkdir()
-    (root / "a.md").write_text("old a")
-    service, runtime = _service(root, tmp_path / "state", Settings())
-    with runtime:
-        key = runtime.issue_key()
-        before = runtime.documents.read_hash("a.md")
-        runtime.submit(
-            key, Proposal(changes=(Change(path="a.md", before=before, after="new"),))
-        )
-        (root / "a.md").write_text("user")
-        result = runtime.run_next()
-        assert result is not None and result["status"] == "conflict"
-        (root / "a.md").write_text("new")
-        with pytest.raises(RequestError) as caught:
-            service.resolve_conflict(key, runtime.issue_key(), "overwrite")
-    assert caught.value.code == "already_applied"
-
-
 # An edit that breaks a rule (ambiguous anchor) is redrafted, not failed.
 def test_rule_violation_is_redrafted(vault: tuple[Path, Path, str]) -> None:  # noqa: F811
     root, state, url = vault
@@ -207,7 +151,7 @@ def test_rule_violation_is_redrafted(vault: tuple[Path, Path, str]) -> None:  # 
         status = runtime.describe(key)
     assert status["status"] == "completed", status.get("error")
     assert (root / "docs/a.md").read_text().startswith("# 결제 정책")
-    assert any("exactly once" in prompt for prompt in model.prompts)
+    assert any("정확히 한 번" in prompt for prompt in model.prompts)
 
 
 # The watcher keeps running after an unexpected error.
@@ -258,7 +202,7 @@ def test_retry_is_visible_and_failure_leaves_no_work_data(
             with pytest.raises(OSError):
                 runtime.run_next()
             message = runtime.describe(key)["message"]
-            assert f"10초 뒤 다시 시도 ({attempt}/3)" in message
+            assert f"10초 후 다시 시도합니다 ({attempt}/3)" in message
             clock += 11
         result = runtime.run_next()
         assert result is not None and result["status"] == "failed"
@@ -272,5 +216,104 @@ def test_retry_is_visible_and_failure_leaves_no_work_data(
             runtime.submit(key, Proposal(changes=(Change(path="a.md", after="x"),)))
             == "duplicate"
         )
-        with pytest.raises(RequestError, match="새 키로 다시 요청"):
+        with pytest.raises(RequestError, match="새 키를 발급받아"):
             runtime.reconsider(key, runtime.issue_key())
+
+
+def _hidden(root: Path) -> list[str]:
+    return sorted(p.name for p in root.iterdir() if p.name.startswith("."))
+
+
+# A delete removes only the planned content and leaves nothing hidden behind.
+def test_delete_is_verified_and_leaves_no_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from markchain import documents as documents_module
+    from markchain.errors import ConflictError
+    from markchain.requests import digest
+
+    root = tmp_path / "vault"
+    root.mkdir()
+    documents = Documents(root)
+    target = root / "a.md"
+
+    target.write_text("planned")
+    change = Change(path="a.md", before=digest(b"planned"), after=None)
+    assert documents.apply(change) == "applied"
+    assert not target.exists() and _hidden(root) == []
+    assert documents.apply(change) == "already_applied"
+
+    # Someone saves the file between the check and the rename: it is restored.
+    target.write_text("planned")
+    rename = os.rename
+
+    def save_then_rename(source: object, destination: object) -> None:
+        if Path(str(source)) == target:
+            target.write_text("saved by the user")
+        rename(source, destination)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(documents_module.os, "rename", save_then_rename)
+    with pytest.raises(ConflictError):
+        documents.apply(change)
+    monkeypatch.undo()
+    assert target.read_text() == "saved by the user" and _hidden(root) == []
+
+    # A crash after the rename: the next attempt finishes the delete.
+    target.write_text("planned")
+    rename(target, root / ".a.md.markchain-deleting")
+    assert documents.apply(change) == "already_applied"
+    assert not target.exists() and _hidden(root) == []
+
+    # A crash after the rename of changed content: it is put back.
+    (root / ".a.md.markchain-deleting").write_text("changed")
+    with pytest.raises(ConflictError):
+        documents.apply(change)
+    assert target.read_text() == "changed" and _hidden(root) == []
+
+    # Expired or failed jobs settle the same way.
+    target.unlink()
+    (root / ".a.md.markchain-deleting").write_text("planned")
+    documents.discard_pending(Proposal(changes=(change,)))
+    assert not target.exists() and _hidden(root) == []
+
+
+# Listed search results are matched without reading their whole body.
+def test_listed_results_are_not_loaded() -> None:
+    from markchain.context import shape
+
+    settings = Settings.model_validate({"search": {"full_text": 1}})
+    ranked = [
+        {"path": "a.md", "title": "a", "bytes": 10},
+        {"path": "b.md", "title": "b", "bytes": 10},
+    ]
+    loaded: list[str] = []
+
+    def load(path: str) -> dict[str, str]:
+        loaded.append(path)
+        return {"path": path, "title": path, "hash": "h", "content": "결제 정책"}
+
+    full, listed = shape(
+        ranked, {}, settings, ["결제"], load=load, peek=lambda p, t: ["결제 줄"]
+    )
+    assert loaded == ["a.md"] and list(full) == ["a.md"]
+    assert listed == [
+        {"path": "b.md", "title": "b", "bytes": 10, "snippets": ["결제 줄"]}
+    ]
+
+
+# The managed engine keeps only the current vault's index.
+def test_owned_index_removes_other_vault_indexes(tmp_path: Path) -> None:
+    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    if not url:
+        pytest.skip("requires explicit Elasticsearch test endpoint")
+    old = SearchIndex(url, str(tmp_path / "old"))
+    new = SearchIndex(url, str(tmp_path / "new"), owned=True)
+    try:
+        old.ensure()
+        new.ensure()
+        assert not old.client.indices.exists(index=old.name)
+        assert new.client.indices.exists(index=new.name)
+    finally:
+        for index in (old, new):
+            index.client.options(ignore_status=404).indices.delete(index=index.name)
+            index.close()

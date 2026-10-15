@@ -63,7 +63,7 @@ def test_submit_completed_key_survives_restart(paths: tuple[Path, Path]) -> None
     with Runtime(*paths) as runtime:
         assert runtime.submit(key, proposal) == "duplicate"
         changed = Proposal(changes=(Change(path="a.md", after="second"),))
-        with pytest.raises(RequestError, match="different content"):
+        with pytest.raises(RequestError, match="다른 내용으로 사용된"):
             runtime.submit(key, changed)
 
 
@@ -95,10 +95,10 @@ def test_apply_modified_source_stops_without_overwrite(
         assert result is not None and result["status"] == "conflict"
         assert target.read_text() == "user change"
         status = runtime.describe(key)
-        choices = [a.get("args", {}).get("choice") for a in status["next_actions"]]
-        assert "overwrite" in choices
-        assert "reconsider" not in choices
-        with pytest.raises(RequestError, match="no model instruction"):
+        tools = [action["tool"] for action in status["next_actions"]]
+        assert "request_change" in tools
+        assert "resolve_conflict" not in tools
+        with pytest.raises(RequestError, match="모델 지시가 없는"):
             runtime.reconsider(key, runtime.issue_key())
 
 
@@ -311,20 +311,26 @@ def test_run_hundred_documents_completes(paths: tuple[Path, Path]) -> None:
     assert (paths[0] / "docs/99.md").read_text() == "99"
 
 
-# #2: persisted jobs belong to one Vault, including create-only proposals.
-def test_runtime_other_vault_rejected(paths: tuple[Path, Path]) -> None:
+# #2: a new vault root starts clean: old jobs never apply to it, and
+# Markchain's unfinished files in the old vault are removed.
+def test_runtime_new_vault_resets_jobs(paths: tuple[Path, Path]) -> None:
     with Runtime(*paths) as runtime:
         runtime.submit(
             runtime.issue_key(), Proposal(changes=(Change(path="a.md", after="x"),))
         )
+    leftover = paths[0] / ".markchain-0123.pending"
+    leftover.write_text("partial")
+    (paths[0] / "b.md").write_text("planned delete")
+    interrupted = paths[0] / ".b.md.markchain-deleting"
+    (paths[0] / "b.md").rename(interrupted)
     other = paths[0].parent / "other-vault"
     other.mkdir()
-    with pytest.raises(RequestError, match="different vault"):
-        Runtime(other, paths[1])
+    with Runtime(other, paths[1]) as runtime:
+        assert runtime.run_next() is None
     assert not (other / "a.md").exists()
-    with Runtime(*paths) as runtime:
-        result = runtime.run_next()
-        assert result is not None and result["status"] == "completed"
+    assert not leftover.exists() and not interrupted.exists()
+    assert (paths[0] / "b.md").read_text() == "planned delete"
+    assert (paths[1] / "vault.path").read_text() == str(other.resolve())
 
 
 # #2: invalid target replacement is terminal, rather than an invisible unacked task.
@@ -364,12 +370,12 @@ def test_submit_expired_or_forged_key_rejected(
     with Runtime(*paths) as runtime:
         key = runtime.issue_key()
         proposal = Proposal(changes=(Change(path="a.md", after="a"),))
-        with pytest.raises(RequestError, match="발급한 키가 아닙니다") as forged:
+        with pytest.raises(RequestError, match="발급한 키가 아님") as forged:
             runtime.submit(key[:-1] + ("0" if key[-1] != "0" else "1"), proposal)
         assert forged.value.code == "invalid_key"
         future = time.time() + 86401
         monkeypatch.setattr("markchain.requests.time.time", lambda: future)
-        with pytest.raises(RequestError, match="유효기간"):
+        with pytest.raises(RequestError, match="유효 기간"):
             runtime.submit(key, proposal)
         assert runtime.run_next() is None
 

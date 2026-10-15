@@ -41,7 +41,7 @@ class ReviewRejectedError(MarkchainError):
 
     def __init__(self, issues: list[str]) -> None:
         self.issues = issues
-        super().__init__("; ".join(issues) or "검토 거절")
+        super().__init__("; ".join(issues) or "검토에서 승인되지 않았습니다.")
 
 
 class SearchUnavailableError(MarkchainError):

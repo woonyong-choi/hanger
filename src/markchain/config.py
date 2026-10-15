@@ -88,7 +88,9 @@ class Settings(BaseModel):
     def check_folders(self, folders: tuple[str, ...]) -> None:
         for folder in folders:
             if self.excluded(folder):
-                raise RequestError(f"검색 제외 폴더입니다: {folder}", code="excluded")
+                raise RequestError(
+                    f"관리 범위 밖이거나 제외된 폴더입니다: {folder}", code="excluded"
+                )
 
 
 def load_settings(path: Path | None) -> Settings:
@@ -99,7 +101,9 @@ def load_settings(path: Path | None) -> Settings:
         with path.open("rb") as source:
             return Settings.model_validate(tomllib.load(source))
     except (tomllib.TOMLDecodeError, ValidationError) as error:
-        raise RequestError(f"설정 파일 오류: {path}: {error}", code="config") from error
+        raise RequestError(
+            f"설정 파일을 읽을 수 없습니다: {path}: {error}", code="config"
+        ) from error
 
 
 def _value(value: object) -> str:

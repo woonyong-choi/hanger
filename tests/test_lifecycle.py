@@ -40,7 +40,7 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
         assert result["status"] == "cleaned"
         assert runtime.status(complete) == {}
         assert runtime.submit(valid, proposal) == "duplicate"
-        with pytest.raises(RequestError, match="유효기간"):
+        with pytest.raises(RequestError, match="유효 기간"):
             runtime.submit(complete, proposal)
         assert runtime.cleanup()["status"] == "already_cleaned"
 
@@ -227,7 +227,7 @@ def test_retry_limit_survives_restart_and_allows_other_work(
     with Runtime(root, state) as runtime:
         result = runtime.run_next()
         assert result is not None and result["status"] == "failed"
-        assert result["error"].startswith("3번 다시 시도했지만 실패")
+        assert result["error"].startswith("처리 중 오류가 발생해 3회 재시도했으나 실패")
         assert "proposal" not in runtime.status(key)
         assert result["error_code"] == "internal"
         assert runtime.run_next() is None

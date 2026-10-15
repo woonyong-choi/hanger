@@ -72,7 +72,8 @@ def test_search_stale_hit_repairs_before_return(sync: Synchronizer) -> None:
     target.write_text("# 결제\n최신 조건")
     result = sync.search("결제")
     assert result["source"] == "elasticsearch"
-    assert result["documents"][0]["content"] == "# 결제\n최신 조건"
+    assert result["unverified"] == []
+    assert result["documents"][0]["bytes"] == len("# 결제\n최신 조건".encode())
 
 
 # #3: Korean grammatical particles must not turn unrelated notes into candidates.
@@ -197,7 +198,8 @@ def test_repeated_signal_never_replays_old_content(sync: Synchronizer) -> None:
     sync.sync_paths(["a.md"])
     sync.sync_paths(["a.md"], force=True)
     sync.index.refresh()
-    assert sync.search("결제")["documents"][0]["content"] == "# 결제\n현재"
+    found = sync.search("결제")["documents"][0]
+    assert sync.read(found["path"])["content"] == "# 결제\n현재"
 
 
 # #3: native observer detects a file saved outside Obsidian.
@@ -275,7 +277,9 @@ def test_search_folders_preserve_union_and_boundaries(
     assert {d["path"] for d in result["documents"]} == set(selected)
     assert result["folders"] == ["docs/api", "legacy", "worktree/app/docs"]
     if source == "stale":
-        assert all("현재의" in d["content"] for d in result["documents"])
+        assert all(
+            "현재의" in sync.read(d["path"])["content"] for d in result["documents"]
+        )
     rechecked = sync.search(
         "재시도", folders=folders, fallback_reason="insufficient_evidence"
     )
@@ -314,7 +318,7 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
     ],
 )
 def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> None:
-    with pytest.raises(RequestError, match="vault-relative"):
+    with pytest.raises(RequestError, match="상대 폴더 경로"):
         sync.search("retry", folders=(folder,))
 
 

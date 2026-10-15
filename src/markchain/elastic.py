@@ -106,6 +106,7 @@ class ElasticManager:
         self._download = downloader or _download
         self._status = "stopped"
         self._detail = ""
+        self._code = ""
         self._since = time.monotonic()
         self._process: subprocess.Popen[bytes] | None = None
         self._lock = threading.RLock()
@@ -118,23 +119,28 @@ class ElasticManager:
         return self._status == "ready"
 
     def message(self) -> str:
-        text = {
-            "stopped": "search engine is stopped",
-            "installing": "search engine is installing",
-            "starting": "search engine is starting",
-            "ready": "search engine is ready",
-            "recovering": "search engine is recovering",
-            "failed": "search engine failed, retrying",
+        """Describe the engine state for the AI client, as a system message."""
+        elapsed = int(time.monotonic() - self._since)
+        if self._status == "failed" and self._code == "port_in_use":
+            return (
+                f"검색 서버 포트 {self.settings.port}를 다른 프로그램이 사용하고 "
+                "있습니다. 해당 프로그램을 종료하거나 설정에서 포트를 변경하십시오."
+            )
+        return {
+            "stopped": "검색 서버가 중지되어 있습니다.",
+            "installing": f"검색 서버를 설치하고 있습니다({elapsed}초 경과).",
+            "starting": f"검색 서버를 시작하고 있습니다({elapsed}초 경과).",
+            "ready": "검색 서버가 정상입니다.",
+            "recovering": f"검색 서버를 다시 시작하고 있습니다({elapsed}초 경과).",
+            "failed": "검색 서버를 시작하지 못해 자동으로 다시 시도하고 있습니다.",
         }[self._status]
-        if self._status in {"installing", "starting", "recovering"}:
-            text += f" ({int(time.monotonic() - self._since)}s)"
-        return text + (f": {self._detail}" if self._detail else "")
 
     def require(self) -> None:
         if not self.ready():
             raise SearchUnavailableError(self.message())
 
-    def _set(self, status: str, detail: str = "") -> None:
+    def _set(self, status: str, detail: str = "", code: str = "") -> None:
+        self._code = code
         if status != self._status:
             self._since = time.monotonic()
         if (status, detail) != (self._status, self._detail):
@@ -439,7 +445,7 @@ class ElasticManager:
             except MarkchainError as error:
                 delay = _RESTART_BACKOFF[min(restarts, len(_RESTART_BACKOFF) - 1)]
                 restarts += 1
-                self._set("failed", f"{error} (retry in {delay}s)")
+                self._set("failed", f"{error} (retry in {delay}s)", error.code)
                 self._terminate()
                 self._stop.wait(delay)
             except Exception as error:

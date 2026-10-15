@@ -165,7 +165,10 @@ def test_review_rejection_retries_with_feedback(
     assert feedback_prompts
     if approve_on is None:
         assert status["status"] == "failed"
-        assert status["message"] == "검토 3회 거절: 출처 없는 수치"
+        assert (
+            status["message"]
+            == "검토 거절로 3회 다시 작성했으나 실패했습니다: 출처 없는 수치"
+        )
         assert status["error_code"] == "review_rejected"
         assert (root / "docs/a.md").read_text() == "# 결제\n재시도 2회"
     else:
@@ -259,7 +262,7 @@ def test_reconsider_does_not_claim_previous_results(
     assert status["status"] == "completed"
     assert status["results"] == {}
     assert status["prior_results"]["docs/a.md"] == "result_present"
-    assert status["message"] == "완료: 변경 없음"
+    assert status["message"] == "작업을 완료했습니다. 변경한 파일은 없습니다."
 
 
 # 8: an edit that retypes most of a document is held unless rewrite is allowed.
@@ -317,14 +320,14 @@ def test_configured_layout_rules(vault: tuple[Path, Path, str]) -> None:
     model.checks = [{"approved": True, "issues": []}]
     runtime, sync = _runtime(root, state, url, model, settings)
     with runtime:
-        with pytest.raises(RequestError, match="검색 제외 폴더"):
+        with pytest.raises(RequestError, match="관리 범위 밖이거나 제외된"):
             runtime.submit_intent(
                 runtime.issue_key(),
                 Intent(
                     kind="edit", instruction="x", query="결제", folders=("docs/agent",)
                 ),
             )
-        with pytest.raises(RequestError, match="검색 제외 폴더"):
+        with pytest.raises(RequestError, match="관리 범위 밖이거나 제외된"):
             sync.search("결제", folders=("docs/agent",))
         found = {d["path"] for d in sync.search("결제")["documents"]}
         assert found == {"notes/a.md"}
@@ -333,7 +336,7 @@ def test_configured_layout_rules(vault: tuple[Path, Path, str]) -> None:
         _finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "failed"
-    assert status["message"] == "쓰기 금지 경로: notes/a.md"
+    assert status["message"] == "쓰기 허용 범위 밖의 경로입니다: notes/a.md"
     assert all(a.get("args", {}).get("choice") is None for a in status["next_actions"])
     assert "Writable folders: docs, inbox." in model.prompts[0]
 
@@ -357,7 +360,7 @@ def test_shape_respects_budget_and_required_inputs() -> None:
     huge = {
         "x.md": {"path": "x.md", "title": "x", "content": "가" * 20000, "hash": "h"}
     }
-    with pytest.raises(RequestError, match="입력 문서가 너무 큽니다"):
+    with pytest.raises(RequestError, match="모델 입력 한도"):
         shape([], huge, settings, [])
 
 
@@ -455,5 +458,7 @@ def test_search_waits_for_starting_server_with_progress(
         assert context.logs[0].startswith("검색 서버 시작 중")
         monkeypatch.setattr(service_module, "SEARCH_WAIT_SECONDS", 2)
         service.engine = _Engine(ready_after=100)  # type: ignore[assignment]
-        with pytest.raises(SearchUnavailableError, match="not ready after 2s"):
+        with pytest.raises(
+            SearchUnavailableError, match="2초 안에 준비되지 않았습니다"
+        ):
             asyncio.run(service.search_documents("결제", ctx=_Context()))  # type: ignore[arg-type]

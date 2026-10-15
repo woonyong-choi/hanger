@@ -23,7 +23,9 @@ class SearchScope:
                 or "\x00" in path
                 or any(not part or part.startswith(".") for part in parts)
             ):
-                raise RequestError("folders must be vault-relative directory paths")
+                raise RequestError(
+                    "folders에는 Vault 기준 상대 폴더 경로만 지정할 수 있습니다."
+                )
             paths.add(path)
         self.folders = tuple(
             sorted(

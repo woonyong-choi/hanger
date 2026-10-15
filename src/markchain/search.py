@@ -13,9 +13,12 @@ from markchain.scope import SearchScope
 
 
 class SearchIndex:
-    def __init__(self, url: str, vault_identity: str) -> None:
+    def __init__(self, url: str, vault_identity: str, *, owned: bool = False) -> None:
         self.name = "markchain-" + digest(vault_identity.encode())[:24] + "-v2"
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
+        # The managed server belongs to one state folder and so to one vault:
+        # any other Markchain index on it is left over from an earlier root.
+        self.owned = owned
 
     def close(self) -> None:
         self.client.close()
@@ -23,6 +26,14 @@ class SearchIndex:
     # cost: time O(1), heap O(1), stack O(1), io O(1)
     # basis: estimate
     def ensure(self) -> None:
+        if self.owned:
+            leftovers = [
+                name
+                for name in self.client.indices.get(index="markchain-*")
+                if name != self.name
+            ]
+            for name in leftovers:
+                self.client.options(ignore_status=404).indices.delete(index=name)
         if self.client.indices.exists(index=self.name):
             return
         self.client.indices.create(
@@ -166,7 +177,7 @@ class SearchIndex:
             },
         )
         if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
-            raise RequestError("search did not evaluate the complete requested scope")
+            raise RequestError("검색 서버가 요청 범위 전체를 검색하지 못했습니다.")
         return [
             dict(hit["_source"], score=hit["_score"])
             for hit in response["hits"]["hits"]
