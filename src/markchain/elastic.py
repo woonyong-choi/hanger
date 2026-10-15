@@ -25,6 +25,7 @@ from filelock import FileLock
 
 from markchain.config import Settings
 from markchain.errors import MarkchainError, SearchUnavailableError
+from markchain.progress import Progress, Step
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class ElasticManager:
         state: Path,
         settings: Settings,
         *,
-        downloader: Callable[[str, Path], None] | None = None,
+        downloader: Callable[..., None] | None = None,
     ) -> None:
         self.install_root = install_root
         self.home = install_root / f"elasticsearch-{ES_VERSION}"
@@ -137,7 +138,7 @@ class ElasticManager:
             self._since = time.monotonic()
         if (status, detail) != (self._status, self._detail):
             log = logger.warning if status in {"recovering", "failed"} else logger.info
-            log("검색 서버 %s%s", status, f": {detail}" if detail else "")
+            log("search engine %s%s", status, f": {detail}" if detail else "")
         self._status, self._detail = status, detail
 
     # -- install ---------------------------------------------------------------
@@ -145,7 +146,11 @@ class ElasticManager:
     # cost: time O(a), heap O(1), stack O(1), io O(a)
     # vars: a = archive bytes (about 700 MB once per version)
     # basis: estimate
-    def install(self) -> Path:
+    def installed(self) -> bool:
+        return (self.home / ".markchain-installed").exists()
+
+    def install(self, progress: Progress | None = None) -> Path:
+        """Download, verify and unpack the pinned server once per version."""
         marker = self.home / ".markchain-installed"
         if marker.exists():
             return self.home
@@ -153,62 +158,108 @@ class ElasticManager:
         with FileLock(self.install_root / "install.lock"):
             if marker.exists():
                 return self.home
-            self._set("installing", "엘라스틱서치 내려받는 중")
             suffix, checksum = _archive()
+            if progress is not None:
+                progress.title(
+                    "Markchain search engine setup",
+                    f"Elasticsearch {ES_VERSION} ({suffix}) + Nori Korean analyzer",
+                )
             work = self.install_root / f".install-{os.getpid()}"
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir()
             try:
-                archive = work / "elasticsearch.tar.gz"
-                self._fetch(
-                    f"{_BASE}/elasticsearch/elasticsearch-{ES_VERSION}-{suffix}.tar.gz",
-                    archive,
-                    checksum,
-                )
-                nori = work / "analysis-nori.zip"
-                self._fetch(
-                    f"{_BASE}/elasticsearch-plugins/analysis-nori/"
-                    f"analysis-nori-{ES_VERSION}.zip",
-                    nori,
-                    _NORI_SHA512,
-                )
-                self._set("installing", "압축 해제 중")
-                with tarfile.open(archive) as bundle:
-                    bundle.extractall(work, filter="tar")
-                extracted = work / f"elasticsearch-{ES_VERSION}"
-                archive.unlink()
-                self._set("installing", "한국어 분석기 설치 중")
-                subprocess.run(
-                    [
-                        str(extracted / "bin" / "elasticsearch-plugin"),
-                        "install",
-                        "--batch",
-                        nori.resolve().as_uri(),
-                    ],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                (extracted / ".markchain-installed").write_text(ES_VERSION)
-                shutil.rmtree(self.home, ignore_errors=True)
-                extracted.rename(self.home)
+                self._install_into(work, suffix, checksum, progress)
             except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
                 raise MarkchainError(
-                    f"검색 서버 설치 실패: {error}", code="search_install"
+                    f"Search engine install failed: {error}", code="search_install"
                 ) from error
             finally:
                 shutil.rmtree(work, ignore_errors=True)
-        logger.info("엘라스틱서치 %s 설치 완료: %s", ES_VERSION, self.home)
+        logger.info("Elasticsearch %s installed at %s", ES_VERSION, self.home)
         return self.home
 
-    def _fetch(self, url: str, target: Path, checksum: str) -> None:
-        self._download(url, target)
-        digest = hashlib.sha512()
-        with target.open("rb") as source:
-            while chunk := source.read(1024 * 1024):
-                digest.update(chunk)
-        if digest.hexdigest() != checksum:
-            raise OSError(f"체크섬 불일치: {url}")
+    # cost: time O(a), heap O(1), stack O(1), io O(a)
+    # vars: a = archive bytes
+    # basis: estimate
+    def _install_into(
+        self, work: Path, suffix: str, checksum: str, progress: Progress | None
+    ) -> None:
+        steps = 5
+
+        def step(
+            index: int, label: str, status: str, unit: str = "bytes"
+        ) -> Step | None:
+            self._set("installing", status)
+            return progress.step(index, steps, label, unit) if progress else None
+
+        archive = work / "elasticsearch.tar.gz"
+        nori = work / "analysis-nori.zip"
+        downloads = (
+            (
+                "Download Elasticsearch",
+                f"{_BASE}/elasticsearch/elasticsearch-{ES_VERSION}-{suffix}.tar.gz",
+                archive,
+                checksum,
+            ),
+            (
+                "Download Korean analyzer",
+                f"{_BASE}/elasticsearch-plugins/analysis-nori/"
+                f"analysis-nori-{ES_VERSION}.zip",
+                nori,
+                _NORI_SHA512,
+            ),
+        )
+        for index, (label, url, target, _) in enumerate(downloads, start=1):
+            current = step(index, label, f"downloading {target.name}")
+            self._download(url, target, current.update if current else None)
+            if current:
+                current.done()
+        current = step(3, "Verify SHA-512 checksums", "verifying checksums")
+        total = sum(target.stat().st_size for _, _, target, _ in downloads)
+        hashed = 0
+        for _, url, target, expected in downloads:
+            digest = hashlib.sha512()
+            with target.open("rb") as source:
+                while chunk := source.read(1024 * 1024):
+                    digest.update(chunk)
+                    hashed += len(chunk)
+                    if current:
+                        current.update(hashed, total)
+            if digest.hexdigest() != expected:
+                if current:
+                    current.fail(f"mismatch: {target.name}")
+                raise OSError(f"checksum mismatch: {url}")
+        if current:
+            current.done("2 files verified")
+        current = step(4, "Extract", "extracting", "files")
+        with tarfile.open(archive) as bundle:
+            members = bundle.getmembers()
+            for number, member in enumerate(members, start=1):
+                bundle.extract(member, work, filter="tar")
+                if current:
+                    current.update(number, len(members))
+        archive.unlink()
+        extracted = work / f"elasticsearch-{ES_VERSION}"
+        if current:
+            current.done(f"{len(members):,} files")
+        current = step(5, "Install Korean analyzer", "installing Nori analyzer")
+        subprocess.run(
+            [
+                str(extracted / "bin" / "elasticsearch-plugin"),
+                "install",
+                "--batch",
+                nori.resolve().as_uri(),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        (extracted / ".markchain-installed").write_text(ES_VERSION)
+        shutil.rmtree(self.home, ignore_errors=True)
+        extracted.rename(self.home)
+        if current:
+            current.done("analysis-nori")
+            progress.note(f"Ready: {self.home}")  # type: ignore[union-attr]
 
     # -- process ---------------------------------------------------------------
 
@@ -384,6 +435,15 @@ class ElasticManager:
 # cost: time O(a), heap O(1), stack O(1), io O(a)
 # vars: a = downloaded bytes
 # basis: estimate
-def _download(url: str, target: Path) -> None:
+def _download(
+    url: str, target: Path, report: Callable[[int, int | None], None] | None = None
+) -> None:
     with urllib.request.urlopen(url, timeout=60) as response, target.open("wb") as out:
-        shutil.copyfileobj(response, out, 1024 * 1024)
+        length = response.headers.get("Content-Length")
+        total = int(length) if length and length.isdigit() else None
+        done = 0
+        while chunk := response.read(1024 * 1024):
+            out.write(chunk)
+            done += len(chunk)
+            if report is not None:
+                report(done, total)

@@ -155,12 +155,30 @@ def test_foreign_server_on_port_is_reported(manager: ElasticManager) -> None:
 
 # #4: a corrupted download is rejected before anything is installed.
 def test_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
-    def fake(url: str, target: Path) -> None:
+    def fake(url: str, target: Path, report: object = None) -> None:
         target.write_bytes(b"not elasticsearch")
 
     engine = ElasticManager(
         tmp_path / "install", tmp_path / "state", Settings(), downloader=fake
     )
-    with pytest.raises(MarkchainError, match="체크섬"):
+    with pytest.raises(MarkchainError, match="checksum mismatch"):
         engine.install()
     assert not (tmp_path / "install" / f"elasticsearch-{ES_VERSION}").exists()
+
+
+# #4: redirected setup output stays short: one line per 10 percent.
+def test_progress_without_terminal_prints_deciles() -> None:
+    import io
+
+    from markchain.progress import Progress
+
+    stream = io.StringIO()
+    progress = Progress(stream)
+    step = progress.step(1, 2, "Download Elasticsearch")
+    for done in range(0, 1001, 5):
+        step.update(done, 1000)
+    step.done()
+    lines = stream.getvalue().splitlines()
+    assert len(lines) == 12
+    assert lines[-1].startswith("  [1/2] Download Elasticsearch")
+    assert "done" in lines[-1] and "1000 B" in lines[-1]
