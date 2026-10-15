@@ -1,5 +1,6 @@
 """Gaps found by checking the tool contract against the code."""
 
+import hashlib
 import os
 import threading
 import time
@@ -317,3 +318,87 @@ def test_owned_index_removes_other_vault_indexes(tmp_path: Path) -> None:
         for index in (old, new):
             index.client.options(ignore_status=404).indices.delete(index=index.name)
             index.close()
+
+
+# Collected input is named time-title-hash by one rule for every kind of input.
+@pytest.mark.parametrize(
+    ("text", "title"),
+    [
+        ("# 결제 재시도 정책\n본문", "결제-재시도-정책"),
+        ("메모 첫 줄입니다\n둘째 줄", "메모-첫-줄입니다"),
+        ("https://www.example.com/a/b?c=1", "example.com-a-b-c=1"),
+        ("사용자: 안녕\n어시스턴트: 반가워요", "사용자-안녕"),
+        ("   \n\n", "untitled"),
+        ("." * 3 + "숨김" + "가" * 60, "숨김" + "가" * 38),
+    ],
+)
+def test_inbox_name_rule(text: str, title: str) -> None:
+    from markchain.workflows import inbox_path
+
+    issued = time.mktime((2026, 10, 16, 7, 31, 5, 0, 0, -1))
+    path = inbox_path(text, issued)
+    digest = hashlib.sha256(text.encode()).hexdigest()[:8]
+    assert path == f"inbox/2026-10-16-073105-{title}-{digest}.md"
+    assert not Path(path).name.startswith(".")
+
+
+# A resend with the same key lands on the same file.
+def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    service, runtime = _service(root, tmp_path / "state", Settings())
+    with runtime:
+        key = runtime.issue_key()
+        first = service.collect(key, "# 링크 모음\nhttps://example.com")
+        second = service.collect(key, "# 링크 모음\nhttps://example.com")
+        assert first["status"] == "accepted" and second["status"] == "duplicate"
+        assert first["path"] == second["path"]
+        assert first["path"].startswith("inbox/") and "-링크-모음-" in first["path"]
+        _finish(runtime)
+    assert (root / first["path"]).read_text() == "# 링크 모음\nhttps://example.com"
+
+
+# Before creating a document, a similar existing one is found and offered.
+def test_similar_document_is_checked_before_create(
+    vault: tuple[Path, Path, str],  # noqa: F811
+) -> None:
+    root, state, url = vault
+    (root / "notes").mkdir()
+    (root / "notes/cat.md").write_text("# 고양이\n고양이 메모")
+    (root / "docs/payment.md").write_text("# 결제 재시도\n결제 재시도는 2회다.")
+    model = Model()
+    model.decisions = [
+        {
+            "action": "new",
+            "reason": "새 주제",
+            "sources": [],
+            "uncertainties": [],
+            "changes": [
+                {
+                    "path": "docs/retry.md",
+                    "operation": "create",
+                    "content": "# 결제 재시도\n결제 재시도는 3회로 늘린다.",
+                }
+            ],
+        },
+        _edit("docs/payment.md", "결제 재시도는 2회다.", "결제 재시도는 3회다."),
+    ]
+    model.checks = [{"approved": True, "issues": []}]
+    runtime, _ = _runtime(root, state, url, model)
+    with runtime:
+        key = runtime.issue_key()
+        runtime.submit_intent(
+            key,
+            Intent(
+                kind="write",
+                instruction="재시도 3회 정리",
+                query="고양이",
+                folders=("notes",),
+            ),
+        )
+        _finish(runtime)
+        status = runtime.describe(key)
+    assert status["status"] == "completed", status.get("error")
+    assert any("비슷한 기존 문서" in prompt for prompt in model.prompts)
+    assert not (root / "docs/retry.md").exists()
+    assert "3회" in (root / "docs/payment.md").read_text()

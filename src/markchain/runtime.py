@@ -252,6 +252,10 @@ class Runtime:
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = prior proposal and observed effects bytes
     # basis: estimate
+    def key_issued(self, key: str) -> float:
+        """Return when a valid key was issued."""
+        return validate_key(key, self._secret) - KEY_LIFETIME_SECONDS
+
     def reconsider(self, key: str, new_key: str) -> str:
         deadline = validate_key(new_key, self._secret)
         previous = self.status(key)
@@ -957,8 +961,6 @@ def _intent_payload(intent: Intent) -> dict[str, Any]:
         payload.pop("folders")
     if intent.profile == "note":
         payload.pop("profile")
-    if not intent.allow_rewrite:
-        payload.pop("allow_rewrite")
     return payload
 
 

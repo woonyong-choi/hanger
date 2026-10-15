@@ -10,13 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from markchain.config import Settings
 from markchain.documents import Documents
-from markchain.errors import RequestError, ReviewRejectedError
+from markchain.errors import RequestError
 from markchain.requests import Change, Proposal
-
-# Inserted text shorter than this is too generic to call a repeated addition.
-_REPEAT_MIN_CHARS = 20
-# Small edits stay allowed even when they are a large share of a tiny file.
-_CHANGE_FLOOR_CHARS = 1024
 
 
 class _Replacement(BaseModel):
@@ -58,11 +53,17 @@ class Review(BaseModel):
 
 @dataclass(frozen=True)
 class EditPolicy:
+    """Mechanical rules for turning a model decision into file changes.
+
+    How much to change, and whether a change fits the document, is judged
+    by the model and its review; these rules only keep edits exact and inside
+    what the request allows.
+    """
+
     settings: Settings = field(default_factory=Settings)
     allow_delete: bool = False
-    allow_rewrite: bool = False
-    # Paths whose earlier result was already written by a prior attempt.
-    applied: frozenset[str] = frozenset()
+    # Set by the document profile: changes must quote their sources.
+    require_evidence: bool = False
 
 
 # cost: time O(n*r), heap O(n), stack O(1), io O(f)
@@ -90,6 +91,12 @@ def materialize(
                 "그대로 인용하십시오.",
                 code="model_output",
             )
+    if policy.require_evidence and decision.changes and not decision.evidence:
+        raise RequestError(
+            "이 문서 종류는 변경 근거 인용이 필요합니다. evidence에 근거가 된 원문 "
+            "문장을 그대로 넣으십시오.",
+            code="model_output",
+        )
     if decision.action in {"keep", "defer"} and decision.changes:
         raise RequestError(
             "유지·보류 판정에는 문서 변경을 포함할 수 없습니다.", code="model_output"
@@ -134,9 +141,7 @@ def materialize(
                     )
                 after = None
             else:
-                after = _replace(
-                    edit.path, source["content"], edit.replacements, policy
-                )
+                after = _replace(source["content"], edit.replacements)
         changes.append(
             Change(
                 path=edit.path, before=source["hash"] if source else None, after=after
@@ -145,27 +150,12 @@ def materialize(
     return Proposal(changes=tuple(changes)).model_dump(mode="json") if changes else {}
 
 
-def _core(old: str, new: str) -> tuple[str, str]:
-    """Strip the unchanged prefix and suffix a model may have retyped."""
-    prefix = 0
-    limit = min(len(old), len(new))
-    while prefix < limit and old[prefix] == new[prefix]:
-        prefix += 1
-    suffix = 0
-    while suffix < limit - prefix and old[-1 - suffix] == new[-1 - suffix]:
-        suffix += 1
-    return old[prefix : len(old) - suffix], new[prefix : len(new) - suffix]
-
-
-def _replace(
-    path: str, content: str, replacements: list[_Replacement], policy: EditPolicy
-) -> str:
+def _replace(content: str, replacements: list[_Replacement]) -> str:
     if not replacements:
         raise RequestError(
             "수정에는 교체할 원문 구간이 하나 이상 필요합니다.", code="model_output"
         )
     spans = []
-    changed = 0
     for replacement in replacements:
         start = content.find(replacement.old)
         if start < 0 or content.find(replacement.old, start + 1) >= 0:
@@ -174,28 +164,7 @@ def _replace(
                 "문장을 포함해 구간을 늘리십시오.",
                 code="model_output",
             )
-        removed, inserted = _core(replacement.old, replacement.new)
-        changed += max(len(removed), len(inserted))
-        if (
-            path in policy.applied
-            and len(inserted.strip()) >= _REPEAT_MIN_CHARS
-            and len(inserted) > len(removed)
-            and inserted.strip() in content
-        ):
-            raise ReviewRejectedError(
-                [f"이전 시도에서 이미 반영된 내용을 다시 추가했습니다: {path}"]
-            )
         spans.append((start, start + len(replacement.old), replacement.new))
-    limit = max(
-        len(content) * policy.settings.jobs.max_change_ratio, _CHANGE_FLOOR_CHARS
-    )
-    if changed > limit and not policy.allow_rewrite:
-        ratio = round(100 * changed / max(len(content), 1))
-        raise RequestError(
-            f"변경량이 한도를 넘어 반영하지 않았습니다: {path} ({ratio}%). "
-            "전면 수정이 의도라면 allow_rewrite를 지정하십시오.",
-            code="change_too_large",
-        )
     spans.sort()
     pieces: list[str] = []
     cursor = 0

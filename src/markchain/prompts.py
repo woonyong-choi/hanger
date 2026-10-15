@@ -5,7 +5,7 @@ __all__ = ["draft_prompt", "review_prompt"]
 import json
 from typing import Any
 
-from markchain.profiles import policies
+from markchain.profiles import PROFILES
 
 _DRAFT_RULES = (
     "You propose Markdown document changes. Return only the required JSON. "
@@ -36,7 +36,7 @@ def draft_prompt(state: dict[str, Any]) -> str:
             {"request": request, "search_coverage": state.get("coverage")},
             ensure_ascii=False,
         ),
-        "DOCUMENT POLICY: " + policies[request["profile"]],
+        "DOCUMENT POLICY: " + PROFILES[request["profile"]].guidance,
     ]
     listed = state.get("listed") or []
     if listed:
@@ -58,9 +58,14 @@ def draft_prompt(state: dict[str, Any]) -> str:
             + json.dumps(state["previous"], ensure_ascii=False)
             + "\nReconcile prior effects. Do not repeat already applied changes."
         )
+    if PROFILES[request["profile"]].require_evidence:
+        parts.append(
+            "EVIDENCE REQUIRED: every change must quote, in evidence, the exact "
+            "source text it relies on."
+        )
     if state.get("feedback"):
         parts.append(
-            "PREVIOUS REVIEW REJECTED THE LAST PROPOSAL FOR: "
+            "THE LAST PROPOSAL WAS NOT ACCEPTED FOR: "
             + json.dumps(state["feedback"], ensure_ascii=False)
             + "\nFix these issues."
         )
@@ -80,7 +85,7 @@ def review_prompt(state: dict[str, Any], changes: list[dict[str, str]]) -> str:
         "unnecessary rewriting and document policy violations. Report concrete "
         "issues. This is not external fact verification. Approve only if there are "
         "no issues. DOCUMENT POLICY: "
-        + policies[state["request"]["profile"]]
+        + PROFILES[state["request"]["profile"]].guidance
         + "\n"
         + json.dumps(
             {

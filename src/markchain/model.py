@@ -8,7 +8,14 @@ import time
 from collections.abc import Callable
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from markchain.context import shape
 from markchain.editing import Decision, Review
@@ -45,13 +52,17 @@ class Intent(BaseModel):
         "Omitted uses the configured default",
     )
     allow_delete: bool = False
-    allow_rewrite: bool = Field(
-        default=False,
-        description="Allow edits that replace a large share of a document",
-    )
     fallback_reason: (
         Literal["insufficient_evidence", "user_reported_missing"] | None
     ) = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def drop_retired(cls, value: Any) -> Any:
+        # Jobs queued by earlier versions may still carry retired fields.
+        if isinstance(value, dict) and "allow_rewrite" in value:
+            value = {k: v for k, v in value.items() if k != "allow_rewrite"}
+        return value
 
     @field_validator("folders")
     @classmethod

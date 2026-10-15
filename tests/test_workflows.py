@@ -340,7 +340,8 @@ class Model(ClaudeModel):
             stream.write("draft\\n")
         return {"decision": {
             "action":"supplement", "reason":"교체", "sources":["docs/a.md"],
-            "uncertainties":[], "changes":[{
+            "uncertainties":[], "evidence":[{"path":"docs/a.md","quote":"이전"}],
+            "changes":[{
                 "path":"docs/a.md", "operation":"replace",
                 "replacements":[{"old":"이전","new":"이후"}]}]}, "usage":None}
     def review(self, prompt, cancelled):
