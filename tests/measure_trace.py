@@ -3,7 +3,7 @@ import statistics
 import time
 from pathlib import Path
 
-from markchain.trace import Trace
+from hanger.trace import Trace
 
 
 def main() -> None:

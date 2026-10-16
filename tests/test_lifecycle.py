@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from markchain.documents import Documents
-from markchain.errors import RequestError
-from markchain.requests import Change, Proposal, digest
-from markchain.runtime import Limits, Runtime
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.requests import Change, Proposal, digest
+from hanger.runtime import Limits, Runtime
 
 
 # #5: daily cleanup removes expired work, not a still-valid completed identity.
 def test_cleanup_preserves_valid_keys_and_discards_expired_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     clock = time.time()
     monkeypatch.setattr(time, "time", lambda: clock)
@@ -40,7 +40,7 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
         assert result["status"] == "cleaned"
         assert runtime.status(complete) == {}
         assert runtime.submit(valid, proposal) == "duplicate"
-        with pytest.raises(RequestError, match="유효 기간"):
+        with pytest.raises(RequestError, match="expired"):
             runtime.submit(complete, proposal)
         assert runtime.cleanup()["status"] == "already_cleaned"
 
@@ -49,7 +49,7 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
 def test_restart_removes_expired_pending_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     with Runtime(root, tmp_path / "state") as runtime:
         key = runtime.issue_key()
@@ -66,7 +66,7 @@ def test_restart_removes_expired_pending_request(
 def test_expired_symlink_target_does_not_block_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     state = tmp_path / "state"
     with Runtime(root, state) as runtime:
@@ -93,7 +93,7 @@ def test_expired_symlink_target_does_not_block_startup(
 def test_admission_capacity_rejects_without_queueing(
     tmp_path: Path, boundary: str
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     overrides = {
         "count": {"pending_jobs": 0},
@@ -117,7 +117,7 @@ def test_admission_capacity_rejects_without_queueing(
 def test_cleanup_busy_writer_keeps_recovery_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     started = threading.Event()
     released = threading.Event()
@@ -150,7 +150,7 @@ def test_cleanup_busy_writer_keeps_recovery_state(
 def test_expired_crash_candidate_deleted_without_touching_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     state = tmp_path / "state"
     (root / "a.md").write_text("original")
@@ -166,7 +166,7 @@ def test_expired_crash_candidate_deleted_without_touching_source(
     code = """
 import os, sys
 from pathlib import Path
-from markchain.runtime import Runtime
+from hanger.runtime import Runtime
 def crash(*args):
     os._exit(74)
 os.replace = crash
@@ -177,12 +177,12 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
         [sys.executable, "-c", code, str(root), str(state)], check=False, timeout=30
     )
     assert result.returncode == 74
-    assert list(root.glob(".markchain-*.pending"))
+    assert list(root.glob(".hanger-*.pending"))
     future = time.time() + 25 * 3600
     monkeypatch.setattr(time, "time", lambda: future)
     with Runtime(root, state) as runtime:
         assert runtime.run_next() is None
-    assert not list(root.glob(".markchain-*.pending"))
+    assert not list(root.glob(".hanger-*.pending"))
     assert (root / "a.md").read_text() == "original"
 
 
@@ -190,7 +190,7 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
 def test_retry_limit_survives_restart_and_allows_other_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     state = tmp_path / "state"
     clock = time.time()
@@ -227,7 +227,7 @@ def test_retry_limit_survives_restart_and_allows_other_work(
     with Runtime(root, state) as runtime:
         result = runtime.run_next()
         assert result is not None and result["status"] == "failed"
-        assert result["error"].startswith("처리 중 오류가 발생해 3회 재시도했으나 실패")
+        assert result["error"].startswith("The job failed after 3 retries")
         assert "proposal" not in runtime.status(key)
         assert result["error_code"] == "internal"
         assert runtime.run_next() is None

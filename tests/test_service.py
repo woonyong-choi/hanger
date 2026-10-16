@@ -9,15 +9,15 @@ import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from markchain.search import SearchIndex
+from hanger.search import SearchIndex
 
 
 # #4: the installed protocol keeps watch, search, writes and status in one owner.
 def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     try:
         asyncio.run(_scenario(root, tmp_path / "state", url))
@@ -26,9 +26,7 @@ def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
             [
                 sys.executable,
                 "-m",
-                "markchain.cli",
-                "--vault",
-                str(root),
+                "hanger.cli",
                 "--state",
                 str(tmp_path / "state"),
                 "--search-url",
@@ -48,9 +46,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         command=sys.executable,
         args=[
             "-m",
-            "markchain.cli",
-            "--vault",
-            str(root),
+            "hanger.cli",
             "--state",
             str(state),
             "--search-url",
@@ -68,6 +64,11 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         assert {"collect", "search_documents", "request_change", "cancel_job"} <= {
             tool.name for tool in tools.tools
         }
+        empty = await session.call_tool("list_closets", {})
+        assert empty.structuredContent is not None
+        assert "register_closet" in empty.structuredContent["next"]
+        added = await session.call_tool("register_closet", {"path": str(root)})
+        assert not added.isError
         key = await _key(session)
         unused = await session.call_tool("job_status", {"key": key})
         assert unused.structuredContent is not None
@@ -106,7 +107,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         )
         assert empty.structuredContent is not None
         assert empty.structuredContent["documents"] == []
-        if os.environ.get("MARKCHAIN_TEST_LIVE_MODEL"):
+        if os.environ.get("HANGER_TEST_LIVE_MODEL"):
             key = await _key(session)
             requested = await session.call_tool(
                 "request_change",

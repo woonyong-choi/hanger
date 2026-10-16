@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from markchain.config import Settings
-from markchain.elastic import ES_VERSION, ElasticManager
-from markchain.errors import MarkchainError
+from hanger.config import Settings
+from hanger.elastic import ES_VERSION, ElasticManager
+from hanger.errors import HangerError
 
 PORT = 19230
 
@@ -21,9 +21,9 @@ PORT = 19230
 @pytest.fixture
 def install_root(tmp_path: Path) -> Path:
     """Point the manager at an already extracted Elasticsearch with Nori."""
-    home = os.environ.get("MARKCHAIN_TEST_ES_HOME")
+    home = os.environ.get("HANGER_TEST_ES_HOME")
     if not home:
-        pytest.skip("requires MARKCHAIN_TEST_ES_HOME with an extracted server")
+        pytest.skip("requires HANGER_TEST_ES_HOME with an extracted server")
     root = tmp_path / "install"
     root.mkdir()
     (root / f"elasticsearch-{ES_VERSION}").symlink_to(home)
@@ -102,8 +102,8 @@ def test_server_stops_when_owner_is_killed(install_root: Path, tmp_path: Path) -
     script = (
         "import sys,time\n"
         "from pathlib import Path\n"
-        "from markchain.config import Settings\n"
-        "from markchain.elastic import ElasticManager\n"
+        "from hanger.config import Settings\n"
+        "from hanger.elastic import ElasticManager\n"
         f"m=ElasticManager(Path({str(install_root)!r}),Path({str(state)!r}),"
         f"Settings.model_validate({{'elasticsearch':{{'port':{PORT}}}}}))\n"
         "m.start()\n"
@@ -161,7 +161,7 @@ def test_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
     engine = ElasticManager(
         tmp_path / "install", tmp_path / "state", Settings(), downloader=fake
     )
-    with pytest.raises(MarkchainError, match="checksum mismatch"):
+    with pytest.raises(HangerError, match="checksum mismatch"):
         engine.install()
     assert not (tmp_path / "install" / f"elasticsearch-{ES_VERSION}").exists()
 
@@ -170,7 +170,7 @@ def test_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
 def test_progress_without_terminal_prints_deciles() -> None:
     import io
 
-    from markchain.progress import Progress
+    from hanger.progress import Progress
 
     stream = io.StringIO()
     progress = Progress(stream)

@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from markchain.documents import Documents
-from markchain.requests import digest
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
+from hanger.documents import Documents
+from hanger.requests import digest
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
 
 FIXTURES = {
     "payment": (
@@ -46,7 +46,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.directory.exists() and not args.reuse_corpus:
         raise SystemExit("measurement directory must not already exist")
-    root = args.directory / "vault"
+    root = args.directory / "closet"
     if not args.reuse_corpus:
         _corpus(root, args.count)
     index = SearchIndex("http://127.0.0.1:19200", str(root.resolve()))
