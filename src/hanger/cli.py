@@ -138,7 +138,11 @@ def _parser() -> argparse.ArgumentParser:
         help="run everything in this process instead of the shared service",
     )
     commands.add_parser("stop", help="stop the background service")
-    commands.add_parser("daemon", help=argparse.SUPPRESS)
+    commands.add_parser("daemon")
+    # Internal: started by the relay, so it stays out of the command list.
+    commands._choices_actions = [
+        action for action in commands._choices_actions if action.dest != "daemon"
+    ]
 
     commands.add_parser("key", help="issue a request key")
     search = commands.add_parser("search", help="search notes")
@@ -171,8 +175,11 @@ def _parser() -> argparse.ArgumentParser:
     resolve.add_argument(
         "choice", choices=("reconsider",), nargs="?", default="reconsider"
     )
-    for name in ("status", "cancel"):
-        commands.add_parser(name, help=f"job {name}").add_argument("key")
+    for name, text in (
+        ("status", "show a job's progress and result"),
+        ("cancel", "cancel a job that has not finished"),
+    ):
+        commands.add_parser(name, help=text).add_argument("key")
 
     # Maintenance, run in this process without the background service.
     for name, text in (

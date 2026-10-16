@@ -26,9 +26,9 @@ write: true
 # How to keep this closet
 
 Hanger reads this file before it adds or changes notes here. Write the rules
-the way you would explain them to a careful assistant. A HANGER.md in a subfolder
-adds rules for that folder, and when two files disagree, the one closer to the
-note wins.
+the way you would explain them to a careful assistant. A HANGER.md in a
+subfolder adds rules for that folder, and when two files disagree, the one
+closer to the note wins. Hanger never edits these files itself.
 
 ## Notes
 

@@ -120,6 +120,8 @@ class ElasticManager:
     def message(self) -> str:
         """Describe the engine state for the AI client, as a system message."""
         elapsed = int(time.monotonic() - self._since)
+        if self._status == "failed" and self._code == "search_root":
+            return self._detail.split(" (retry in")[0]
         if self._status == "failed" and self._code == "port_in_use":
             return (
                 f"Another program uses the search port {self.settings.port}. Stop "
@@ -366,6 +368,12 @@ class ElasticManager:
     # vars: s = server start time
     # basis: estimate
     def _start_once(self) -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            raise HangerError(
+                "Elasticsearch refuses to run as root. Run Hanger as a normal user, "
+                "or use your own server: hanger --search-url <url> ...",
+                code="search_root",
+            )
         with self._lock:
             identity = self._probe()
             if identity is not None:
