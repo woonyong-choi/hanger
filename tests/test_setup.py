@@ -96,3 +96,15 @@ def test_all_folders_means_future_folders_too(tmp_path: Path) -> None:
         config, Settings(), source=io.StringIO(f"{vault}\n\n\n"), out=io.StringIO()
     )
     assert settings.vault.managed == ()
+
+
+# The printed MCP command is one the CLI accepts, including a custom state.
+def test_setup_prints_runnable_serve_command(tmp_path: Path) -> None:
+    import shlex
+
+    from markchain.cli import _parser, serve_command
+
+    words = shlex.split(serve_command(tmp_path / "state"))
+    arguments = _parser().parse_args(words[1:])
+    assert arguments.command == "serve"
+    assert arguments.state == tmp_path / "state"

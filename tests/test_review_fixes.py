@@ -338,7 +338,10 @@ def test_configured_layout_rules(vault: tuple[Path, Path, str]) -> None:
         _finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "failed"
-    assert status["message"] == "쓰기 허용 범위 밖의 경로입니다: notes/a.md"
+    assert status["message"] == (
+        "모델 출력 오류로 3회 다시 작성했으나 실패했습니다: "
+        "쓰기 허용 범위 밖의 경로입니다: notes/a.md"
+    )
     assert all(a.get("args", {}).get("choice") is None for a in status["next_actions"])
     assert "Writable folders: docs, inbox." in model.prompts[0]
 
@@ -393,7 +396,7 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
         service._threads["markchain-worker-1"].join(5)
         service._stop.clear()
         service._beats["markchain-worker-1"] = time.monotonic() - 3600
-        assert service.health() == "job workers stalled"
+        assert service.health() == "작업 처리기가 60초 넘게 응답하지 않습니다."
         dead = threading.Thread(target=lambda: None)
         dead.start()
         dead.join()
