@@ -112,9 +112,9 @@ class Service:
                 continue
             started = self._busy.get(name)
             if started is not None and now - started > _BUSY_STALL_SECONDS:
-                return "a job has been running too long"
+                return "작업 하나가 25분 넘게 끝나지 않고 있습니다."
             if started is None and now - beat > _IDLE_STALL_SECONDS:
-                return "job workers stalled"
+                return "작업 처리기가 60초 넘게 응답하지 않습니다."
         return None
 
     def issue_key(self) -> str:

@@ -310,14 +310,20 @@ def _setup(
             step.done(f"Elasticsearch {ES_VERSION} already installed")
     ui.stream.write("\n")
     ui.line("done", "Markchain is ready", str(settings.vault.root))
-    command = f"{shutil.which('markchain') or 'markchain'} serve"
-    if state != _DEFAULT_STATE.resolve():
-        command += f" --state {shlex.quote(str(state))}"
+    command = serve_command(state)
     ui.note("connect an MCP client (already registered clients need nothing):")
     ui.note(f"  claude mcp add --scope user markchain -- {command}")
     ui.note(f"  codex mcp add markchain -- {command}")
     ui.stream.write("\n")
     return _SILENT
+
+
+def serve_command(state: Path) -> str:
+    """Return the MCP server command for a state folder, as setup prints it."""
+    command = shutil.which("markchain") or "markchain"
+    if state != _DEFAULT_STATE.resolve():
+        command += f" --state {shlex.quote(str(state))}"
+    return command + " serve"
 
 
 def _daemon(

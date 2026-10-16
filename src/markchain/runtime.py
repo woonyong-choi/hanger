@@ -826,7 +826,7 @@ class Runtime:
                 raise
             # Model output that breaks an edit rule is re-drafted with the
             # rule violation as feedback, like a review rejection.
-            if error.retryable or error.code == "model_output":
+            if error.retryable or error.code in _REDRAFT:
                 return self._again(
                     state, "model_attempt", self.settings.jobs.error_attempts, error
                 )
@@ -990,6 +990,8 @@ class Runtime:
         return {"status": status, "results": results, "applied": applied}
 
 
+# Model output that breaks an edit rule is redrafted with the violation.
+_REDRAFT = {"model_output", "write_denied", "delete_denied"}
 # Jobs in these states keep one record and no history (see Runtime._discard).
 _FINAL = {"completed", "deferred", "conflict", "failed", "cancelled", "expired"}
 # What each state keeps beyond the result: a summary of what was decided, or
