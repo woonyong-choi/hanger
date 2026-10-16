@@ -41,7 +41,7 @@ class ReviewRejectedError(HangerError):
 
     def __init__(self, issues: list[str]) -> None:
         self.issues = issues
-        super().__init__("; ".join(issues) or "검토에서 승인되지 않았습니다.")
+        super().__init__("; ".join(issues) or "The review did not approve the change.")
 
 
 class SearchUnavailableError(HangerError):

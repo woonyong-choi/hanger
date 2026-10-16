@@ -108,4 +108,3 @@ def unflatten(values: dict[str, Any]) -> dict[str, Any]:
             node = node.setdefault(part, {})
         node[leaf] = value
     return nested
-

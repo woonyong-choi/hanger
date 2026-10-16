@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["SearchIndex"]
+__all__ = ["INDEX_PREFIX", "SearchIndex"]
 
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -11,29 +11,25 @@ from hanger.errors import RequestError
 from hanger.requests import digest
 from hanger.scope import SearchScope
 
+INDEX_PREFIX = "hanger-"
+
 
 class SearchIndex:
-    def __init__(self, url: str, closet_identity: str, *, owned: bool = False) -> None:
-        self.name = "hanger-" + digest(closet_identity.encode())[:24] + "-v2"
+    """The search index of one closet, named after the closet's path."""
+
+    def __init__(self, url: str, closet_identity: str) -> None:
+        self.name = INDEX_PREFIX + digest(closet_identity.encode())[:24] + "-v2"
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
-        # The managed server belongs to one state folder and so to one closet:
-        # any other Hanger index on it is left over from an earlier root.
-        self.owned = owned
 
     def close(self) -> None:
         self.client.close()
 
+    def delete(self) -> None:
+        self.client.options(ignore_status=404).indices.delete(index=self.name)
+
     # cost: time O(1), heap O(1), stack O(1), io O(1)
     # basis: estimate
     def ensure(self) -> None:
-        if self.owned:
-            leftovers = [
-                name
-                for name in self.client.indices.get(index="hanger-*")
-                if name != self.name
-            ]
-            for name in leftovers:
-                self.client.options(ignore_status=404).indices.delete(index=name)
         if self.client.indices.exists(index=self.name):
             return
         self.client.indices.create(
@@ -177,7 +173,9 @@ class SearchIndex:
             },
         )
         if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
-            raise RequestError("검색 서버가 요청 범위 전체를 검색하지 못했습니다.")
+            raise RequestError(
+                "The search server could not search the whole requested scope."
+            )
         return [
             dict(hit["_source"], score=hit["_score"])
             for hit in response["hits"]["hits"]

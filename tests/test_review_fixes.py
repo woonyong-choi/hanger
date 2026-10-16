@@ -384,9 +384,7 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
             raise RuntimeError("unexpected")
 
         runtime.run_next = explode  # type: ignore[method-assign]
-        service._targets = {
-            "hanger-worker-1": lambda: service._work("hanger-worker-1")
-        }
+        service._targets = {"hanger-worker-1": lambda: service._work("hanger-worker-1")}
         service._spawn("hanger-worker-1")
         time.sleep(3)
         assert calls >= 2

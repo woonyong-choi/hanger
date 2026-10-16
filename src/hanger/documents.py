@@ -25,26 +25,20 @@ class Documents:
 
     def resolve(self, relative: str) -> Path:
         if Path(relative).suffix.lower() != ".md":
-            raise RequestError("Markdown(.md) 문서만 다룰 수 있습니다.")
+            raise RequestError(f"Only Markdown (.md) notes can be used: {relative}")
         return self._resolve_any(relative)
 
     def _resolve_any(self, relative: str) -> Path:
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts or not path.parts:
-            raise RequestError(
-                "문서 경로가 올바르지 않습니다. Closet 기준 상대 경로를 사용하십시오."
-            )
+            raise RequestError(f"Use a path relative to the closet root: {relative}")
         if path.as_posix() != relative:
-            raise RequestError(
-                "문서 경로가 정규 형식이 아닙니다. ./ 나 // 없이 지정하십시오."
-            )
-        if any(part.startswith(".") for part in path.parts):
-            raise RequestError("숨김 경로의 문서는 다룰 수 없습니다.")
+            raise RequestError(f"Write the path without ./ or //: {relative}")
         target = self.root / path
         if not target.resolve().is_relative_to(self.root):
-            raise RequestError("문서 경로가 Closet 밖을 가리킵니다.")
+            raise RequestError(f"The path points outside the closet: {relative}")
         if any(p.is_symlink() for p in [target, *target.parents] if p != self.root):
-            raise RequestError("심볼릭 링크를 거치는 경로는 다룰 수 없습니다.")
+            raise RequestError(f"Paths through symbolic links are not used: {relative}")
         return target
 
     # cost: time O(n), heap O(1), stack O(1), io O(n/b)
@@ -70,7 +64,7 @@ class Documents:
             result = None if change.after is None else digest(change.after.encode())
             expected = {result} if index < cursor else {change.before, result}
             if self.read_hash(change.path) not in expected:
-                raise ConflictError(f"원문이 변경되었습니다: {change.path}")
+                raise ConflictError(f"The note changed: {change.path}")
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = source and result bytes
@@ -85,7 +79,7 @@ class Documents:
         if current == result:
             return "already_applied"
         if current != change.before:
-            raise ConflictError(f"원문이 변경되었습니다: {change.path}")
+            raise ConflictError(f"The note changed: {change.path}")
         if change.after is None:
             return self._delete(change, target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -98,7 +92,7 @@ class Documents:
                 os.fsync(output.fileno())
             # External writers can still race the final compare and replacement.
             if self.read_hash(change.path) != change.before:
-                raise ConflictError(f"원문이 변경되었습니다: {change.path}")
+                raise ConflictError(f"The note changed: {change.path}")
             if target.exists():
                 pending.chmod(target.stat().st_mode & 0o777)
             os.replace(pending, target)
@@ -121,11 +115,11 @@ class Documents:
         if target.exists():
             if _hash_file(target) == expected:
                 return "already_applied"
-            raise ConflictError(f"같은 이름의 다른 파일이 이미 있습니다: {relative}")
+            raise ConflictError(f"A different file with this name exists: {relative}")
         size = source.stat().st_size
         target.parent.mkdir(parents=True, exist_ok=True)
         if shutil.disk_usage(target.parent).free < size + _FREE_MARGIN:
-            raise RequestError("디스크 여유 공간이 부족해 파일을 수집할 수 없습니다.")
+            raise RequestError("Not enough free disk space to collect this file.")
         pending = self._pending_path(relative)
         pending.unlink(missing_ok=True)
         try:
@@ -138,7 +132,7 @@ class Documents:
                 os.fsync(output.fileno())
             if hashed.hexdigest() != expected:
                 raise ConflictError(
-                    f"수집하는 동안 원본 파일이 변경되었습니다: {source}"
+                    f"The file changed while it was collected: {source}"
                 )
             try:
                 os.link(pending, target)  # fails instead of overwriting
@@ -146,7 +140,7 @@ class Documents:
                 if _hash_file(target) == expected:
                     return "already_applied"
                 raise ConflictError(
-                    f"같은 이름의 다른 파일이 이미 있습니다: {relative}"
+                    f"A different file with this name exists: {relative}"
                 ) from None
             except OSError:
                 if target.exists():
@@ -186,7 +180,7 @@ class Documents:
         except FileNotFoundError:
             if self.read_hash(change.path) is None:
                 return "already_applied"
-            raise ConflictError(f"원문이 변경되었습니다: {change.path}") from None
+            raise ConflictError(f"The note changed: {change.path}") from None
         try:
             moved = _hash_file(deleting)
         except OSError:
@@ -194,7 +188,7 @@ class Documents:
             raise
         if moved != change.before:
             self._restore(deleting, target)
-            raise ConflictError(f"원문이 변경되었습니다: {change.path}")
+            raise ConflictError(f"The note changed: {change.path}")
         deleting.unlink()
         _sync_directory(target.parent)
         return "applied"
@@ -239,7 +233,7 @@ class Documents:
             _sync_directory(target.parent)
             return
         raise ConflictError(
-            f"삭제를 되돌릴 파일 이름을 확보하지 못했습니다: {target.name}"
+            f"No free file name to restore a deleted note: {target.name}"
         )
 
     def _deleting_path(self, relative: str) -> Path:
@@ -274,7 +268,9 @@ class Documents:
         target = self.root / relative
         parent = target.parent.resolve()
         if parent != target.parent or not parent.is_relative_to(self.root):
-            raise RequestError("문서가 있던 폴더가 바뀌어 안전하게 쓸 수 없습니다.")
+            raise RequestError(
+                f"The note's folder moved; it cannot be written safely: {relative}"
+            )
         identity = digest((self._writer_id + ":" + relative).encode())[:32]
         return target.with_name(f".hanger-{identity}.pending")
 

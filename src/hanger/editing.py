@@ -3,12 +3,12 @@ from __future__ import annotations
 __all__ = ["Decision", "EditPolicy", "Review", "describe_changes", "materialize"]
 
 import difflib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from hanger.config import Settings
+from hanger.closets import ClosetPolicy
 from hanger.documents import Documents
 from hanger.errors import RequestError
 from hanger.requests import Change, Proposal
@@ -60,7 +60,8 @@ class EditPolicy:
     what the request allows.
     """
 
-    settings: Settings = field(default_factory=Settings)
+    # Where the closet allows writing; None allows every Markdown path.
+    closet: ClosetPolicy | None = None
     allow_delete: bool = False
     # Set by the document profile: changes must quote their sources.
     require_evidence: bool = False
@@ -78,7 +79,7 @@ def materialize(
     policy = policy or EditPolicy()
     if any(path not in sources for path in decision.sources):
         raise RequestError(
-            "읽지 않은 문서를 근거로 인용했습니다. 제공된 문서만 인용하십시오.",
+            "You cited a note you were not given. Cite only the given notes.",
             code="model_output",
         )
     for evidence in decision.evidence:
@@ -87,26 +88,28 @@ def materialize(
             or evidence.quote not in sources[evidence.path]["content"]
         ):
             raise RequestError(
-                "인용한 문장이 해당 원문에 없습니다. 원문의 문장을 "
-                "그대로 인용하십시오.",
+                "A quote in evidence is not in its note. Quote the note's text "
+                "exactly.",
                 code="model_output",
             )
     if policy.require_evidence and decision.changes and not decision.evidence:
         raise RequestError(
-            "이 문서 종류는 변경 근거 인용이 필요합니다. evidence에 근거가 된 원문 "
-            "문장을 그대로 넣으십시오.",
+            "This kind of note needs evidence for every change. Put the exact "
+            "source text each change relies on in evidence.",
             code="model_output",
         )
     if decision.action in {"keep", "defer"} and decision.changes:
         raise RequestError(
-            "유지·보류 판정에는 문서 변경을 포함할 수 없습니다.", code="model_output"
+            "A keep or defer decision cannot include changes.", code="model_output"
         )
     changes = []
     for edit in decision.changes:
         target = documents.resolve(edit.path)
-        if not policy.settings.writable(edit.path):
+        if policy.closet is not None and not policy.closet.writable(edit.path):
             raise RequestError(
-                f"쓰기 허용 범위 밖의 경로입니다: {edit.path}", code="write_denied"
+                f"This path may not be written (ignored, or write: false in its "
+                f"RULES.md): {edit.path}",
+                code="write_denied",
             )
         source = sources.get(edit.path)
         if edit.operation == "create":
@@ -117,7 +120,8 @@ def materialize(
                 or edit.replacements
             ):
                 raise RequestError(
-                    "새 문서는 존재하지 않는 경로와 전체 본문이 필요합니다.",
+                    "A new note needs a path that does not exist yet and its full "
+                    "content.",
                     code="model_output",
                 )
             after = edit.content
@@ -128,15 +132,15 @@ def materialize(
                 or edit.content is not None
             ):
                 raise RequestError(
-                    "기존 문서 수정은 읽고 인용한 원문에 대해 구간 "
-                    "교체로만 할 수 있습니다.",
+                    "An existing note can only be changed by replacing exact "
+                    "passages of a note you were given and cited.",
                     code="model_output",
                 )
             if edit.operation == "delete":
                 if not policy.allow_delete or edit.replacements:
                     raise RequestError(
-                        f"삭제가 허용되지 않은 요청입니다: {edit.path}. 삭제하려면 "
-                        "allow_delete가 필요합니다.",
+                        f"This request does not allow deleting {edit.path}. "
+                        "Deleting needs allow_delete.",
                         code="delete_denied",
                     )
                 after = None
@@ -153,15 +157,15 @@ def materialize(
 def _replace(content: str, replacements: list[_Replacement]) -> str:
     if not replacements:
         raise RequestError(
-            "수정에는 교체할 원문 구간이 하나 이상 필요합니다.", code="model_output"
+            "A change needs at least one passage to replace.", code="model_output"
         )
     spans = []
     for replacement in replacements:
         start = content.find(replacement.old)
         if start < 0 or content.find(replacement.old, start + 1) >= 0:
             raise RequestError(
-                "교체할 원문 구간이 문서에서 정확히 한 번 나타나야 합니다. 앞뒤 "
-                "문장을 포함해 구간을 늘리십시오.",
+                "Each passage to replace must appear exactly once in the note. "
+                "Include more of the surrounding text.",
                 code="model_output",
             )
         spans.append((start, start + len(replacement.old), replacement.new))
@@ -171,7 +175,7 @@ def _replace(content: str, replacements: list[_Replacement]) -> str:
     for start, end, text in spans:
         if start < cursor:
             raise RequestError(
-                "교체 구간이 서로 겹칩니다. 겹치지 않게 나누십시오.",
+                "Two passages to replace overlap. Split them so they do not.",
                 code="model_output",
             )
         pieces.extend((content[cursor:start], text))
@@ -179,7 +183,9 @@ def _replace(content: str, replacements: list[_Replacement]) -> str:
     pieces.append(content[cursor:])
     result = "".join(pieces)
     if result == content:
-        raise RequestError("교체 결과가 원문과 같습니다.", code="model_output")
+        raise RequestError(
+            "The replacements leave the note unchanged.", code="model_output"
+        )
     return result
 
 

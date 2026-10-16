@@ -78,7 +78,7 @@ def _archive() -> tuple[str, str]:
         return _ARCHIVES[(system, machine)]
     except KeyError as error:
         raise HangerError(
-            f"unsupported platform: {system}-{machine}", code="platform"
+            f"Unsupported platform: {system}-{machine}", code="platform"
         ) from error
 
 
@@ -100,8 +100,7 @@ class ElasticManager:
         self.url = f"http://127.0.0.1:{self.settings.port}"
         # The cluster name ties a running server to this state directory.
         self.cluster = (
-            "hanger-"
-            + hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:12]
+            "hanger-" + hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:12]
         )
         self._download = downloader or _download
         self._status = "stopped"
@@ -123,16 +122,16 @@ class ElasticManager:
         elapsed = int(time.monotonic() - self._since)
         if self._status == "failed" and self._code == "port_in_use":
             return (
-                f"검색 서버 포트 {self.settings.port}를 다른 프로그램이 사용하고 "
-                "있습니다. 해당 프로그램을 종료하거나 설정에서 포트를 변경하십시오."
+                f"Another program uses the search port {self.settings.port}. Stop "
+                "it, or change the port: hanger config set elasticsearch.port <port>"
             )
         return {
-            "stopped": "검색 서버가 중지되어 있습니다.",
-            "installing": f"검색 서버를 설치하고 있습니다({elapsed}초 경과).",
-            "starting": f"검색 서버를 시작하고 있습니다({elapsed}초 경과).",
-            "ready": "검색 서버가 정상입니다.",
-            "recovering": f"검색 서버를 다시 시작하고 있습니다({elapsed}초 경과).",
-            "failed": "검색 서버를 시작하지 못해 자동으로 다시 시도하고 있습니다.",
+            "stopped": "The search engine is stopped.",
+            "installing": f"Installing the search engine ({elapsed}s so far).",
+            "starting": f"Starting the search engine ({elapsed}s so far).",
+            "ready": "The search engine is ready.",
+            "recovering": f"Restarting the search engine ({elapsed}s so far).",
+            "failed": "The search engine failed to start; retrying automatically.",
         }[self._status]
 
     def require(self) -> None:
@@ -372,7 +371,7 @@ class ElasticManager:
             if identity is not None:
                 if identity.get("cluster_name") != self.cluster:
                     raise HangerError(
-                        f"port {self.settings.port} is in use by another program",
+                        f"Port {self.settings.port} is in use by another program",
                         code="port_in_use",
                     )
                 if self._healthy():
@@ -385,7 +384,7 @@ class ElasticManager:
         while time.monotonic() < deadline and not self._stop.is_set():
             if self._process is not None and self._process.poll() is not None:
                 raise HangerError(
-                    "search engine exited during start "
+                    "The search engine exited during start "
                     f"(code {self._process.returncode})",
                     code="search_start",
                 )
@@ -393,7 +392,9 @@ class ElasticManager:
                 self._set("ready")
                 return
             time.sleep(1)
-        raise HangerError("search engine did not start in time", code="search_start")
+        raise HangerError(
+            "The search engine did not start in time", code="search_start"
+        )
 
     def _terminate(self) -> None:
         with self._lock:

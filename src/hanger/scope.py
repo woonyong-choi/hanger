@@ -21,10 +21,11 @@ class SearchScope:
                 not path
                 or "\\" in path
                 or "\x00" in path
-                or any(not part or part.startswith(".") for part in parts)
+                or any(part in {"", ".", ".."} for part in parts)
             ):
                 raise RequestError(
-                    "folders에는 Closet 기준 상대 폴더 경로만 지정할 수 있습니다."
+                    "folders takes folder paths relative to the closet root, "
+                    f"such as notes/projects: {folder}"
                 )
             paths.add(path)
         self.folders = tuple(

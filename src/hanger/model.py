@@ -19,11 +19,12 @@ from pydantic import (
     model_validator,
 )
 
-from hanger.config import _Model, _Models
+from hanger.config import Settings
 from hanger.context import shape
 from hanger.editing import Decision, Review
 from hanger.errors import ConflictError, ModelError, RequestError
 from hanger.profiles import Profile
+from hanger.providers import Choice, resolve_choice
 from hanger.scope import SearchScope
 from hanger.sync import Synchronizer
 from hanger.trace import Trace
@@ -79,7 +80,9 @@ _SYSTEM = (
     "You are a judgment step inside a Markdown document tool. "
     "Follow the instructions in the user message and return only the required JSON."
 )
-_CLI_NAMES = {"claude": "Claude Code(claude)", "codex": "Codex CLI(codex)"}
+
+
+_STOPPED = "The model call stopped: a source note changed or the job was cancelled."
 
 
 def _strict_schema(node: Any) -> Any:
@@ -96,40 +99,43 @@ def _strict_schema(node: Any) -> Any:
 
 
 class CliModel:
-    """Runs models only through subscription CLIs chosen per role in settings."""
+    """Runs models only through the subscription CLIs chosen in settings."""
 
     def __init__(
         self,
-        models: _Models | None = None,
+        settings: Settings | None = None,
         override: str | None = None,
         timeout_seconds: float = 600,
     ) -> None:
-        self.models = models or _Models()
+        self.settings = settings or Settings()
         # --model on the command line replaces the model name for every role.
         self.override = override
         self.timeout_seconds = timeout_seconds
+
+    def choice(self, role: Literal["draft", "review"]) -> Choice:
+        """The provider, model and effort one role runs with right now."""
+        model = self.settings.role(role)
+        return resolve_choice(model.provider, self.override or model.name, model.effort)
 
     # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
     # vars: t = provider latency, n = bounded request and response bytes
     # basis: estimate
     def generate(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        response = self._invoke(prompt, is_cancelled, Decision, self.models.draft)
+        response = self._invoke(prompt, is_cancelled, Decision, "draft")
         return {"decision": response["value"], "usage": response["usage"]}
 
     # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
     # vars: t = provider latency, n = bounded request and response bytes
     # basis: estimate
     def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        response = self._invoke(prompt, is_cancelled, Review, self.models.review)
+        response = self._invoke(prompt, is_cancelled, Review, "review")
         return {"review": response["value"], "usage": response["usage"]}
 
     # cost: time O(1), heap O(s), stack O(d), io O(1), tokens 0
     # vars: s = schema bytes, d = schema depth
     # basis: estimate
-    def _command(
-        self, choice: _Model, schema: type[BaseModel], folder: Path
-    ) -> list[str]:
-        name = self.override or choice.model
+    @staticmethod
+    def _command(choice: Choice, schema: type[BaseModel], folder: Path) -> list[str]:
         if choice.provider == "codex":
             schema_path = folder / "schema.json"
             schema_path.write_text(
@@ -149,9 +155,9 @@ class CliModel:
                 str(schema_path),
                 "--output-last-message",
                 str(folder / "answer.json"),
+                "--model",
+                choice.model,
             ]
-            if name:
-                command += ["--model", name]
             if choice.effort:
                 command += ["-c", f'model_reasoning_effort="{choice.effort}"']
             return [*command, "-"]
@@ -175,9 +181,9 @@ class CliModel:
             "--permission-prompts",
             "none",
             "--no-session-persistence",
+            "--model",
+            choice.model,
         ]
-        if name:
-            command += ["--model", name]
         if choice.effort:
             command += ["--effort", choice.effort]
         return command
@@ -202,12 +208,12 @@ class CliModel:
                     "turn.failed",
                     "error",
                 }:
-                    raise ModelError("모델이 오류를 반환했습니다.")
+                    raise ModelError("The model returned an error.")
             answer = (folder / "answer.json").read_text(encoding="utf-8")
             return schema.model_validate_json(answer), usage
         envelope = json.loads(output)
         if envelope.get("is_error"):
-            raise ModelError("모델이 오류를 반환했습니다.")
+            raise ModelError("The model returned an error.")
         return schema.model_validate(envelope.get("structured_output")), envelope.get(
             "usage"
         )
@@ -220,13 +226,11 @@ class CliModel:
         prompt: str,
         is_cancelled: Callable[[], bool],
         schema: type[BaseModel],
-        choice: _Model | None = None,
+        role: Literal["draft", "review"] = "draft",
     ) -> dict[str, Any]:
-        choice = choice or self.models.draft
+        choice = self.choice(role)
         if is_cancelled():
-            raise ConflictError(
-                "원문이 변경되었거나 작업이 취소되어 모델 호출을 중단했습니다."
-            )
+            raise ConflictError(_STOPPED)
         with tempfile.TemporaryDirectory(prefix="hanger-model-") as temp:
             folder = Path(temp)
             return self._run(prompt, is_cancelled, schema, choice, folder)
@@ -239,7 +243,7 @@ class CliModel:
         prompt: str,
         is_cancelled: Callable[[], bool],
         schema: type[BaseModel],
-        choice: _Model,
+        choice: Choice,
         folder: Path,
     ) -> dict[str, Any]:
         command = self._command(choice, schema, folder)
@@ -254,10 +258,9 @@ class CliModel:
                 cwd=folder,
             )
         except FileNotFoundError as error:
-            name = _CLI_NAMES[choice.provider]
             raise RequestError(
-                f"모델 실행 파일 {name}을 찾을 수 없습니다. 설치되어 있고 로그인했으며 "
-                "PATH에 있는지 확인하십시오.",
+                f"Cannot run {choice.describe()}. Check that it is installed, "
+                "signed in and on PATH.",
                 code="model_missing",
             ) from error
         with process:
@@ -265,12 +268,9 @@ class CliModel:
             try:
                 while True:
                     if is_cancelled():
-                        raise ConflictError(
-                            "원문이 변경되었거나 작업이 취소되어 모델 호출을 "
-                            "중단했습니다."
-                        )
+                        raise ConflictError(_STOPPED)
                     if time.monotonic() >= deadline:
-                        raise ModelError("모델 응답이 제한 시간을 넘었습니다.")
+                        raise ModelError("The model did not answer in time.")
                     try:
                         output, _ = process.communicate(pending, timeout=0.2)
                         break
@@ -285,13 +285,11 @@ class CliModel:
                         process.kill()
                         process.communicate()
         if process.returncode != 0:
-            raise ModelError(
-                f"모델 실행에 실패했습니다(종료 코드 {process.returncode})."
-            )
+            raise ModelError(f"The model run failed (exit code {process.returncode}).")
         try:
             value, usage = self._parse(choice.provider, output, folder, schema)
         except (ValueError, ValidationError, AttributeError, OSError) as error:
-            raise ModelError("모델 출력이 정해진 형식과 맞지 않습니다.") from error
+            raise ModelError("The model output does not match its format.") from error
         return {"value": value.model_dump(), "usage": usage}
 
 
@@ -313,6 +311,7 @@ class Planner:
         feedback: list[str] | None = None,
     ) -> dict[str, Any]:
         settings = self.synchronizer.settings
+        policy = self.synchronizer.policy
         with self.trace.measure("search") as metrics:
             search = self.synchronizer.search(
                 intent.query,
@@ -335,7 +334,7 @@ class Planner:
             except FileNotFoundError as error:
                 if path not in applied or applied[path] is not None:
                     raise RequestError(
-                        f"입력 문서를 찾을 수 없습니다: {path}", code="input_missing"
+                        f"An input note is missing: {path}", code="input_missing"
                     ) from error
         if previous:
             for change in previous.get("proposal", {}).get("changes", []):
@@ -360,7 +359,8 @@ class Planner:
             "coverage": search.get("coverage"),
             "previous": previous,
             "feedback": feedback or [],
-            "writable": list(settings.closet.writable),
+            "rules": policy.rules(documents, intent.folders),
+            "read_only": [path for path in documents if not policy.writable(path)],
             "applied": sorted(applied),
             "signatures": {path: doc["signature"] for path, doc in documents.items()},
         }

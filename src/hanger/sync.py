@@ -14,6 +14,7 @@ from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
 from elasticsearch.helpers import BulkIndexError
 
+from hanger.closets import ClosetPolicy
 from hanger.config import Settings
 from hanger.context import snippets
 from hanger.documents import Documents
@@ -31,9 +32,11 @@ class Synchronizer:
         documents: Documents,
         index: SearchIndex,
         settings: Settings | None = None,
+        policy: ClosetPolicy | None = None,
     ) -> None:
         self.documents = documents
         self.settings = settings or Settings()
+        self.policy = policy or ClosetPolicy(documents.root)
         self.index = index
         self.read_count = 0
         self.read_bytes = 0
@@ -88,11 +91,13 @@ class Synchronizer:
     def sync_paths(self, paths: list[str], *, force: bool = False) -> None:
         with self._writer:
             selected = [p for p in paths if self._included(p)]
+            # Paths now ignored leave the index.
+            self.index.write({"path": p} for p in paths if not self._included(p))
             previous = self.index.metadata(selected)
             self.index.write(self._updates(selected, previous, force=force))
 
     def _included(self, path: str) -> bool:
-        return path.lower().endswith(".md") and not self.settings.excluded(path)
+        return path.lower().endswith(".md") and not self.policy.excluded(path)
 
     def terms(self, query: str) -> list[str]:
         """Return query terms as the index analyzes them, for matched lines."""
@@ -143,9 +148,9 @@ class Synchronizer:
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         if not query.strip() or not 1 <= limit <= 100:
-            raise RequestError("검색어가 필요하며 limit은 1에서 100 사이여야 합니다.")
+            raise RequestError("Give a search query, and a limit between 1 and 100.")
         scope = SearchScope(folders)
-        self.settings.check_folders(scope.folders)
+        self.policy.check_folders(scope.folders)
         with self._writer:
             try:
                 if fallback_reason is not None or not self.reconciled:
@@ -165,12 +170,12 @@ class Synchronizer:
                     )
             except BadRequestError as error:
                 raise RequestError(
-                    "검색 서버가 요청을 거부했습니다. 질의나 폴더 범위를 "
-                    "좁혀 다시 검색하십시오."
+                    "The search server rejected the query. Shorten the query or "
+                    "narrow the folders and search again."
                 ) from error
             except (TransportError, ApiError, BulkIndexError) as error:
                 raise SearchUnavailableError(
-                    "검색 서버가 응답하지 않습니다."
+                    "The search server is not responding."
                 ) from error
             return {
                 "source": "elasticsearch",
@@ -180,7 +185,6 @@ class Synchronizer:
                 "reason": fallback_reason or "ranked",
                 "unverified": stale,
                 "folders": list(scope.folders),
-                "excluded_names": list(self.settings.closet.exclude),
             }
 
     # cost: time O(f), heap O(w), stack O(d), io O(f)
@@ -195,7 +199,7 @@ class Synchronizer:
             directories[:] = sorted(
                 d
                 for d in directories
-                if not self.settings.excluded((base / d).as_posix())
+                if not self.policy.excluded((base / d).as_posix(), folder=True)
                 and not (Path(parent) / d).is_symlink()
                 and scope.can_descend((base / d).as_posix())
             )
@@ -227,17 +231,17 @@ class Synchronizer:
         target = self.documents.resolve(path)
         before = _signature(target)
         if target.stat().st_size > MAX_DOCUMENT_BYTES:
-            raise RequestError(f"문서가 크기 한도(2MiB)를 넘습니다: {path}")
+            raise RequestError(f"The note is larger than 2 MiB: {path}")
         with target.open("rb") as source:
             data = source.read(MAX_DOCUMENT_BYTES + 1)
         self.read_count += 1
         self.read_bytes += len(data)
         if len(data) > MAX_DOCUMENT_BYTES or _signature(target) != before:
-            raise ConflictError(f"읽는 도중 문서가 변경되었습니다: {path}")
+            raise ConflictError(f"The note changed while it was read: {path}")
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
-            raise RequestError(f"UTF-8 문서가 아닙니다: {path}") from error
+            raise RequestError(f"The note is not UTF-8 text: {path}") from error
         title = next(
             (
                 line.lstrip("# ")
@@ -298,7 +302,10 @@ class Synchronizer:
         results, stale = [], []
         for hit in hits:
             if not scope.contains(hit["path"]):
-                raise RequestError("검색 결과에 요청 범위 밖 문서가 포함되었습니다.")
+                raise RequestError("The search returned a note outside the scope.")
+            if not self._included(hit["path"]):
+                stale.append(hit["path"])  # ignored since it was indexed
+                continue
             try:
                 target = self.documents.resolve(hit["path"])
                 signature = _signature(target)

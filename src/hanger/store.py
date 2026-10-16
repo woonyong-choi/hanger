@@ -80,8 +80,8 @@ class StateStore:
         self.state = state.expanduser().resolve()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = self.state / "hanger.db"
-        with self._connect() as connection:
-            connection.executescript(_SCHEMA)
+        connection = sqlite3.connect(self.path, timeout=30)
+        try:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > _SCHEMA_VERSION:
                 raise RequestError(
@@ -89,14 +89,18 @@ class StateStore:
                     "Update Hanger to use it.",
                     code="state_version",
                 )
+            connection.execute("PRAGMA journal_mode = WAL")
+            connection.executescript(_SCHEMA)
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            connection.commit()
+        finally:
+            connection.close()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=30, isolation_level=None)
         try:
             connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
             connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.execute("COMMIT")
@@ -226,7 +230,8 @@ class StateStore:
     def decision(self, decision_id: int) -> Decision | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, closet_id, kind, detail, status FROM decisions WHERE id = ?",
+                "SELECT id, closet_id, kind, detail, status FROM decisions "
+                "WHERE id = ?",
                 (decision_id,),
             ).fetchone()
         if row is None:
@@ -234,27 +239,34 @@ class StateStore:
         return Decision(int(row[0]), int(row[1]), row[2], json.loads(row[3]), row[4])
 
     def open_decision(self, closet_id: int, kind: str, detail: dict[str, Any]) -> int:
-        """Record a question for the user; a newer one replaces a pending one."""
+        """Record a question for the user, one pending question per closet.
+
+        The same question keeps its number. A different one withdraws the
+        pending question and gets a new number, so an answer always refers to
+        the question the user actually saw.
+        """
+        encoded = json.dumps(detail, sort_keys=True)
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM decisions WHERE closet_id = ? AND status = 'pending'",
+                "SELECT id, kind, detail FROM decisions "
+                "WHERE closet_id = ? AND status = 'pending'",
                 (closet_id,),
             ).fetchone()
             if row is not None:
+                if row[1] == kind and row[2] == encoded:
+                    return int(row[0])
                 connection.execute(
-                    "UPDATE decisions SET kind = ?, detail = ? WHERE id = ?",
-                    (kind, json.dumps(detail), row[0]),
+                    "UPDATE decisions SET status = 'withdrawn', resolved_at = ? "
+                    "WHERE id = ?",
+                    (time.time(), row[0]),
                 )
-                decision_id = int(row[0])
-            else:
-                cursor = connection.execute(
-                    "INSERT INTO decisions (closet_id, kind, detail, created_at) "
-                    "VALUES (?, ?, ?, ?)",
-                    (closet_id, kind, json.dumps(detail), time.time()),
-                )
-                decision_id = int(cursor.lastrowid or 0)
+            cursor = connection.execute(
+                "INSERT INTO decisions (closet_id, kind, detail, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (closet_id, kind, encoded, time.time()),
+            )
             self._bump(connection)
-        return decision_id
+        return int(cursor.lastrowid or 0)
 
     def close_decision(self, decision_id: int, status: str) -> None:
         """Mark a decision approved, declined or withdrawn (no longer needed)."""
@@ -301,7 +313,9 @@ class StateStore:
             )[key]
         except ValidationError as error:
             reason = error.errors(include_url=False)[0]["msg"]
-            raise RequestError(f"Invalid value for {key}: {reason}", code="config") from error
+            raise RequestError(
+                f"Invalid value for {key}: {reason}", code="config"
+            ) from error
         with self._connect() as connection:
             if stored == known[key]:
                 connection.execute("DELETE FROM settings WHERE key = ?", (key,))
@@ -314,3 +328,8 @@ class StateStore:
             self._bump(connection)
         return stored
 
+    def unset_setting(self, key: str) -> None:
+        """Return one setting to its default."""
+        with self._connect() as connection:
+            connection.execute("DELETE FROM settings WHERE key = ?", (key,))
+            self._bump(connection)

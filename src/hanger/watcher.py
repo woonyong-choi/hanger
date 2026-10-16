@@ -39,6 +39,11 @@ class ClosetWatcher(FileSystemEventHandler):
         self._observer.stop()
         self._observer.join()
 
+    def request_rescan(self) -> None:
+        """Check every file on the next pass, as after new ignore rules."""
+        with self._lock:
+            self._rescan = True
+
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.event_type not in {"created", "modified", "moved", "deleted"}:
             return

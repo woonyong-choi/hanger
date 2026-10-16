@@ -77,6 +77,12 @@ class Progress:
     def step(self, index: int, total: int, label: str, unit: str = "bytes") -> Step:
         return Step(self, f"[{index}/{total}] {label}", unit)
 
+    def ask(self, label: str) -> str:
+        """Ask one question on its own line and return the trimmed answer."""
+        self.stream.write(f"  {self.mark('ask')}{self.style(label, '1')} ")
+        self.stream.flush()
+        return sys.stdin.readline().strip()
+
     def note(self, text: str) -> None:
         self.stream.write("       " + self.style(text, "2") + "\n")
         self.stream.flush()

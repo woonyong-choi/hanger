@@ -4,8 +4,6 @@ __all__ = ["Limits", "Runtime"]
 
 import json
 import logging
-import os
-import secrets
 import shutil
 import sqlite3
 import threading
@@ -25,6 +23,7 @@ from langgraph.graph import END, START, StateGraph
 from persistqueue import SQLiteAckQueue
 from persistqueue.serializers import json as json_serializer
 
+from hanger.closets import ClosetPolicy
 from hanger.config import Settings
 from hanger.documents import Documents
 from hanger.errors import (
@@ -40,6 +39,7 @@ from hanger.requests import (
     Proposal,
     digest,
     issue_key,
+    load_secret,
     validate_key,
 )
 from hanger.trace import Trace
@@ -48,6 +48,14 @@ logger = logging.getLogger(__name__)
 # Retry delays for unexpected job errors; the last value repeats.
 # Short internal retries; after the last one the caller reports the failure.
 _RETRY_SECONDS = 10
+_KEY_REUSED = (
+    "This request key was already used for a different request. Get a new one "
+    "with issue_key."
+)
+_RECONSIDER_ONLY = (
+    "Only a job stopped by a changed note can be reconsidered. For a failed job, "
+    "get a new key with issue_key and send the request again."
+)
 
 
 @dataclass(frozen=True)
@@ -98,6 +106,7 @@ class Runtime:
         limits: Limits | None = None,
         trace: Trace | None = None,
         settings: Settings | None = None,
+        secret: bytes | None = None,
     ) -> None:
         self.documents = Documents(closet, writer_id=str(state.resolve()))
         self.state = state.resolve()
@@ -113,21 +122,31 @@ class Runtime:
         if settings is None and planner is not None:
             settings = planner.synchronizer.settings
         self.settings = settings or Settings()
+        # The closet's ignore and folder rules, shared with search and drafting.
+        self.policy = (
+            planner.synchronizer.policy
+            if planner is not None
+            else ClosetPolicy(self.documents.root)
+        )
         # Set by the service to report stalled workers or search recovery.
         self.health: Callable[[], str | None] = lambda: None
         self._pending: dict[str, dict[str, Any]] = {}
         self._queue_ids: dict[str, int] = {}
         self._active: set[str] = set()
         if self.state.is_relative_to(self.documents.root):
-            raise RequestError("runtime state must be outside closet")
+            raise RequestError("Hanger's state folder must be outside the closet.")
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             self._resources.enter_context(
                 FileLock(self.state / "owner.lock", timeout=0)
             )
         except Timeout as error:
-            raise RequestError("runtime state is already in use") from error
+            raise RequestError(
+                f"The job state is already in use by another process: {self.state}",
+                code="state_in_use",
+            ) from error
         try:
+            self._secret = secret or load_secret(self.state)
             self._open()
         except (OSError, sqlite3.Error, ValueError, HangerError):
             self._resources.close()
@@ -144,6 +163,21 @@ class Runtime:
 
     def interrupt(self) -> None:
         self._interrupted.set()
+
+    def drain(self, timeout: float) -> bool:
+        """Wait until no job runs; call after interrupt() before closing."""
+        deadline = time.monotonic() + timeout
+        acquired = 0
+        try:
+            for _ in range(2):
+                left = max(0.0, deadline - time.monotonic())
+                if not self._consumer.acquire(timeout=left):
+                    return False
+                acquired += 1
+            return True
+        finally:
+            for _ in range(acquired):
+                self._consumer.release()
 
     # cost: time O(c+q), heap O(b+q), stack O(1), io O(c+q)
     # vars: c = checkpoint bytes, q = retained queue bytes, b = checkpoint page bytes
@@ -234,13 +268,14 @@ class Runtime:
     def submit_intent(self, key: str, intent: Intent) -> str:
         deadline = validate_key(key, self._secret)
         if self._planner is None:
-            raise RequestError("모델 실행기가 설정되지 않았습니다.")
-        self.settings.check_folders(intent.folders)
+            raise RequestError("No model is configured for this closet.")
+        self.policy.check_folders(intent.folders)
         for path in intent.paths:
             self.documents.resolve(path)
-            if self.settings.excluded(path):
+            if self.policy.excluded(path):
                 raise RequestError(
-                    f"관리 범위 밖이거나 제외된 경로입니다: {path}", code="excluded"
+                    f"This note is ignored or is a rule file: {path}",
+                    code="excluded",
                 )
         payload = _intent_payload(self._resolved(intent))
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
@@ -264,10 +299,7 @@ class Runtime:
         if not previous:
             return False
         if previous["fingerprint"] != fingerprint:
-            raise RequestError(
-                "이미 다른 내용으로 사용된 요청 키입니다. "
-                "issue_key로 새 키를 발급받으십시오."
-            )
+            raise RequestError(_KEY_REUSED, code="key_reused")
         return True
 
     def record_done(self, key: str, fingerprint: str, results: dict[str, str]) -> None:
@@ -298,21 +330,18 @@ class Runtime:
         deadline = validate_key(new_key, self._secret)
         previous = self.status(key)
         if previous.get("status") != "conflict":
-            raise RequestError(
-                "충돌로 중단된 작업만 재검토할 수 있습니다. "
-                "실패한 작업은 issue_key로 새 키를 발급받아 다시 요청하십시오."
-            )
+            raise RequestError(_RECONSIDER_ONLY, code="not_conflict")
         if previous.get("resolved_by"):
             if previous["resolved_by"] == new_key:
                 return "duplicate"
             raise RequestError(
-                "이미 다른 키로 재검토 중인 작업입니다: "
-                f"{previous['resolved_by']}. 그 키로 상태를 확인하십시오."
+                "This job is already being reconsidered under key "
+                f"{previous['resolved_by']}. Check that key's status."
             )
         if not previous.get("intent"):
             raise RequestError(
-                "모델 지시가 없는 작업은 재검토할 수 없습니다. 현재 원문 "
-                "기준으로 새로 요청하십시오."
+                "A job without a model instruction cannot be reconsidered. Send a "
+                "new request based on the current notes."
             )
         intent = Intent.model_validate(previous["intent"])
         payload = {
@@ -337,14 +366,15 @@ class Runtime:
         canonical_paths = set()
         for change in proposal.changes:
             self.documents.resolve(change.path)
-            if not self.settings.writable(change.path):
+            if not self.policy.writable(change.path):
                 raise RequestError(
-                    f"쓰기 허용 범위 밖의 경로입니다: {change.path}",
+                    "This path may not be written (ignored, a rule file, or "
+                    f"write: false in its RULES.md): {change.path}",
                     code="write_denied",
                 )
             canonical = unicodedata.normalize("NFC", change.path).casefold()
             if canonical in canonical_paths:
-                raise RequestError("같은 문서를 가리키는 경로가 중복되었습니다.")
+                raise RequestError(f"Two changes point to the same note: {change.path}")
             canonical_paths.add(canonical)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
@@ -357,10 +387,7 @@ class Runtime:
             previous = self.status(key)
             if previous:
                 if previous["fingerprint"] != fingerprint:
-                    raise RequestError(
-                        "이미 다른 내용으로 사용된 요청 키입니다. "
-                        "issue_key로 새 키를 발급받으십시오."
-                    )
+                    raise RequestError(_KEY_REUSED, code="key_reused")
                 return "duplicate"
             request = {
                 "key": key,
@@ -374,7 +401,7 @@ class Runtime:
             queue_id = self._queue.put(request)
             if queue_id is None:
                 raise RequestError(
-                    "요청을 큐에 저장하지 못했습니다. 잠시 후 다시 요청하십시오."
+                    "The request could not be queued. Try again shortly."
                 )
             self._pending[key] = request
             self._queue_ids[key] = int(queue_id)
@@ -387,19 +414,18 @@ class Runtime:
         limits = self._limits
         if len(self._pending) >= limits.pending_jobs:
             raise RequestError(
-                "대기 중인 작업이 한도(256건)에 도달했습니다. 진행 중인 "
-                "작업이 끝난 뒤 다시 요청하십시오."
+                f"{limits.pending_jobs} jobs are already waiting. Try again after "
+                "some of them finish."
             )
         if incoming_bytes > limits.request_bytes:
-            raise RequestError("요청 크기가 한도(2MiB)를 넘습니다.")
+            raise RequestError("The request is larger than 2 MiB.")
         pending_bytes = sum(
             item.get("size_bytes", limits.request_bytes)
             for item in self._pending.values()
         )
         if pending_bytes + incoming_bytes > limits.pending_bytes:
             raise RequestError(
-                "대기 중인 요청의 총량이 한도(64MiB)에 도달했습니다. "
-                "잠시 후 다시 요청하십시오."
+                "Waiting requests already take 64 MiB. Try again shortly."
             )
         self._check_storage()
 
@@ -413,11 +439,10 @@ class Runtime:
         )
         if state_bytes + 8 * limits.request_bytes >= limits.state_bytes:
             raise RequestError(
-                "작업 기록 저장 공간이 한도에 도달했습니다. 만료 기록 "
-                "정리 후 다시 요청하십시오."
+                "The job history is full. Try again after expired jobs are cleaned up."
             )
         if shutil.disk_usage(self.state).free < limits.free_bytes:
-            raise RequestError("디스크 여유 공간이 부족합니다(5GiB 이상 필요).")
+            raise RequestError("Not enough free disk space (5 GiB needed).")
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = saved graph state bytes
@@ -445,7 +470,7 @@ class Runtime:
         ):
             # Waiting for an internal retry; the caller relays this to the user.
             record["error"] = (
-                f"처리 중 오류가 발생해 {_RETRY_SECONDS}초 후 다시 시도합니다 "
+                f"An error occurred; retrying in {_RETRY_SECONDS}s "
                 f"({request['attempts']}/{self.settings.jobs.error_attempts}): "
                 f"{request.get('retry_reason', '')}"
             )
@@ -461,56 +486,56 @@ class Runtime:
             return {
                 "key": key,
                 "status": "not_found",
-                "message": "이 키로 접수된 작업이 없습니다.",
+                "message": "No job was accepted with this key.",
                 "next_actions": [{"tool": "request_change"}, {"tool": "collect"}],
             }
         status = state["status"]
         actions: list[dict[str, Any]]
         if status in {"queued", "planning", "running"}:
-            message = self.health() or state.get("error") or "작업을 처리하고 있습니다."
+            message = self.health() or state.get("error") or "The job is running."
             actions = [{"tool": "job_status"}, {"tool": "cancel_job"}]
         elif status == "failed":
-            message = state.get("error") or "작업이 실패했습니다."
+            message = state.get("error") or "The job failed."
             actions = [
-                {"tool": "issue_key", "note": "새 키 발급"},
-                {"tool": "request_change", "note": "같은 내용으로 다시 요청"},
+                {"tool": "issue_key", "note": "get a new key"},
+                {"tool": "request_change", "note": "send the same request again"},
             ]
         elif status == "conflict" and state.get("resolved_by"):
             message = (
-                "원문 변경으로 중단된 작업을 다른 키로 재검토하고 있습니다: "
-                + state["resolved_by"]
+                "This job stopped on a changed note and is being reconsidered "
+                "under key " + state["resolved_by"]
             )
             actions = [{"tool": "job_status", "args": {"key": state["resolved_by"]}}]
         elif status == "conflict":
-            message = state.get("error") or "원문이 변경되어 작업을 중단했습니다."
+            message = state.get("error") or "The job stopped because a note changed."
             actions = [{"tool": "read_document"}]
             if state.get("intent"):
                 actions += _resolution("reconsider")
             else:
                 actions += [
-                    {"tool": "issue_key", "note": "새 키 발급"},
-                    {"tool": "request_change", "note": "현재 원문 기준으로 다시 요청"},
+                    {"tool": "issue_key", "note": "get a new key"},
+                    {"tool": "request_change", "note": "ask again on current notes"},
                 ]
         elif status == "completed":
             changed = len(state.get("results", {}))
             message = (
-                f"작업을 완료했습니다. 반영한 파일: {changed}개."
+                f"Done. Files changed: {changed}."
                 if changed
-                else "작업을 완료했습니다. 변경한 파일은 없습니다."
+                else "Done. No file needed a change."
             )
             actions = [{"tool": "read_document"}]
         elif status == "deferred":
-            message = "근거가 부족해 반영을 보류했습니다: " + state.get(
+            message = "Held back for lack of evidence: " + state.get(
                 "decision", {}
-            ).get("reason", "사유 미기재")
+            ).get("reason", "no reason given")
             actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         else:
             message = {
-                "cancelled": "작업이 취소되었습니다.",
-                "expired": "요청 키의 유효 기간이 지나 작업을 중단했습니다.",
+                "cancelled": "The job was cancelled.",
+                "expired": "The job stopped because its request key expired.",
             }.get(
-                status, "작업이 중단되었습니다."
-            ) + " 이미 반영된 파일은 results에서 확인하십시오."
+                status, "The job stopped."
+            ) + " Files already changed are listed in results."
             actions = [{"tool": "read_document"}, {"tool": "request_change"}]
         return {**state, "message": message, "next_actions": actions}
 
@@ -604,10 +629,7 @@ class Runtime:
                     _config(key),
                     {
                         "status": "failed",
-                        "error": (
-                            f"처리 중 오류가 발생해 {limit}회 재시도했으나 "
-                            f"실패했습니다: {reason}"
-                        ),
+                        "error": (f"The job failed after {limit} retries: {reason}"),
                         "error_code": "internal",
                     },
                     as_node="apply",
@@ -663,30 +685,6 @@ class Runtime:
         self._saver.delete_thread(key)
         self._graph.update_state(_config(key), record, as_node="apply")
 
-    def _rebind(self, previous: str, identity: str) -> None:
-        """Start over for a new closet root; nothing of the old one is kept.
-
-        Jobs of the old closet cannot apply to the new one, so the queue and
-        job history are removed, and Hanger's unfinished files in the old
-        closet are cleaned up. The search index is replaced on first use.
-        """
-        logger.warning(
-            "closet changed from %s to %s; resetting jobs", previous, identity
-        )
-        old = Path(previous)
-        if old.is_dir():
-            try:
-                Documents(old).release()
-            except OSError as error:
-                logger.warning("could not clean the previous closet: %s", error)
-        shutil.rmtree(self.state / "queue", ignore_errors=True)
-        for name in ("graph.sqlite", "graph.sqlite-wal", "graph.sqlite-shm"):
-            (self.state / name).unlink(missing_ok=True)
-        (self.state / "cleaned.date").unlink(missing_ok=True)
-        temporary = self.state / "closet.path.tmp"
-        temporary.write_text(identity)
-        os.replace(temporary, self.state / "closet.path")
-
     def _finish(self, key: str, queue_id: int) -> None:
         with self._admission:
             self._queue.ack(id=queue_id)
@@ -697,26 +695,6 @@ class Runtime:
     # vars: q = retained queue bytes
     # basis: estimate
     def _open(self) -> None:
-        identity_path = self.state / "closet.path"
-        identity = str(self.documents.root)
-        if not identity_path.exists():
-            with identity_path.open("x") as output:
-                output.write(identity)
-                output.flush()
-                os.fsync(output.fileno())
-        previous = identity_path.read_text()
-        if previous != identity:
-            self._rebind(previous, identity)
-        secret_path = self.state / "request.key"
-        if not secret_path.exists():
-            with secret_path.open("xb") as output:
-                output.write(secrets.token_bytes(32))
-                output.flush()
-                os.fsync(output.fileno())
-            secret_path.chmod(0o600)
-        self._secret = secret_path.read_bytes()
-        if len(self._secret) != 32:
-            raise RequestError("invalid request signing key")
         self._queue = SQLiteAckQueue(
             str(self.state / "queue"),
             multithreading=True,
@@ -751,7 +729,7 @@ class Runtime:
     # basis: estimate
     def _prepare(self, state: _State) -> dict[str, Any]:
         if self._planner is None:
-            raise RequestError("모델 실행기가 설정되지 않았습니다.")
+            raise RequestError("No model is configured for this closet.")
 
         def is_cancelled() -> bool:
             return (
@@ -791,7 +769,7 @@ class Runtime:
                     > self._limits.request_bytes
                 ):
                     raise RequestError(
-                        "수정안이 요청 크기 한도(2MiB)를 넘습니다.",
+                        "The proposal is larger than 2 MiB.",
                         code="proposal_too_large",
                     )
                 self._validate_proposal(Proposal.model_validate(planned["proposal"]))
@@ -838,7 +816,11 @@ class Runtime:
     ) -> dict[str, Any]:
         """Re-plan a retryable failure with feedback, up to the configured limit."""
         attempt = int(state.get(counter, 0)) + 1  # type: ignore[call-overload]
-        label = "검토 거절" if error.code == "review_rejected" else "모델 출력 오류"
+        label = (
+            "the review rejected the draft"
+            if error.code == "review_rejected"
+            else "the model output broke an edit rule"
+        )
         feedback = list(getattr(error, "issues", [str(error)]))
         if attempt < limit:
             logger.info(
@@ -852,16 +834,14 @@ class Runtime:
                 "status": "planning",
                 counter: attempt,
                 "feedback": feedback,
-                "error": (
-                    f"{label}로 수정안을 다시 작성하고 있습니다 ({attempt}/{limit})."
-                ),
+                "error": f"Redrafting because {label} ({attempt}/{limit}).",
                 "error_code": error.code,
             }
         detail = feedback[-1] if feedback else str(error)
         return {
             "status": "failed",
             counter: attempt,
-            "error": f"{label}로 {attempt}회 다시 작성했으나 실패했습니다: {detail}",
+            "error": f"Failed after {attempt} drafts because {label}: {detail}",
             "error_code": error.code,
         }
 
@@ -880,15 +860,15 @@ class Runtime:
                 "status": "planning",
                 "revision": revision,
                 "error": (
-                    "원문이 변경되어 최신 원문으로 다시 계획하고 있습니다 "
+                    f"A note changed; planning again on the current notes "
                     f"({revision}/{limit})."
                 ),
                 "error_code": "source_changed",
             }
         prefix = (
-            "원문이 계속 변경되어 작업을 중단했습니다"
+            "The job stopped because notes kept changing"
             if mode == "bypass"
-            else "원문이 변경되어 작업을 중단했습니다"
+            else "The job stopped because a note changed"
         )
         return {
             "status": "conflict",
@@ -936,7 +916,7 @@ class Runtime:
                             continue
                         if self.documents.read_hash(path) != expected:
                             raise ConflictError(
-                                f"근거로 사용한 문서가 변경되었습니다: {path}"
+                                f"A note used as a source changed: {path}"
                             )
                     self.documents.check_proposal(proposal, cursor)
                     with self._trace.measure("apply"):
@@ -952,7 +932,7 @@ class Runtime:
                 except RequestError as error:
                     return {
                         **self._stopped(proposal, "failed"),
-                        "error": f"반영할 수 없는 대상입니다: {error}",
+                        "error": f"This change cannot be applied: {error}",
                         "error_code": "invalid_target",
                     }
                 results[change.path] = outcome
@@ -1015,7 +995,7 @@ _KEPT = (
 
 def _resolution(choice: str) -> list[dict[str, Any]]:
     return [
-        {"tool": "issue_key", "note": "새 키 발급"},
+        {"tool": "issue_key", "note": "get a new key"},
         {"tool": "resolve_conflict", "args": {"choice": choice}},
     ]
 

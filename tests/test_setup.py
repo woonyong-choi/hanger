@@ -83,7 +83,10 @@ def test_declined_confirmation_saves_nothing(tmp_path: Path) -> None:
     config = tmp_path / "state" / "config.toml"
     with pytest.raises(SetupAbortedError, match="cancelled"):
         run_setup(
-            config, Settings(), source=io.StringIO(f"{closet}\n\nn\n"), out=io.StringIO()
+            config,
+            Settings(),
+            source=io.StringIO(f"{closet}\n\nn\n"),
+            out=io.StringIO(),
         )
     assert not config.exists()
 

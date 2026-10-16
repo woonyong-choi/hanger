@@ -1,3 +1,11 @@
+"""The MCP tools AI clients call, and the background threads behind them.
+
+Every user-facing tool first checks for pending decisions: while the user
+has not answered a question (such as an edited ignore file), only the
+catalog and decision tools work. Background threads keep running regardless:
+file watchers index changes and workers finish queued jobs.
+"""
+
 from __future__ import annotations
 
 __all__ = ["Service"]
@@ -14,12 +22,13 @@ import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 
+from hanger.closets import describe_decision, register_closet, resolve_decision
 from hanger.context import shape
 from hanger.errors import RequestError, SearchUnavailableError
+from hanger.hub import ClosetHub, OpenCloset
 from hanger.model import Intent
-from hanger.runtime import Runtime
-from hanger.sync import Synchronizer
-from hanger.watcher import ClosetWatcher
+from hanger.requests import issue_key as new_key
+from hanger.requests import validate_key
 from hanger.workflows import collect_file_target, collect_proposal
 
 if TYPE_CHECKING:
@@ -35,17 +44,21 @@ _MONITOR_SECONDS = 5
 # How long a search waits for a starting search server before failing.
 SEARCH_WAIT_SECONDS = 30
 _CLEANUP_SECONDS = 30
+_WORKERS = ("hanger-worker-1", "hanger-worker-2")
+
+INSTRUCTIONS = """\
+Hanger keeps the user's Markdown notes in registered folders called closets.
+Start with list_closets. If no closet is registered, ask the user which folder
+holds their notes and call register_closet with its absolute path. With more
+than one closet, pass closet (an id, or a path inside it) to every call.
+When a call fails with decision_required, show the question and both choices
+to the user, wait for their answer, then call decide. Never answer for them.
+Every request_change or collect needs a fresh key from issue_key."""
 
 
 class Service:
-    def __init__(
-        self,
-        runtime: Runtime,
-        synchronizer: Synchronizer,
-        engine: ElasticManager | None = None,
-    ) -> None:
-        self.runtime = runtime
-        self.synchronizer = synchronizer
+    def __init__(self, hub: ClosetHub, engine: ElasticManager | None = None) -> None:
+        self.hub = hub
         self.engine = engine
         self._stop = threading.Event()
         self._threads: dict[str, threading.Thread] = {}
@@ -53,11 +66,14 @@ class Service:
         self._beats: dict[str, float] = {}
         self._busy: dict[str, float] = {}
         self.last_activity = time.monotonic()
-        runtime.health = self.health
-        self.mcp = FastMCP(
-            "hanger", instructions="Local canonical Markdown workflows"
-        )
+        hub.health = self.health
+        self.mcp = FastMCP("hanger", instructions=INSTRUCTIONS)
         for tool in (
+            self.list_closets,
+            self.register_closet,
+            self.remove_closet,
+            self.list_decisions,
+            self.decide,
             self.issue_key,
             self.collect,
             self.search_documents,
@@ -69,15 +85,14 @@ class Service:
         ):
             self.mcp.add_tool(tool)
 
+    # ---------- lifecycle ----------
+
     def start(self) -> None:
-        self.runtime.cleanup()
-        self._targets = {
-            # A fresh watcher each time: a stopped observer cannot restart.
-            "hanger-watch": lambda: ClosetWatcher(self.synchronizer).run(self._stop),
-            "hanger-worker-1": lambda: self._work("hanger-worker-1"),
-            "hanger-worker-2": lambda: self._work("hanger-worker-2"),
-            "hanger-monitor": self._maintain,
-        }
+        self.hub.refresh()
+        self.hub.each(lambda opened: opened.runtime.cleanup())
+        self.hub.watch()
+        self._targets = {name: functools.partial(self._work, name) for name in _WORKERS}
+        self._targets["hanger-monitor"] = self._maintain
         for name in self._targets:
             self._spawn(name)
 
@@ -89,15 +104,18 @@ class Service:
 
     def close(self) -> None:
         self._stop.set()
-        self.runtime.interrupt()
+        for opened in self.hub.opened():
+            opened.runtime.interrupt()
         for thread in list(self._threads.values()):
             thread.join(timeout=30)
+        self.hub.close()
 
     def touch(self) -> None:
         self.last_activity = time.monotonic()
 
     def idle(self) -> bool:
-        return not self.runtime.pending_count() and not self._busy
+        pending = sum(o.runtime.pending_count() for o in self.hub.opened())
+        return not pending and not self._busy
 
     # cost: time O(w), heap O(1), stack O(1)
     # vars: w = worker threads
@@ -107,26 +125,128 @@ class Service:
         if self.engine is not None and not self.engine.ready():
             return self.engine.message()
         now = time.monotonic()
-        for name, beat in self._beats.items():
-            if not name.startswith("hanger-worker"):
-                continue
+        for name in _WORKERS:
+            beat = self._beats.get(name, now)
             started = self._busy.get(name)
             if started is not None and now - started > _BUSY_STALL_SECONDS:
-                return "작업 하나가 25분 넘게 끝나지 않고 있습니다."
+                return "A job has been running for more than 25 minutes."
             if started is None and now - beat > _IDLE_STALL_SECONDS:
-                return "작업 처리기가 60초 넘게 응답하지 않습니다."
+                return "A job worker has not responded for more than 60 seconds."
         return None
+
+    # ---------- gate ----------
+
+    def _ready(self) -> None:
+        """Refuse every request while a decision waits for the user."""
+        self.touch()
+        self.hub.refresh()
+        pending = self.hub.store.decisions()
+        if not pending:
+            return
+        lines = ["Hanger needs the user's answer before it can do anything else."]
+        for decision in pending:
+            described = describe_decision(decision)
+            lines += [
+                f"Decision #{described['id']}: {described['question']}",
+                f"  approve: {described['choices']['approve']}",
+                f"  decline: {described['choices']['decline']}",
+            ]
+        lines.append(
+            "Show these choices to the user and call decide with their answer. "
+            "Do not choose for them. In a terminal: hanger decide <id> "
+            "approve|decline"
+        )
+        raise RequestError("\n".join(lines), code="decision_required")
+
+    def _closet(self, closet: str | None) -> OpenCloset:
+        return self.hub.get(closet)
+
+    # ---------- catalog and decisions ----------
+
+    def list_closets(self) -> dict[str, Any]:
+        """List registered closets and any decision waiting for the user."""
+        self.touch()
+        self.hub.refresh()
+        broken = self.hub.broken()
+        closets = [
+            {
+                **closet.as_dict(),
+                "available": closet.id not in broken,
+                **({"problem": broken[closet.id]} if closet.id in broken else {}),
+            }
+            for closet in self.hub.store.closets()
+        ]
+        result: dict[str, Any] = {
+            "closets": closets,
+            "decisions": [describe_decision(d) for d in self.hub.store.decisions()],
+        }
+        if not closets:
+            result["next"] = (
+                "Ask the user which folder holds their notes, then call "
+                "register_closet with its absolute path."
+            )
+        return result
+
+    def register_closet(self, path: str) -> dict[str, Any]:
+        """Register a folder of Markdown notes as a closet (absolute path).
+
+        Creates .hangerignore and RULES.md at its root when they are missing.
+        Refuses a folder inside, or containing, a registered closet.
+        """
+        self.touch()
+        folder = Path(path).expanduser()
+        if not folder.is_absolute():
+            raise RequestError(f"Give an absolute folder path: {path}")
+        result = register_closet(self.hub.store, folder)
+        self.hub.refresh()
+        return {
+            **result,
+            "message": "Registered. Hanger is indexing the notes in the background.",
+        }
+
+    def remove_closet(self, closet: str) -> dict[str, Any]:
+        """Removing a closet is only possible from the user's terminal."""
+        self.touch()
+        found = self.hub.store.closet(closet)
+        target = str(found.path) if found else closet
+        raise RequestError(
+            "Closets can only be removed by the user in a terminal, so their "
+            f"search index is never deleted by accident. Ask the user to run: "
+            f'hanger closet remove "{target}"',
+            code="terminal_only",
+        )
+
+    def list_decisions(self) -> dict[str, Any]:
+        """List decisions waiting for the user's answer."""
+        self.touch()
+        self.hub.refresh()
+        return {"decisions": [describe_decision(d) for d in self.hub.store.decisions()]}
+
+    def decide(
+        self, decision_id: int, answer: Literal["approve", "decline"]
+    ) -> dict[str, Any]:
+        """Apply the user's own answer to a pending decision."""
+        self.touch()
+        result = resolve_decision(self.hub.store, decision_id, answer)
+        self.hub.refresh()
+        return result
+
+    # ---------- requests ----------
 
     def issue_key(self) -> str:
         """Issue a request key. Every mutating call needs its own fresh key."""
-        self.touch()
-        return self.runtime.issue_key()
+        self._ready()
+        return new_key(self.hub.secret)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = collected text bytes
     # basis: estimate
     def collect(
-        self, key: str, text: str | None = None, file: str | None = None
+        self,
+        key: str,
+        text: str | None = None,
+        file: str | None = None,
+        closet: str | None = None,
     ) -> dict[str, str]:
         """Save text or any file unchanged under inbox/ (no model).
 
@@ -134,52 +254,50 @@ class Service:
         Names are collection time, title (first heading, first line, or the
         file's own name), then a short content hash.
         """
-        self.touch()
+        self._ready()
+        opened = self._closet(closet)
         if (text is None) == (file is None):
-            raise RequestError("text와 file 중 하나만 지정하십시오.")
+            raise RequestError("Give exactly one of text or file.")
         if file is not None:
-            return self._collect_file(key, file)
-        return self._collect_text(key, text or "")
+            return self._collect_file(opened, key, file)
+        return self._collect_text(opened, key, text or "")
 
-    def _collect_text(self, key: str, text: str) -> dict[str, str]:
+    def _collect_text(self, opened: OpenCloset, key: str, text: str) -> dict[str, str]:
         try:
             size = len(text.encode())
         except UnicodeEncodeError as error:
-            raise RequestError(
-                "수집할 내용에 올바르지 않은 유니코드 문자가 있습니다."
-            ) from error
+            raise RequestError("The text contains invalid Unicode.") from error
         if not text.strip() or size > 1024 * 1024:
-            raise RequestError("수집할 내용은 비어 있지 않고 1MiB 이하여야 합니다.")
+            raise RequestError("The text must not be empty and at most 1 MiB.")
         # The key's issue time names the file, so a resend gets the same name.
-        proposal = collect_proposal(text, self.runtime.key_issued(key))
-        status = self.runtime.submit(key, proposal)
+        proposal = collect_proposal(text, opened.runtime.key_issued(key))
+        status = opened.runtime.submit(key, proposal)
         return {"key": key, "status": status, "path": proposal.changes[0].path}
 
     # cost: time O(n), heap O(1), stack O(1), io O(n)
     # vars: n = file bytes
     # basis: estimate
-    def _collect_file(self, key: str, file: str) -> dict[str, str]:
+    def _collect_file(self, opened: OpenCloset, key: str, file: str) -> dict[str, str]:
         source = Path(file).expanduser()
         if not source.is_absolute():
-            raise RequestError("file에는 이 컴퓨터의 절대 경로를 지정하십시오.")
+            raise RequestError(f"Give an absolute file path: {file}")
         if not source.is_file():
+            raise RequestError(f"No such file: {file}", code="not_found")
+        runtime = opened.runtime
+        target, digest = collect_file_target(source.resolve(), runtime.key_issued(key))
+        if not opened.policy.writable(target):
             raise RequestError(
-                f"수집할 파일을 찾을 수 없습니다: {file}", code="not_found"
-            )
-        issued = self.runtime.key_issued(key)
-        target, digest = collect_file_target(source.resolve(), issued)
-        if not self.synchronizer.settings.writable(target):
-            raise RequestError(
-                f"쓰기 허용 범위 밖의 경로입니다: {target}", code="write_denied"
+                f"This closet does not allow writing here: {target}",
+                code="write_denied",
             )
         fingerprint = "file:" + digest + ":" + target
-        if self.runtime.seen(key, fingerprint):
+        if runtime.seen(key, fingerprint):
             return {"key": key, "status": "duplicate", "path": target}
         try:
-            outcome = self.runtime.documents.store_file(target, source, digest)
+            outcome = runtime.documents.store_file(target, source, digest)
         except OSError as error:
-            raise RequestError(f"파일을 수집하지 못했습니다: {error}") from error
-        self.runtime.record_done(key, fingerprint, {target: outcome})
+            raise RequestError(f"Could not collect the file: {error}") from error
+        runtime.record_done(key, fingerprint, {target: outcome})
         return {"key": key, "status": "completed", "path": target}
 
     # cost: time O(n), heap O(k), stack O(d), io O(f)
@@ -188,27 +306,28 @@ class Service:
     async def search_documents(
         self,
         query: str,
+        closet: str | None = None,
         limit: int | None = None,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
         folders: tuple[str, ...] = (),
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Search listed closet folders (OR; empty means all).
+        """Search notes in listed closet folders (OR; empty means all).
 
         Top results come with full text; the rest are listed with matched lines.
         Use read_document for a listed path. fallback_reason re-syncs the scope
-        before searching when a document seems to be missing. While the search
+        before searching when a note seems to be missing. While the search
         server starts, progress is reported for up to 30 seconds.
         """
-        self.touch()
+        await anyio.to_thread.run_sync(self._ready)
         waited = 0
         while self.engine is not None and not self.engine.ready():
             message = self.engine.message()
             if waited >= SEARCH_WAIT_SECONDS:
                 raise SearchUnavailableError(
-                    f"{message} {SEARCH_WAIT_SECONDS}초 안에 준비되지 않았습니다. "
-                    "잠시 후 다시 검색하십시오."
+                    f"{message} It was not ready within {SEARCH_WAIT_SECONDS}s. "
+                    "Search again shortly."
                 )
             if ctx is not None:
                 await ctx.report_progress(waited, SEARCH_WAIT_SECONDS, message)
@@ -216,7 +335,9 @@ class Service:
             await anyio.sleep(1)
             waited += 1
         return await anyio.to_thread.run_sync(
-            functools.partial(self.search, query, limit, fallback_reason, folders)
+            functools.partial(
+                self.search, query, closet, limit, fallback_reason, folders
+            )
         )
 
     # cost: time O(n), heap O(k), stack O(d), io O(f)
@@ -225,16 +346,20 @@ class Service:
     def search(
         self,
         query: str,
+        closet: str | None = None,
         limit: int | None = None,
         fallback_reason: Literal["insufficient_evidence", "user_reported_missing"]
         | None = None,
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Synchronous search used by the CLI and the MCP tool."""
+        self._ready()
+        opened = self._closet(closet)
         if self.engine is not None:
             self.engine.require()
-        settings = self.synchronizer.settings
-        result = self.synchronizer.search(
+        synchronizer = opened.synchronizer
+        settings = synchronizer.settings
+        result = synchronizer.search(
             query,
             settings.search.candidates if limit is None else limit,
             fallback_reason=fallback_reason,
@@ -244,52 +369,66 @@ class Service:
             result["documents"],
             {},
             settings,
-            self.synchronizer.terms(query),
-            load=self.synchronizer.read,
-            peek=self.synchronizer.peek,
+            synchronizer.terms(query),
+            load=synchronizer.read,
+            peek=synchronizer.peek,
         )
-        return {**result, "documents": list(full.values()), "listed": listed}
+        return {
+            **result,
+            "closet": str(opened.root),
+            "documents": list(full.values()),
+            "listed": listed,
+        }
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes
     # basis: estimate
-    def read_document(self, path: str) -> dict[str, str]:
-        """Read one local Markdown document as it is now."""
-        self.touch()
-        if self.synchronizer.settings.excluded(path):
+    def read_document(self, path: str, closet: str | None = None) -> dict[str, str]:
+        """Read one Markdown note as it is now (path relative to the closet)."""
+        self._ready()
+        opened = self._closet(closet)
+        if opened.policy.excluded(path):
             raise RequestError(
-                f"관리 범위 밖이거나 제외된 문서입니다: {path}", code="excluded"
+                f"This note is ignored or is a rule file: {path}", code="excluded"
             )
         try:
-            return self.synchronizer.read(path)
+            return opened.synchronizer.read(path)
         except FileNotFoundError as error:
-            raise RequestError(
-                f"문서를 찾을 수 없습니다: {path}", code="not_found"
-            ) from error
+            raise RequestError(f"No such note: {path}", code="not_found") from error
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = intent bytes
     # basis: estimate
-    def request_change(self, key: str, intent: Intent) -> dict[str, str]:
+    def request_change(
+        self, key: str, intent: Intent, closet: str | None = None
+    ) -> dict[str, str]:
         """Queue a write, edit or organize request. Accepted is not completed."""
-        self.touch()
-        return {"key": key, "status": self.runtime.submit_intent(key, intent)}
+        self._ready()
+        opened = self._closet(closet)
+        return {"key": key, "status": opened.runtime.submit_intent(key, intent)}
 
-    # cost: time O(n), heap O(n), stack O(1), io O(1)
-    # vars: n = persisted job state bytes
+    # cost: time O(c*n), heap O(n), stack O(1), io O(c)
+    # vars: c = closets, n = persisted job state bytes
     # basis: estimate
     def job_status(self, key: str) -> dict[str, Any]:
         """Read progress, result, reason and the next possible actions."""
-        self.touch()
-        return self.runtime.describe(key)
+        self._ready()
+        opened = self.hub.holding(key)
+        if opened is None:
+            validate_key(key, self.hub.secret)
+            return {
+                "key": key,
+                "status": "not_found",
+                "message": "No job was accepted with this key.",
+                "next_actions": [{"tool": "request_change"}, {"tool": "collect"}],
+            }
+        return opened.runtime.describe(key)
 
-    # cost: time O(n), heap O(n), stack O(1), io O(1)
-    # vars: n = queued job bytes
-    # basis: estimate
     def cancel_job(self, key: str) -> dict[str, bool]:
         """Cancel remaining work; files already written are not rolled back."""
-        self.touch()
-        return {"cancelled": self.runtime.cancel(key)}
+        self._ready()
+        opened = self.hub.holding(key)
+        return {"cancelled": opened is not None and opened.runtime.cancel(key)}
 
     # cost: time O(n), heap O(n), stack O(1), io O(f)
     # vars: n = proposal and source bytes, f = modified paths
@@ -297,21 +436,24 @@ class Service:
     def resolve_conflict(
         self, key: str, new_key: str, choice: Literal["reconsider"] = "reconsider"
     ) -> dict[str, str]:
-        """Re-plan a job stopped by a source conflict from the current sources.
+        """Re-plan a job stopped by a changed note, from the current notes.
 
         Use a fresh key from issue_key as new_key. Saved proposals are never
         forced over newer content.
         """
-        self.touch()
-        state = self.runtime.status(key)
-        if state.get("status") != "conflict":
+        self._ready()
+        opened = self.hub.holding(key)
+        if opened is None or opened.runtime.status(key).get("status") != "conflict":
             raise RequestError(
-                "충돌로 중단된 작업만 재검토할 수 있습니다. "
-                "실패한 작업은 issue_key로 새 키를 발급받아 다시 요청하십시오."
+                "Only a job stopped by a changed note can be reconsidered. For a "
+                "failed job, get a new key with issue_key and send it again.",
+                code="not_conflict",
             )
         if choice != "reconsider":
-            raise RequestError("지원하는 처리 방식은 reconsider뿐입니다.")
-        return {"key": new_key, "status": self.runtime.reconsider(key, new_key)}
+            raise RequestError("The only supported choice is reconsider.")
+        return {"key": new_key, "status": opened.runtime.reconsider(key, new_key)}
+
+    # ---------- background ----------
 
     # cost: time O(n), heap O(n), stack O(1), io O(f), tokens O(n)
     # vars: n = work bytes over service lifetime, f = work I/O count
@@ -321,16 +463,19 @@ class Service:
             self._beats[name] = time.monotonic()
             if self.engine is not None and not self.engine.ready():
                 continue
-            self._busy[name] = time.monotonic()
-            try:
-                self.runtime.run_next()
-            except InterruptedError:
-                return
-            except Exception:
-                logger.exception("%s: job attempt failed", name)
-                self._stop.wait(2)
-            finally:
-                self._busy.pop(name, None)
+            for opened in self.hub.opened():
+                self._busy[name] = time.monotonic()
+                try:
+                    opened.runtime.run_next()
+                except InterruptedError:
+                    if self._stop.is_set():
+                        return
+                except Exception:
+                    logger.exception("%s: job attempt failed", name)
+                    self._stop.wait(2)
+                finally:
+                    self._busy.pop(name, None)
+                self._beats[name] = time.monotonic()
 
     # cost: time O(c), heap O(b), stack O(1), io O(c)
     # vars: c = expired checkpoint bytes, b = checkpoint page bytes
@@ -343,9 +488,11 @@ class Service:
                 if not thread.is_alive() and not self._stop.is_set():
                     logger.error("%s stopped unexpectedly, restarting", name)
                     self._spawn(name)
+            try:
+                self.hub.refresh()
+                self.hub.restart_watchers()
+            except Exception:
+                logger.exception("closet refresh failed")
             if time.monotonic() >= next_cleanup:
                 next_cleanup = time.monotonic() + _CLEANUP_SECONDS
-                try:
-                    self.runtime.cleanup()
-                except Exception:
-                    logger.exception("cleanup failed")
+                self.hub.each(lambda opened: opened.runtime.cleanup())

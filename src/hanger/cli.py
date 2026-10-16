@@ -1,3 +1,14 @@
+"""The ``hanger`` command.
+
+Three kinds of commands:
+
+* Management (setup, closet, ignore, decisions, config, provider) works on
+  the state database directly; see commands.py.
+* Note requests (search, automate, collect, ...) go to the shared background
+  service, which starts on demand.
+* ``serve`` is the MCP entry point AI clients run; it relays to that service.
+"""
+
 from __future__ import annotations
 
 __all__ = ["main"]
@@ -5,10 +16,7 @@ __all__ = ["main"]
 import argparse
 import json
 import logging
-import shlex
-import shutil
 import sqlite3
-import subprocess
 import sys
 import threading
 import time
@@ -21,144 +29,176 @@ from elasticsearch import ApiError
 from pydantic import ValidationError
 
 from hanger import __version__
-from hanger.config import Settings, load_settings
-from hanger.documents import Documents
-from hanger.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
+from hanger.commands import (
+    DEFAULT_STATE,
+    INSTALL_ROOT,
+    closet_command,
+    config_command,
+    decide_command,
+    decisions_command,
+    ignore_command,
+    provider_command,
+    setup_command,
+)
+from hanger.config import Settings
+from hanger.elastic import ElasticManager
 from hanger.errors import HangerError
+from hanger.hub import ClosetHub
 from hanger.logs import configure
-from hanger.model import CliModel, Intent, Planner
-from hanger.progress import Progress
+from hanger.model import Intent
 from hanger.proxy import Launcher, Relay, call_tool
 from hanger.requests import Proposal
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
 from hanger.service import Service
-from hanger.sync import Synchronizer
+from hanger.store import StateStore
 from hanger.trace import Trace
 from hanger.watcher import ClosetWatcher
-from hanger.wizard import SetupAbortedError, edit_command, run_setup
 
 logger = logging.getLogger(__name__)
 
-# Commands answered by the shared daemon when it runs (or must run).
-_CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
 # A shutting-down daemon may hold the state lock briefly.
 _DAEMON_LOCK_SECONDS = 90
-_INSTALL_ROOT = Path.home() / ".local" / "share" / "hanger"
-_DEFAULT_STATE = _INSTALL_ROOT / "closet"
+# Note requests answered by the background service when it runs (or must run).
+_CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
+_MANAGEMENT = {"setup", "provider", "closet", "ignore", "decisions", "decide", "config"}
+
+
+def _closet_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--closet", help="closet id or a path inside it (needed with several)"
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hanger")
-    parser.add_argument(
-        "--version", action="version", version=f"hanger {__version__}"
+    parser = argparse.ArgumentParser(
+        prog="hanger", description="Keep Markdown notes searchable and in order."
     )
-    parser.add_argument(
-        "--closet", type=Path, help="closet root (default: the one chosen in setup)"
-    )
+    parser.add_argument("--version", action="version", version=f"hanger {__version__}")
     parser.add_argument(
         "--state",
         type=Path,
-        default=_DEFAULT_STATE,
-        help=f"runtime state folder outside the closet (default: {_DEFAULT_STATE})",
+        default=DEFAULT_STATE,
+        help=f"Hanger's own data folder (default: {DEFAULT_STATE})",
     )
     parser.add_argument(
-        "--config", type=Path, help="settings TOML (default: <state>/config.toml)"
+        "--search-url", help="use an existing Elasticsearch instead of the managed one"
     )
-    parser.add_argument(
-        "--search-url",
-        help="use an existing Elasticsearch instead of the managed one",
+    parser.add_argument("--model", help="model name for every role, this run only")
+    parser.add_argument("--trace", action="store_true", help="record job timings")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="command")
+
+    setup = commands.add_parser(
+        "setup", help="check the model provider and install the search engine"
     )
-    parser.add_argument(
-        "--model", help="model name for every role; overrides [models] in settings"
+    setup.add_argument(
+        "--reinstall", action="store_true", help="download the search engine again"
     )
-    parser.add_argument("--trace", action="store_true")
-    commands = parser.add_subparsers(dest="command", required=True)
-    serve = commands.add_parser(
-        "serve", help="MCP stdio entry; relays to the shared daemon"
+    commands.add_parser("provider", help="show the model each role runs with")
+
+    closet = commands.add_parser("closet", help="add, list or remove closets")
+    closet_actions = closet.add_subparsers(dest="action", required=True)
+    closet_actions.add_parser("add", help="register a notes folder").add_argument(
+        "path"
     )
+    closet_actions.add_parser("list", help="show registered closets")
+    remove = closet_actions.add_parser("remove", help="forget a closet")
+    remove.add_argument("closet", help="closet id or path")
+    remove.add_argument("--yes", action="store_true", help="do not ask to confirm")
+
+    ignore = commands.add_parser("ignore", help="show or edit a closet's ignore rules")
+    ignore_actions = ignore.add_subparsers(dest="action", required=True)
+    for name, text in (
+        ("show", "show the applied rules"),
+        ("add", "ignore a pattern (.gitignore syntax)"),
+        ("remove", "stop ignoring a pattern"),
+    ):
+        action = ignore_actions.add_parser(name, help=text)
+        if name != "show":
+            action.add_argument("pattern")
+            action.add_argument("--yes", action="store_true", help="approve at once")
+        _closet_option(action)
+
+    commands.add_parser("decisions", help="list questions waiting for your answer")
+    decide = commands.add_parser("decide", help="answer a waiting question")
+    decide.add_argument("id", type=int)
+    decide.add_argument("answer", choices=("approve", "decline"))
+
+    config = commands.add_parser("config", help="list or change settings")
+    config_actions = config.add_subparsers(dest="action", required=True)
+    config_actions.add_parser("list", help="every setting with its value")
+    config_actions.add_parser("get", help="one setting").add_argument("key")
+    setter = config_actions.add_parser("set", help="change a setting")
+    setter.add_argument("key")
+    setter.add_argument("value")
+    config_actions.add_parser("unset", help="back to the default").add_argument("key")
+
+    serve = commands.add_parser("serve", help="MCP server for AI clients (stdio)")
     serve.add_argument(
         "--foreground",
         action="store_true",
-        help="run everything in this process instead of the shared daemon",
+        help="run everything in this process instead of the shared service",
     )
-    commands.add_parser("daemon", help="internal: shared background process")
-    commands.add_parser("stop", help="stop the shared daemon")
-    setup = commands.add_parser(
-        "setup", help="choose the closet and folders, then install the search engine"
-    )
-    setup.add_argument(
-        "--reinstall",
-        action="store_true",
-        help="download and verify the search engine again",
-    )
-    setup.add_argument(
-        "--managed",
-        action="append",
-        help="top-level folder to manage (repeat); skips the prompts with --closet",
-    )
-    config = commands.add_parser("config", help="show or edit the settings file")
-    config.add_argument("--edit", action="store_true", help="open it in an editor")
-    commands.add_parser("key")
-    search = commands.add_parser("search")
+    commands.add_parser("stop", help="stop the background service")
+    commands.add_parser("daemon", help=argparse.SUPPRESS)
+
+    commands.add_parser("key", help="issue a request key")
+    search = commands.add_parser("search", help="search notes")
     search.add_argument("query")
+    _closet_option(search)
     search.add_argument("--limit", type=int)
     search.add_argument(
         "--folder",
         action="append",
         default=[],
         dest="folders",
-        help="closet-relative folder; repeat for OR scope; omit to search all",
+        help="folder inside the closet; repeat for several; omit to search all",
     )
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
     )
-    automate = commands.add_parser(
-        "automate", help="queue an intent; the daemon executes it"
-    )
+    automate = commands.add_parser("automate", help="queue a change request")
     automate.add_argument("key")
     automate.add_argument(
         "intent", type=Path, help="JSON with kind, instruction and query"
     )
-    collect = commands.add_parser(
-        "collect", help="save a file or stdin text unchanged under inbox/"
-    )
+    _closet_option(automate)
+    collect = commands.add_parser("collect", help="save a file or stdin under inbox/")
     collect.add_argument("key")
     collect.add_argument("file", help="any file, or - to read text from stdin")
-    resolve = commands.add_parser(
-        "resolve", help="re-plan a conflicted job from current sources"
-    )
+    _closet_option(collect)
+    resolve = commands.add_parser("resolve", help="re-plan a job stopped by a change")
     resolve.add_argument("key")
     resolve.add_argument("new_key")
     resolve.add_argument(
         "choice", choices=("reconsider",), nargs="?", default="reconsider"
     )
     for name in ("status", "cancel"):
-        commands.add_parser(name).add_argument("key")
-    submit = commands.add_parser("submit")
+        commands.add_parser(name, help=f"job {name}").add_argument("key")
+
+    # Maintenance, run in this process without the background service.
+    for name, text in (
+        ("sync", "re-check every note against the index"),
+        ("audit", "re-read a batch of notes"),
+        ("cleanup", "remove expired job records"),
+        ("run", "run one queued job, then exit"),
+        ("watch", "index changes until interrupted"),
+    ):
+        _closet_option(commands.add_parser(name, help=text))
+    submit = commands.add_parser("submit", help="queue a ready-made proposal")
     submit.add_argument("key")
     submit.add_argument("proposal", type=Path)
-    commands.add_parser("run", help="execute one queued job locally, then exit")
-    commands.add_parser("sync")
-    commands.add_parser("watch")
-    commands.add_parser("audit")
-    commands.add_parser("cleanup")
+    _closet_option(submit)
     return parser
 
 
-def _global_arguments(arguments: argparse.Namespace) -> list[str]:
-    values = ["--state", str(arguments.state.resolve())]
-    if arguments.closet is not None:
-        values += ["--closet", str(arguments.closet.resolve())]
-    if arguments.config:
-        values += ["--config", str(arguments.config.resolve())]
+def _daemon_command(arguments: argparse.Namespace) -> list[str]:
+    command = [sys.executable, "-m", "hanger.cli", "--state", str(arguments.state)]
     if arguments.search_url:
-        values += ["--search-url", arguments.search_url]
+        command += ["--search-url", arguments.search_url]
     if arguments.model:
-        values += ["--model", arguments.model]
+        command += ["--model", arguments.model]
     if arguments.trace:
-        values.append("--trace")
-    return values
+        command.append("--trace")
+    return [*command, "daemon"]
 
 
 # cost: time O(n), heap O(n), stack O(1), io O(f)
@@ -166,37 +206,14 @@ def _global_arguments(arguments: argparse.Namespace) -> list[str]:
 # basis: estimate
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
-    state: Path = arguments.state
-    # The relay and daemon talk over stdio; setup draws its own status lines.
-    quiet = arguments.command in {"serve", "daemon", "setup"}
-    configure(state, console=None if quiet else logging.WARNING)
+    arguments.state = arguments.state.expanduser().resolve()
+    # The relay and daemon talk over stdio; management commands print their own.
+    quiet = arguments.command in {"serve", "daemon"} | _MANAGEMENT
+    configure(arguments.state, console=None if quiet else logging.WARNING)
     try:
-        settings = load_settings(arguments.config or state / "config.toml")
-        if arguments.closet is None and arguments.command not in _NO_CLOSET:
-            if not settings.closet.root:
-                raise HangerError(
-                    "Closet is not configured. Run: hanger setup", code="setup"
-                )
-            arguments.closet = Path(settings.closet.root)
-        if arguments.search_url:
-            settings = settings.model_copy(
-                update={
-                    "elasticsearch": settings.elasticsearch.model_copy(
-                        update={"managed": False}
-                    )
-                }
-            )
-        launcher = Launcher(
-            state,
-            [
-                sys.executable,
-                "-m",
-                "hanger.cli",
-                *_global_arguments(arguments),
-                "daemon",
-            ],
-        )
-        result = _dispatch(arguments, settings, launcher)
+        store = StateStore(arguments.state)
+        launcher = Launcher(arguments.state, _daemon_command(arguments))
+        result = _dispatch(arguments, store, launcher)
         if result is not _SILENT:
             print(json.dumps(result, ensure_ascii=False))
     except ValidationError as error:
@@ -207,138 +224,110 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("invalid input: %s", details)
         print(f"hanger: invalid input: {details}", file=sys.stderr)
         return 1
-    except (HangerError, OSError, sqlite3.Error, ApiError, TransportError) as error:
+    except HangerError as error:
+        # Expected and explained to the user; the log keeps it at info level.
+        logger.info("request refused [%s]: %s", error.code, error)
+        print(f"hanger: {error}", file=sys.stderr)
+        return 1
+    except (OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
         print(f"hanger: {error}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("\nhanger: cancelled", file=sys.stderr)
+        return 130
     return 0
 
 
 _SILENT = object()
-# Commands that work before a closet is configured.
-_NO_CLOSET = {"setup", "config", "stop"}
 
 
 def _dispatch(
-    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
+    arguments: argparse.Namespace, store: StateStore, launcher: Launcher
 ) -> object:
     command = arguments.command
+    if command in _MANAGEMENT:
+        _manage(arguments, store, launcher)
+        return _SILENT
     if command == "serve" and not arguments.foreground:
         Relay(launcher, sys.stdin.buffer, sys.stdout.buffer).run()
         return _SILENT
     if command == "stop":
         with launcher.hold():
             return {"stopped": launcher.stop()}
-    if command == "setup":
-        return _setup(arguments, settings, launcher)
-    if command == "config":
-        return _config(arguments)
+    settings = _settings(store, arguments)
     if command == "daemon":
-        return _daemon(arguments, settings, launcher)
+        return _daemon(arguments, store, settings, launcher)
     if command in _CLIENT:
-        managed = settings.elasticsearch.managed
         connection = launcher.connect()
-        if connection is not None or managed:
+        if connection is not None or settings.elasticsearch.managed:
             if connection is not None:
                 connection.close()
             return _remote(arguments, launcher)
-    return _local(arguments, settings)
+    return _local(arguments, store, settings)
 
 
-def _config_path(arguments: argparse.Namespace) -> Path:
-    path: Path = arguments.config or arguments.state / "config.toml"
-    return path
-
-
-def _config(arguments: argparse.Namespace) -> object:
-    path = _config_path(arguments)
-    if not path.exists():
-        print(f"No settings yet. Run: hanger setup  ({path})")
-        return _SILENT
-    if arguments.edit:
-        subprocess.run(shlex.split(edit_command(path)), check=False)
-        return _SILENT
-    print(path.read_text(), end="")
-    print(f"\n# {path}\n# edit: hanger config --edit  or  {edit_command(path)}")
-    return _SILENT
-
-
-def _setup(
-    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
-) -> object:
-    state: Path = arguments.state.expanduser().resolve()
-
-    recorded = state / "closet.path"
-    previous = recorded.read_text() if recorded.exists() else None
-    try:
-        settings = run_setup(
-            _config_path(arguments),
-            settings,
-            closet=arguments.closet,
-            managed=arguments.managed,
-        )
-    except SetupAbortedError as error:
-        print(f"\n  {error}. Nothing was changed.\n", file=sys.stderr)
-        raise SystemExit(1) from None
-    ui = Progress(sys.stdout)
-    engine = ElasticManager(_INSTALL_ROOT, state, settings)
-    # Hold the start lock so connected clients cannot restart the service
-    # (which would install or start the search engine) until setup ends.
-    root = str(Path(str(settings.closet.root)).resolve())
-    changed = previous is not None and previous != root
-    with launcher.hold():
-        install = arguments.reinstall or not engine.installed()
-        first = 2 + changed
-        total = first - 1 + (INSTALL_STEPS if install else 1)
-        step = ui.step(1, total, "Stop background service")
-        stopped = launcher.stop()
-        if arguments.reinstall:
-            # A fresh engine starts from an empty index rebuilt from the closet.
-            shutil.rmtree(state / "elasticsearch", ignore_errors=True)
-        step.done("stopped" if stopped else "not running")
-        if changed:
-            step = ui.step(2, total, "Reset for the new closet")
-            # Opening the job store for the new root clears the old one; the
-            # old search index is removed when the engine next starts.
-            Runtime(Path(root), state, settings=settings).close()
-            step.done("previous closet jobs removed; its index goes on next start")
-        # A stopped service may have finished installing in the meantime.
-        install = arguments.reinstall or not engine.installed()
-        if install:
-            engine.install(
-                ui, reinstall=arguments.reinstall, title=None, first=first, total=total
+def _manage(
+    arguments: argparse.Namespace, store: StateStore, launcher: Launcher
+) -> None:
+    match arguments.command:
+        case "setup":
+            setup_command(store, launcher, INSTALL_ROOT, reinstall=arguments.reinstall)
+        case "provider":
+            provider_command(store)
+        case "closet":
+            target = getattr(arguments, "path", None) or getattr(
+                arguments, "closet", None
             )
-        else:
-            step = ui.step(first, total, "Check search engine")
-            step.done(f"Elasticsearch {ES_VERSION} already installed")
-    ui.stream.write("\n")
-    ui.line("done", "Hanger is ready", str(settings.closet.root))
-    command = serve_command(state)
-    ui.note("connect an MCP client (already registered clients need nothing):")
-    ui.note(f"  claude mcp add --scope user hanger -- {command}")
-    ui.note(f"  codex mcp add hanger -- {command}")
-    ui.stream.write("\n")
-    return _SILENT
+            closet_command(
+                store,
+                launcher,
+                arguments.action,
+                target,
+                yes=getattr(arguments, "yes", False),
+            )
+        case "ignore":
+            ignore_command(
+                store,
+                arguments.action,
+                getattr(arguments, "pattern", ""),
+                arguments.closet,
+                yes=getattr(arguments, "yes", False),
+            )
+        case "decisions":
+            decisions_command(store)
+        case "decide":
+            decide_command(store, arguments.id, arguments.answer)
+        case "config":
+            config_command(
+                store,
+                arguments.action,
+                getattr(arguments, "key", ""),
+                getattr(arguments, "value", ""),
+            )
 
 
-def serve_command(state: Path) -> str:
-    """Return the MCP server command for a state folder, as setup prints it."""
-    command = shutil.which("hanger") or "hanger"
-    if state != _DEFAULT_STATE.resolve():
-        command += f" --state {shlex.quote(str(state))}"
-    return command + " serve"
+def _settings(store: StateStore, arguments: argparse.Namespace) -> Settings:
+    settings = store.settings()
+    if arguments.search_url:
+        unmanaged = settings.elasticsearch.model_copy(update={"managed": False})
+        settings = settings.model_copy(update={"elasticsearch": unmanaged})
+    return settings
 
 
 def _daemon(
-    arguments: argparse.Namespace, settings: Settings, launcher: Launcher
+    arguments: argparse.Namespace,
+    store: StateStore,
+    settings: Settings,
+    launcher: Launcher,
 ) -> object:
     """Become the daemon, or step aside when another one already serves."""
     deadline = time.monotonic() + _DAEMON_LOCK_SECONDS
     while True:
         try:
-            return _local(arguments, settings)
+            return _local(arguments, store, settings)
         except HangerError as error:
-            if "already in use" not in str(error):
+            if error.code != "state_in_use":
                 raise
         connection = launcher.connect()
         if connection is not None:
@@ -347,17 +336,20 @@ def _daemon(
             return _SILENT
         if time.monotonic() >= deadline:
             raise HangerError(
-                "state folder is locked by another process", code="daemon_lock"
+                "The state folder is locked by another process.", code="daemon_lock"
             )
         time.sleep(1)
 
 
 def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
+    closet = {"closet": arguments.closet} if getattr(arguments, "closet", None) else {}
     match arguments.command:
         case "key":
             return {"key": call_tool(launcher, "issue_key", {})}
         case "search":
-            return call_tool(launcher, "search_documents", _search_arguments(arguments))
+            return call_tool(
+                launcher, "search_documents", {**_search_arguments(arguments), **closet}
+            )
         case "status":
             return call_tool(launcher, "job_status", {"key": arguments.key})
         case "cancel":
@@ -367,10 +359,16 @@ def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
             return call_tool(
                 launcher,
                 "request_change",
-                {"key": arguments.key, "intent": intent.model_dump(mode="json")},
+                {
+                    "key": arguments.key,
+                    "intent": intent.model_dump(mode="json"),
+                    **closet,
+                },
             )
         case "collect":
-            return call_tool(launcher, "collect", _collect_arguments(arguments))
+            return call_tool(
+                launcher, "collect", {**_collect_arguments(arguments), **closet}
+            )
         case "resolve":
             return call_tool(
                 launcher,
@@ -402,47 +400,47 @@ def _collect_arguments(arguments: argparse.Namespace) -> dict[str, str]:
     return {"key": arguments.key, "file": str(Path(arguments.file).resolve())}
 
 
-def _local(arguments: argparse.Namespace, settings: Settings) -> object:
-    state: Path = arguments.state
+def _local(
+    arguments: argparse.Namespace, store: StateStore, settings: Settings
+) -> object:
+    """Run the closets in this process: as the daemon, or for one command."""
+    serving = arguments.command in {"daemon", "serve"}
     with ExitStack() as stack:
         engine = None
-        if settings.elasticsearch.managed and arguments.command in {"daemon", "serve"}:
-            engine = ElasticManager(_INSTALL_ROOT, state, settings)
+        if settings.elasticsearch.managed and serving:
+            engine = ElasticManager(INSTALL_ROOT, store.state, settings)
         url = arguments.search_url or (
             engine.url
             if engine is not None
             else f"http://127.0.0.1:{settings.elasticsearch.port}"
         )
-        index = stack.enter_context(
-            closing(
-                SearchIndex(
-                    url, str(arguments.closet.resolve()), owned=engine is not None
-                )
-            )
-        )
-        synchronizer = Synchronizer(Documents(arguments.closet), index, settings)
-        planner = Planner(synchronizer, CliModel(settings.models, arguments.model))
         trace = stack.enter_context(
-            closing(Trace(state / "trace.jsonl" if arguments.trace else None))
+            closing(Trace(store.state / "trace.jsonl" if arguments.trace else None))
         )
-        runtime = stack.enter_context(
-            Runtime(arguments.closet, state, planner, trace=trace, settings=settings)
+        hub = ClosetHub(
+            store,
+            settings,
+            url,
+            model=arguments.model,
+            trace=trace,
+            owns_search=engine is not None,
         )
-        if arguments.command in {"daemon", "serve"}:
-            return _serve(arguments, runtime, synchronizer, engine, settings)
-        return _execute(runtime, arguments, synchronizer)
+        stack.callback(hub.close)
+        if serving:
+            return _serve(arguments, hub, engine, settings)
+        return _execute(arguments, hub)
 
 
 def _serve(
     arguments: argparse.Namespace,
-    runtime: Runtime,
-    synchronizer: Synchronizer,
+    hub: ClosetHub,
     engine: ElasticManager | None,
     settings: Settings,
 ) -> object:
     from hanger.daemon import Daemon
 
-    service = Service(runtime, synchronizer, engine)
+    hub.refresh()
+    service = Service(hub, engine)
     if engine is not None:
         engine.start()
     service.start()
@@ -461,12 +459,38 @@ def _serve(
 # cost: time O(n), heap O(n), stack O(1), io O(f)
 # vars: n = request and result bytes, f = target count
 # basis: estimate
-def _execute(
-    runtime: Runtime, arguments: argparse.Namespace, synchronizer: Synchronizer
-) -> object:
-    match arguments.command:
+def _execute(arguments: argparse.Namespace, hub: ClosetHub) -> object:
+    hub.refresh()
+    service = Service(hub)
+    command = arguments.command
+    closet = getattr(arguments, "closet", None)
+    match command:
         case "key":
-            return {"key": runtime.issue_key()}
+            return {"key": service.issue_key()}
+        case "search":
+            return service.search(
+                arguments.query,
+                closet,
+                arguments.limit,
+                arguments.fallback_reason,
+                tuple(arguments.folders),
+            )
+        case "status":
+            return service.job_status(arguments.key)
+        case "cancel":
+            return service.cancel_job(arguments.key)
+        case "automate":
+            intent = Intent.model_validate_json(arguments.intent.read_bytes())
+            return service.request_change(arguments.key, intent, closet)
+        case "collect":
+            return service.collect(**_collect_arguments(arguments), closet=closet)
+        case "resolve":
+            return service.resolve_conflict(
+                arguments.key, arguments.new_key, arguments.choice
+            )
+    opened = hub.get(closet)
+    runtime, synchronizer = opened.runtime, opened.synchronizer
+    match command:
         case "submit":
             proposal = Proposal.model_validate_json(arguments.proposal.read_bytes())
             return {"status": runtime.submit(arguments.key, proposal)}
@@ -474,33 +498,10 @@ def _execute(
             return runtime.run_next()
         case "cleanup":
             return runtime.cleanup()
-        case "automate":
-            intent = Intent.model_validate_json(arguments.intent.read_bytes())
-            return {"status": runtime.submit_intent(arguments.key, intent)}
-        case "collect":
-            service = Service(runtime, synchronizer)
-            return service.collect(**_collect_arguments(arguments))
-        case "resolve":
-            service = Service(runtime, synchronizer)
-            return service.resolve_conflict(
-                arguments.key, arguments.new_key, arguments.choice
-            )
-        case "status":
-            return runtime.describe(arguments.key)
-        case "cancel":
-            return {"cancelled": runtime.cancel(arguments.key)}
         case "sync":
             return synchronizer.reconcile()
         case "audit":
             return synchronizer.audit()
-        case "search":
-            service = Service(runtime, synchronizer)
-            return service.search(
-                arguments.query,
-                arguments.limit,
-                arguments.fallback_reason,
-                tuple(arguments.folders),
-            )
         case "watch":
             stop = threading.Event()
             try:

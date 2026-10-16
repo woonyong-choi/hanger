@@ -413,9 +413,7 @@ def call_tool(launcher: Launcher, name: str, arguments: dict[str, Any]) -> Any:
                             reply["error"].get("message", "request failed")
                         )
                     return reply["result"]
-            raise HangerError(
-                "background service connection lost", code="daemon_lost"
-            )
+            raise HangerError("background service connection lost", code="daemon_lost")
 
         request(
             1,

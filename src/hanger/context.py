@@ -75,7 +75,8 @@ def shape(
     if used > settings.context_bytes:
         largest = max(full.values(), key=encoded_size)
         raise RequestError(
-            f"입력 문서가 모델 입력 한도({settings.search.context_kib}KiB)를 넘습니다: "
+            f"An input note is larger than the model input limit "
+            f"({settings.search.context_kib} KiB): "
             f"{largest['path']}",
             code="input_too_large",
         )

@@ -57,7 +57,10 @@ class _State(TypedDict):
     coverage: Any
     previous: dict[str, Any] | None
     feedback: list[str]
-    writable: list[str]
+    # RULES.md texts that apply to the closet and the notes in play.
+    rules: list[dict[str, str]]
+    # Given notes the model may read but not change.
+    read_only: list[str]
     applied: list[str]
     signatures: dict[str, str]
     decision: dict[str, Any]
@@ -140,7 +143,8 @@ _EMPTY: dict[str, Any] = {
     "coverage": None,
     "previous": None,
     "feedback": [],
-    "writable": [],
+    "rules": [],
+    "read_only": [],
     "applied": [],
     "signatures": {},
     "decision": {},
@@ -176,7 +180,7 @@ def _writing_graph(workflow: _Workflow | None) -> Any:
 
 
 def _unavailable(state: _State) -> dict[str, Any]:
-    raise RequestError("모델 실행기가 설정되지 않았습니다.")
+    raise RequestError("No model is configured for this request.")
 
 
 def _inbox_graph() -> Any:
@@ -246,12 +250,14 @@ def run_workflow(
             cast(_State, initial), durability="sync"
         )
     except (ValidationError, KeyError) as error:
-        raise ModelError("모델 출력이 수정안 형식과 맞지 않습니다.") from error
+        raise ModelError(
+            "The model output does not match the proposal format."
+        ) from error
     workflow.guard(cast(_State, result))
     check = result.get("review", {})
     if result["proposal"] and (not check["approved"] or check["issues"]):
         raise ReviewRejectedError(
-            list(check["issues"]) or ["검토에서 승인되지 않았습니다."]
+            list(check["issues"]) or ["The review did not approve the change."]
         )
     return {
         "proposal": result["proposal"],
@@ -281,7 +287,7 @@ class _Workflow:
 
     def guard(self, state: _State) -> None:
         if self.is_cancelled() or not self.synchronizer.matches(state["signatures"]):
-            raise ConflictError("작업 중 원문이 변경되었거나 작업이 취소되었습니다.")
+            raise ConflictError("A source note changed, or the job was cancelled.")
 
     def _invalidated(self, state: _State) -> bool:
         return self.is_cancelled() or not self.synchronizer.matches(state["signatures"])
@@ -364,14 +370,14 @@ class _Workflow:
             state["documents"],
             self.synchronizer.documents,
             EditPolicy(
-                settings=self.synchronizer.settings,
+                closet=self.synchronizer.policy,
                 allow_delete=request["allow_delete"],
                 require_evidence=policy.require_evidence,
             ),
         )
         if len(json.dumps(proposal).encode()) > 2 * 1024 * 1024:
             raise RequestError(
-                "수정안이 크기 한도(2MiB)를 넘습니다.", code="proposal_too_large"
+                "The proposal is larger than 2 MiB.", code="proposal_too_large"
             )
         return {"proposal": proposal, "decision": decision.model_dump()}
 
@@ -422,10 +428,10 @@ class _Workflow:
         if not found:
             return {"similar": "checked"}
         notice = (
-            "새로 만들려는 문서와 비슷한 기존 문서가 있습니다: "
+            "Existing notes look like the one you are about to create: "
             + ", ".join(found)
-            + ". 새 문서 대신 기존 문서를 보완하거나 병합하는 것이 맞는지 다시 "
-            "판단하십시오."
+            + ". Decide again whether to supplement or merge into one of them "
+            "instead of creating a new note."
         )
         return {
             "similar": "found",
@@ -493,8 +499,8 @@ def _call(
 ) -> dict[str, Any]:
     if len(prompt.encode()) > 512 * 1024:
         raise RequestError(
-            "검색된 문서가 모델 입력 한도(512KiB)를 넘습니다. 폴더 "
-            "범위를 좁혀 다시 요청하십시오.",
+            "The notes found are larger than the model input limit (512 KiB). "
+            "Narrow the folders and ask again.",
             code="context_limit",
         )
     with trace.measure(stage) as metrics:
