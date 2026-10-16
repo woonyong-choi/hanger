@@ -1,6 +1,6 @@
-"""One background Markchain process per state directory, shared over a socket.
+"""One background Hanger process per state directory, shared over a socket.
 
-Every MCP client (Codex, Claude Code, ...) starts ``markchain serve``. That
+Every MCP client (Codex, Claude Code, ...) starts ``hanger serve``. That
 command is a thin relay: it connects to this daemon, starting it when absent.
 The daemon owns the queue, the LangGraph state, the file watcher and the
 managed Elasticsearch process, and exits by itself after an idle period.
@@ -30,9 +30,9 @@ import mcp.types as types
 from anyio.streams.buffered import BufferedByteReceiveStream
 from mcp.shared.message import SessionMessage
 
-from markchain import __version__
-from markchain.errors import RequestError
-from markchain.service import Service
+from hanger import __version__
+from hanger.errors import RequestError
+from hanger.service import Service
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +44,10 @@ _SOCKET_LIMIT = 100  # macOS sun_path is 104 bytes including the terminator
 
 def socket_path(state: Path) -> Path:
     """Socket inside the state folder, or a short temp path when that is too long."""
-    path = state.resolve() / "markchain.sock"
+    path = state.resolve() / "hanger.sock"
     if len(str(path).encode()) < _SOCKET_LIMIT:
         return path
-    name = "markchain-" + hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:16]
+    name = "hanger-" + hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:16]
     for folder in (Path(tempfile.gettempdir()), Path("/tmp")):
         candidate = folder / f"{name}.sock"
         if len(str(candidate).encode()) < _SOCKET_LIMIT:

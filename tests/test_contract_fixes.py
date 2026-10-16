@@ -7,18 +7,18 @@ import time
 from pathlib import Path
 
 import pytest
-from test_review_fixes import Model, _edit, _finish, _runtime, vault  # noqa: F401
+from test_review_fixes import Model, _edit, _finish, _runtime, closet  # noqa: F401
 
-from markchain.config import Settings
-from markchain.documents import Documents
-from markchain.errors import RequestError
-from markchain.model import Intent
-from markchain.requests import Change, Proposal
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.service import Service
-from markchain.sync import Synchronizer
-from markchain.watcher import VaultWatcher
+from hanger.config import Settings
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.model import Intent
+from hanger.requests import Change, Proposal
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.service import Service
+from hanger.sync import Synchronizer
+from hanger.watcher import ClosetWatcher
 
 _OFFLINE = "http://127.0.0.1:9"
 
@@ -31,14 +31,14 @@ def _service(root: Path, state: Path, settings: Settings) -> tuple[Service, Runt
 
 @pytest.fixture
 def layout(tmp_path: Path) -> tuple[Path, Path, Settings]:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     for folder in ("notes", "notes/private", "other", "inbox"):
         (root / folder).mkdir(parents=True)
     (root / "notes/a.md").write_text("# a")
     (root / "notes/private/s.md").write_text("# secret")
     (root / "other/c.md").write_text("# c")
     settings = Settings.model_validate(
-        {"vault": {"managed": ["notes"], "exclude": ["private"]}}
+        {"closet": {"managed": ["notes"], "exclude": ["private"]}}
     )
     return root, tmp_path / "state", settings
 
@@ -69,7 +69,7 @@ def test_read_document_missing_is_not_found(
     assert str(root) not in str(caught.value)
 
 
-# collect refuses to write where Markchain may not write, and bad Unicode.
+# collect refuses to write where Hanger may not write, and bad Unicode.
 def test_collect_respects_writable_and_rejects_bad_unicode(
     layout: tuple[Path, Path, Settings],
 ) -> None:
@@ -103,7 +103,7 @@ def test_direct_proposal_outside_writable_is_rejected(
 
 # A cancelled job that has not started reports cancelled, not queued.
 def test_cancelled_queued_job_reports_cancelled(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     with Runtime(root, tmp_path / "state") as runtime:
         key = runtime.issue_key()
@@ -114,7 +114,7 @@ def test_cancelled_queued_job_reports_cancelled(tmp_path: Path) -> None:
 
 # Writing many files keeps the job history small: one step, not one per file.
 def test_many_file_job_keeps_checkpoint_small(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     body = "x" * 9000
     proposal = Proposal(
@@ -130,8 +130,8 @@ def test_many_file_job_keeps_checkpoint_small(tmp_path: Path) -> None:
 
 
 # An edit that breaks a rule (ambiguous anchor) is redrafted, not failed.
-def test_rule_violation_is_redrafted(vault: tuple[Path, Path, str]) -> None:  # noqa: F811
-    root, state, url = vault
+def test_rule_violation_is_redrafted(closet: tuple[Path, Path, str]) -> None:  # noqa: F811
+    root, state, url = closet
     (root / "docs/a.md").write_text("# 결제\n중복\n중복\n")
     model = Model()
     model.decisions = [
@@ -161,7 +161,7 @@ def test_watcher_survives_unexpected_error(
 ) -> None:
     root, _, settings = layout
     sync = Synchronizer(Documents(root), SearchIndex(_OFFLINE, str(root)), settings)
-    watcher = VaultWatcher(sync)
+    watcher = ClosetWatcher(sync)
     calls = 0
 
     def flaky(*_: object) -> None:
@@ -170,7 +170,7 @@ def test_watcher_survives_unexpected_error(
         raise ValueError("unexpected")
 
     monkeypatch.setattr(watcher, "flush", flaky)
-    monkeypatch.setattr("markchain.watcher.VaultWatcher.close", lambda self: None)
+    monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
     stop = threading.Event()
     thread = threading.Thread(target=watcher.run, args=(stop,), daemon=True)
     monkeypatch.setattr(stop, "wait", lambda seconds: time.sleep(0.05) or False)
@@ -187,7 +187,7 @@ def test_watcher_survives_unexpected_error(
 def test_retry_is_visible_and_failure_leaves_no_work_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     clock = time.time()
     monkeypatch.setattr(time, "time", lambda: clock)
@@ -229,11 +229,11 @@ def _hidden(root: Path) -> list[str]:
 def test_delete_is_verified_and_leaves_no_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from markchain import documents as documents_module
-    from markchain.errors import ConflictError
-    from markchain.requests import digest
+    from hanger import documents as documents_module
+    from hanger.errors import ConflictError
+    from hanger.requests import digest
 
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     documents = Documents(root)
     target = root / "a.md"
@@ -261,26 +261,26 @@ def test_delete_is_verified_and_leaves_no_files(
 
     # A crash after the rename: the next attempt finishes the delete.
     target.write_text("planned")
-    rename(target, root / ".a.md.markchain-deleting")
+    rename(target, root / ".a.md.hanger-deleting")
     assert documents.apply(change) == "already_applied"
     assert not target.exists() and _hidden(root) == []
 
     # A crash after the rename of changed content: it is put back.
-    (root / ".a.md.markchain-deleting").write_text("changed")
+    (root / ".a.md.hanger-deleting").write_text("changed")
     with pytest.raises(ConflictError):
         documents.apply(change)
     assert target.read_text() == "changed" and _hidden(root) == []
 
     # Expired or failed jobs settle the same way.
     target.unlink()
-    (root / ".a.md.markchain-deleting").write_text("planned")
+    (root / ".a.md.hanger-deleting").write_text("planned")
     documents.discard_pending(Proposal(changes=(change,)))
     assert not target.exists() and _hidden(root) == []
 
 
 # Listed search results are matched without reading their whole body.
 def test_listed_results_are_not_loaded() -> None:
-    from markchain.context import shape
+    from hanger.context import shape
 
     settings = Settings.model_validate({"search": {"full_text": 1}})
     ranked = [
@@ -302,9 +302,9 @@ def test_listed_results_are_not_loaded() -> None:
     ]
 
 
-# The managed engine keeps only the current vault's index.
-def test_owned_index_removes_other_vault_indexes(tmp_path: Path) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+# The managed engine keeps only the current closet's index.
+def test_owned_index_removes_other_closet_indexes(tmp_path: Path) -> None:
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
     old = SearchIndex(url, str(tmp_path / "old"))
@@ -333,7 +333,7 @@ def test_owned_index_removes_other_vault_indexes(tmp_path: Path) -> None:
     ],
 )
 def test_inbox_name_rule(text: str, title: str) -> None:
-    from markchain.workflows import inbox_path
+    from hanger.workflows import inbox_path
 
     issued = time.mktime((2026, 10, 16, 7, 31, 5, 0, 0, -1))
     path = inbox_path(text, issued)
@@ -344,7 +344,7 @@ def test_inbox_name_rule(text: str, title: str) -> None:
 
 # A resend with the same key lands on the same file.
 def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     service, runtime = _service(root, tmp_path / "state", Settings())
     with runtime:
@@ -360,9 +360,9 @@ def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
 
 # Before creating a document, a similar existing one is found and offered.
 def test_similar_document_is_checked_before_create(
-    vault: tuple[Path, Path, str],  # noqa: F811
+    closet: tuple[Path, Path, str],  # noqa: F811
 ) -> None:
-    root, state, url = vault
+    root, state, url = closet
     (root / "notes").mkdir()
     (root / "notes/cat.md").write_text("# 고양이\n고양이 메모")
     (root / "docs/payment.md").write_text("# 결제 재시도\n결제 재시도는 2회다.")
@@ -406,7 +406,7 @@ def test_similar_document_is_checked_before_create(
 
 # Any file is collected byte for byte, named time-filename-hash.extension.
 def test_collect_any_file(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     picture = tmp_path / "회의 사진 (1).PNG"
     data = bytes(range(256)) * 4000
@@ -438,9 +438,9 @@ def test_collect_any_file(tmp_path: Path) -> None:
 
 # A file whose content changes while it is copied leaves nothing behind.
 def test_collect_file_changed_while_copying(tmp_path: Path) -> None:
-    from markchain.errors import ConflictError
+    from hanger.errors import ConflictError
 
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     source = tmp_path / "a.bin"
     source.write_bytes(b"first")
@@ -466,7 +466,7 @@ def test_collect_file_respects_writable(layout: tuple[Path, Path, Settings]) -> 
 
 # A missing model command fails at once with a clear message, without retries.
 def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    from markchain.model import CliModel
+    from hanger.model import CliModel
 
     monkeypatch.setenv("PATH", "/nonexistent")
     with pytest.raises(RequestError) as caught:
@@ -476,7 +476,7 @@ def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # A finished or stopped job keeps one record, not its step history.
 def test_finished_jobs_keep_one_record(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     (root / "b.md").write_text("old")
     with Runtime(root, tmp_path / "state") as runtime:

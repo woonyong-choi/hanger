@@ -5,7 +5,7 @@ __all__ = ["draft_prompt", "review_prompt"]
 import json
 from typing import Any
 
-from markchain.profiles import PROFILES
+from hanger.profiles import PROFILES
 
 _DRAFT_RULES = (
     "You propose Markdown document changes. Return only the required JSON. "
@@ -28,7 +28,7 @@ _DRAFT_RULES = (
 
 def draft_prompt(state: dict[str, Any]) -> str:
     request = state["request"]
-    writable = state.get("writable") or ["(entire vault)"]
+    writable = state.get("writable") or ["(entire closet)"]
     parts = [
         _DRAFT_RULES,
         "Writable folders: " + ", ".join(writable) + ".",

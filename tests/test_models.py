@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from markchain.config import Settings, dump_settings, load_settings
-from markchain.errors import RequestError
-from markchain.model import CliModel
+from hanger.config import Settings, dump_settings, load_settings
+from hanger.errors import RequestError
+from hanger.model import CliModel
 
 _DECISION = {
     "action": "keep",

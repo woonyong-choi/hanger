@@ -25,24 +25,24 @@ from langgraph.graph import END, START, StateGraph
 from persistqueue import SQLiteAckQueue
 from persistqueue.serializers import json as json_serializer
 
-from markchain.config import Settings
-from markchain.documents import Documents
-from markchain.errors import (
+from hanger.config import Settings
+from hanger.documents import Documents
+from hanger.errors import (
     ConflictError,
-    MarkchainError,
+    HangerError,
     RequestError,
     ReviewRejectedError,
     SearchUnavailableError,
 )
-from markchain.model import Intent, Planner
-from markchain.requests import (
+from hanger.model import Intent, Planner
+from hanger.requests import (
     KEY_LIFETIME_SECONDS,
     Proposal,
     digest,
     issue_key,
     validate_key,
 )
-from markchain.trace import Trace
+from hanger.trace import Trace
 
 logger = logging.getLogger(__name__)
 # Retry delays for unexpected job errors; the last value repeats.
@@ -91,7 +91,7 @@ class Runtime:
     # basis: estimate
     def __init__(
         self,
-        vault: Path,
+        closet: Path,
         state: Path,
         planner: Planner | None = None,
         *,
@@ -99,7 +99,7 @@ class Runtime:
         trace: Trace | None = None,
         settings: Settings | None = None,
     ) -> None:
-        self.documents = Documents(vault, writer_id=str(state.resolve()))
+        self.documents = Documents(closet, writer_id=str(state.resolve()))
         self.state = state.resolve()
         self._resources = ExitStack()
         self._admission = threading.RLock()
@@ -119,7 +119,7 @@ class Runtime:
         self._queue_ids: dict[str, int] = {}
         self._active: set[str] = set()
         if self.state.is_relative_to(self.documents.root):
-            raise RequestError("runtime state must be outside vault")
+            raise RequestError("runtime state must be outside closet")
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             self._resources.enter_context(
@@ -129,7 +129,7 @@ class Runtime:
             raise RequestError("runtime state is already in use") from error
         try:
             self._open()
-        except (OSError, sqlite3.Error, ValueError, MarkchainError):
+        except (OSError, sqlite3.Error, ValueError, HangerError):
             self._resources.close()
             raise
 
@@ -664,28 +664,28 @@ class Runtime:
         self._graph.update_state(_config(key), record, as_node="apply")
 
     def _rebind(self, previous: str, identity: str) -> None:
-        """Start over for a new vault root; nothing of the old one is kept.
+        """Start over for a new closet root; nothing of the old one is kept.
 
-        Jobs of the old vault cannot apply to the new one, so the queue and
-        job history are removed, and Markchain's unfinished files in the old
-        vault are cleaned up. The search index is replaced on first use.
+        Jobs of the old closet cannot apply to the new one, so the queue and
+        job history are removed, and Hanger's unfinished files in the old
+        closet are cleaned up. The search index is replaced on first use.
         """
         logger.warning(
-            "vault changed from %s to %s; resetting jobs", previous, identity
+            "closet changed from %s to %s; resetting jobs", previous, identity
         )
         old = Path(previous)
         if old.is_dir():
             try:
                 Documents(old).release()
             except OSError as error:
-                logger.warning("could not clean the previous vault: %s", error)
+                logger.warning("could not clean the previous closet: %s", error)
         shutil.rmtree(self.state / "queue", ignore_errors=True)
         for name in ("graph.sqlite", "graph.sqlite-wal", "graph.sqlite-shm"):
             (self.state / name).unlink(missing_ok=True)
         (self.state / "cleaned.date").unlink(missing_ok=True)
-        temporary = self.state / "vault.path.tmp"
+        temporary = self.state / "closet.path.tmp"
         temporary.write_text(identity)
-        os.replace(temporary, self.state / "vault.path")
+        os.replace(temporary, self.state / "closet.path")
 
     def _finish(self, key: str, queue_id: int) -> None:
         with self._admission:
@@ -697,7 +697,7 @@ class Runtime:
     # vars: q = retained queue bytes
     # basis: estimate
     def _open(self) -> None:
-        identity_path = self.state / "vault.path"
+        identity_path = self.state / "closet.path"
         identity = str(self.documents.root)
         if not identity_path.exists():
             with identity_path.open("x") as output:
@@ -821,7 +821,7 @@ class Runtime:
             return self._again(
                 state, "review_attempt", self.settings.jobs.review_attempts, error
             )
-        except MarkchainError as error:
+        except HangerError as error:
             if isinstance(error, SearchUnavailableError):
                 raise
             # Model output that breaks an edit rule is re-drafted with the
@@ -834,7 +834,7 @@ class Runtime:
             return {"status": "failed", "error": str(error), "error_code": error.code}
 
     def _again(
-        self, state: _State, counter: str, limit: int, error: MarkchainError
+        self, state: _State, counter: str, limit: int, error: HangerError
     ) -> dict[str, Any]:
         """Re-plan a retryable failure with feedback, up to the configured limit."""
         attempt = int(state.get(counter, 0)) + 1  # type: ignore[call-overload]

@@ -1,4 +1,4 @@
-"""Interactive setup questions: vault root, managed folders, confirmation."""
+"""Interactive setup questions: closet root, managed folders, confirmation."""
 
 from __future__ import annotations
 
@@ -11,8 +11,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from markchain.config import Settings, dump_settings
-from markchain.progress import Progress
+from hanger.config import Settings, dump_settings
+from hanger.progress import Progress
 
 _ATTEMPTS = 3
 _WINDOW = 15
@@ -67,8 +67,8 @@ class _Questions:
     # cost: time O(a), heap O(1), stack O(1), io O(a)
     # vars: a = answers read, at most three
     # basis: estimate
-    def vault(self, default: str | None) -> Path:
-        label = "Vault root folder"
+    def closet(self, default: str | None) -> Path:
+        label = "Closet root folder"
         for attempt in range(1, _ATTEMPTS + 1):
             answer = self.ask(label, default)
             path = Path(answer).expanduser() if answer else None
@@ -95,7 +95,7 @@ class _Questions:
                 label,
                 f"{answer or '(empty)'}  {problem}{self.ui.style(remain, '2')}",
             )
-        raise SetupAbortedError(f"No valid vault folder after {_ATTEMPTS} attempts")
+        raise SetupAbortedError(f"No valid closet folder after {_ATTEMPTS} attempts")
 
     def confirm(self, label: str) -> bool:
         answer = self.ask(label + " (Y/n)").lower()
@@ -110,7 +110,7 @@ class _Questions:
             and not entry.is_symlink()
         )
         if not names:
-            self.ui.line("done", "Managed folders", "entire vault (no subfolders)")
+            self.ui.line("done", "Managed folders", "entire closet (no subfolders)")
             return []
         counts = [_notes(root / name) for name in names]
         selected = [not current or name in current for name in names]
@@ -252,46 +252,46 @@ def _read_key(descriptor: int) -> str:
 
 
 # cost: time O(f), heap O(f), stack O(1), io O(f)
-# vars: f = files under the vault for the note counts
+# vars: f = files under the closet for the note counts
 # basis: estimate
 def run_setup(
     config: Path,
     current: Settings,
     *,
-    vault: Path | None = None,
+    closet: Path | None = None,
     managed: Sequence[str] | None = None,
     source: TextIO | None = None,
     out: TextIO | None = None,
     confirm: Callable[[Settings], None] | None = None,
 ) -> Settings:
-    """Ask for the vault and managed folders, confirm, then save settings.
+    """Ask for the closet and managed folders, confirm, then save settings.
 
     Nothing is written until the user confirms. ``confirm`` runs checks that
     must pass before saving.
     """
     ui = Progress(out or sys.stdout)
     questions = _Questions(ui, source or sys.stdin)
-    ui.title("Markchain setup")
-    if managed is not None and vault is not None:
-        root = vault.expanduser().resolve()
+    ui.title("Hanger setup")
+    if managed is not None and closet is not None:
+        root = closet.expanduser().resolve()
         if not root.is_dir():
-            raise SetupAbortedError(f"No such vault folder: {root}")
+            raise SetupAbortedError(f"No such closet folder: {root}")
         missing = [name for name in managed if not (root / name).is_dir()]
         if missing:
             raise SetupAbortedError("Unknown folders: " + ", ".join(missing))
-        ui.line("done", "Vault root folder", str(root))
+        ui.line("done", "Closet root folder", str(root))
         folders = list(managed)
         ui.line("done", "Managed folders", ", ".join(folders) or "all")
     else:
-        default = str(vault) if vault else current.vault.root
-        root = questions.vault(default)
-        same_root = current.vault.root == str(root)
-        folders = questions.folders(root, current.vault.managed if same_root else ())
+        default = str(closet) if closet else current.closet.root
+        root = questions.closet(default)
+        same_root = current.closet.root == str(root)
+        folders = questions.folders(root, current.closet.managed if same_root else ())
         if not questions.confirm("Save settings and install the search engine?"):
             raise SetupAbortedError("Setup cancelled")
     updated = current.model_copy(
         update={
-            "vault": current.vault.model_copy(
+            "closet": current.closet.model_copy(
                 update={"root": str(root), "managed": tuple(folders)}
             )
         }
@@ -303,7 +303,7 @@ def run_setup(
     temporary.write_text(dump_settings(updated))
     os.replace(temporary, config)
     ui.line("done", "Settings saved", str(config))
-    ui.note(f"edit later: markchain config --edit   or   {edit_command(config)}")
+    ui.note(f"edit later: hanger config --edit   or   {edit_command(config)}")
     ui.stream.write("\n")
     ui.stream.flush()
     return updated

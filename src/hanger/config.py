@@ -1,7 +1,7 @@
 """Settings: every value has a working default and is stored in the state database.
 
 Keys are dotted section names such as ``search.candidates`` or
-``models.draft.provider``; ``markchain config`` lists and changes them.
+``models.draft.provider``; ``hanger config`` lists and changes them.
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ def read_legacy_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Read an old config.toml: (settings to keep, the retired [vault] section)."""
     with path.open("rb") as source:
         values = tomllib.load(source)
-    vault = values.get("vault", {})
+    closet = values.get("vault", {})
     for section in _RETIRED_SECTIONS:
         values.pop(section, None)
     for section, key in _RETIRED_KEYS:
@@ -130,4 +130,4 @@ def read_legacy_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for role in models.values():
         if isinstance(role, dict) and "model" in role:
             role["name"] = role.pop("model")
-    return values, vault
+    return values, closet

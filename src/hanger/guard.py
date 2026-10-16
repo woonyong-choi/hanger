@@ -1,8 +1,8 @@
 """Run a child command and stop it when the launching process disappears.
 
-Usage: python -m markchain.guard <parent-pid> <command> [args...]
+Usage: python -m hanger.guard <parent-pid> <command> [args...]
 
-Elasticsearch is a separate Java process. If the Markchain daemon is killed
+Elasticsearch is a separate Java process. If the Hanger daemon is killed
 without cleanup, this guard notices that it was re-parented and stops the
 child so no search server is left running unattended.
 """

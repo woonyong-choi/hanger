@@ -5,7 +5,7 @@ __all__ = ["SearchScope"]
 from collections.abc import Sequence
 from pathlib import PurePosixPath
 
-from markchain.errors import RequestError
+from hanger.errors import RequestError
 
 
 class SearchScope:
@@ -24,7 +24,7 @@ class SearchScope:
                 or any(not part or part.startswith(".") for part in parts)
             ):
                 raise RequestError(
-                    "folders에는 Vault 기준 상대 폴더 경로만 지정할 수 있습니다."
+                    "folders에는 Closet 기준 상대 폴더 경로만 지정할 수 있습니다."
                 )
             paths.add(path)
         self.folders = tuple(

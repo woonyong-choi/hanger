@@ -6,8 +6,8 @@ import json
 from collections.abc import Callable, Iterable
 from typing import Any
 
-from markchain.config import Settings
-from markchain.errors import MarkchainError, RequestError
+from hanger.config import Settings
+from hanger.errors import HangerError, RequestError
 
 _SNIPPET_LINES = 2
 _SNIPPET_WIDTH = 160
@@ -90,7 +90,7 @@ def shape(
             if slots > 0 and used + document["bytes"] <= budget and load:
                 try:
                     document = load(path)
-                except (OSError, MarkchainError):
+                except (OSError, HangerError):
                     continue  # changed or removed since the search; skip it
             else:
                 listed.append(_peeked(document, terms, peek))
@@ -114,7 +114,7 @@ def _peeked(
     if peek is not None:
         try:
             found = peek(document["path"], terms)
-        except (OSError, MarkchainError):
+        except (OSError, HangerError):
             found = []
     return {
         "path": document["path"],

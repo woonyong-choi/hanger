@@ -11,18 +11,18 @@ from pathlib import Path
 
 import pytest
 
-from markchain import proxy
-from markchain.daemon import DaemonInfo, socket_path
-from markchain.proxy import Launcher, Relay, call_tool
-from markchain.search import SearchIndex
+from hanger import proxy
+from hanger.daemon import DaemonInfo, socket_path
+from hanger.proxy import Launcher, Relay, call_tool
+from hanger.search import SearchIndex
 
 
 @pytest.fixture
 def env(tmp_path: Path) -> Iterator[tuple[Path, Path, Launcher]]:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     (root / "docs/a.md").write_text("# 결제\n멱등성 키")
     state = tmp_path / "s"
@@ -31,8 +31,8 @@ def env(tmp_path: Path) -> Iterator[tuple[Path, Path, Launcher]]:
     command = [
         sys.executable,
         "-m",
-        "markchain.cli",
-        "--vault",
+        "hanger.cli",
+        "--closet",
         str(root),
         "--state",
         str(state),

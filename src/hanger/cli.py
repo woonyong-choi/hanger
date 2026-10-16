@@ -20,23 +20,23 @@ from elastic_transport import TransportError
 from elasticsearch import ApiError
 from pydantic import ValidationError
 
-from markchain import __version__
-from markchain.config import Settings, load_settings
-from markchain.documents import Documents
-from markchain.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
-from markchain.errors import MarkchainError
-from markchain.logs import configure
-from markchain.model import CliModel, Intent, Planner
-from markchain.progress import Progress
-from markchain.proxy import Launcher, Relay, call_tool
-from markchain.requests import Proposal
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.service import Service
-from markchain.sync import Synchronizer
-from markchain.trace import Trace
-from markchain.watcher import VaultWatcher
-from markchain.wizard import SetupAbortedError, edit_command, run_setup
+from hanger import __version__
+from hanger.config import Settings, load_settings
+from hanger.documents import Documents
+from hanger.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
+from hanger.errors import HangerError
+from hanger.logs import configure
+from hanger.model import CliModel, Intent, Planner
+from hanger.progress import Progress
+from hanger.proxy import Launcher, Relay, call_tool
+from hanger.requests import Proposal
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.service import Service
+from hanger.sync import Synchronizer
+from hanger.trace import Trace
+from hanger.watcher import ClosetWatcher
+from hanger.wizard import SetupAbortedError, edit_command, run_setup
 
 logger = logging.getLogger(__name__)
 
@@ -44,23 +44,23 @@ logger = logging.getLogger(__name__)
 _CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
 # A shutting-down daemon may hold the state lock briefly.
 _DAEMON_LOCK_SECONDS = 90
-_INSTALL_ROOT = Path.home() / ".local" / "share" / "markchain"
-_DEFAULT_STATE = _INSTALL_ROOT / "vault"
+_INSTALL_ROOT = Path.home() / ".local" / "share" / "hanger"
+_DEFAULT_STATE = _INSTALL_ROOT / "closet"
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="markchain")
+    parser = argparse.ArgumentParser(prog="hanger")
     parser.add_argument(
-        "--version", action="version", version=f"markchain {__version__}"
+        "--version", action="version", version=f"hanger {__version__}"
     )
     parser.add_argument(
-        "--vault", type=Path, help="vault root (default: the one chosen in setup)"
+        "--closet", type=Path, help="closet root (default: the one chosen in setup)"
     )
     parser.add_argument(
         "--state",
         type=Path,
         default=_DEFAULT_STATE,
-        help=f"runtime state folder outside the vault (default: {_DEFAULT_STATE})",
+        help=f"runtime state folder outside the closet (default: {_DEFAULT_STATE})",
     )
     parser.add_argument(
         "--config", type=Path, help="settings TOML (default: <state>/config.toml)"
@@ -85,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("daemon", help="internal: shared background process")
     commands.add_parser("stop", help="stop the shared daemon")
     setup = commands.add_parser(
-        "setup", help="choose the vault and folders, then install the search engine"
+        "setup", help="choose the closet and folders, then install the search engine"
     )
     setup.add_argument(
         "--reinstall",
@@ -95,7 +95,7 @@ def _parser() -> argparse.ArgumentParser:
     setup.add_argument(
         "--managed",
         action="append",
-        help="top-level folder to manage (repeat); skips the prompts with --vault",
+        help="top-level folder to manage (repeat); skips the prompts with --closet",
     )
     config = commands.add_parser("config", help="show or edit the settings file")
     config.add_argument("--edit", action="store_true", help="open it in an editor")
@@ -108,7 +108,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         dest="folders",
-        help="vault-relative folder; repeat for OR scope; omit to search all",
+        help="closet-relative folder; repeat for OR scope; omit to search all",
     )
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
@@ -148,8 +148,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def _global_arguments(arguments: argparse.Namespace) -> list[str]:
     values = ["--state", str(arguments.state.resolve())]
-    if arguments.vault is not None:
-        values += ["--vault", str(arguments.vault.resolve())]
+    if arguments.closet is not None:
+        values += ["--closet", str(arguments.closet.resolve())]
     if arguments.config:
         values += ["--config", str(arguments.config.resolve())]
     if arguments.search_url:
@@ -172,12 +172,12 @@ def main(argv: list[str] | None = None) -> int:
     configure(state, console=None if quiet else logging.WARNING)
     try:
         settings = load_settings(arguments.config or state / "config.toml")
-        if arguments.vault is None and arguments.command not in _NO_VAULT:
-            if not settings.vault.root:
-                raise MarkchainError(
-                    "Vault is not configured. Run: markchain setup", code="setup"
+        if arguments.closet is None and arguments.command not in _NO_CLOSET:
+            if not settings.closet.root:
+                raise HangerError(
+                    "Closet is not configured. Run: hanger setup", code="setup"
                 )
-            arguments.vault = Path(settings.vault.root)
+            arguments.closet = Path(settings.closet.root)
         if arguments.search_url:
             settings = settings.model_copy(
                 update={
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             [
                 sys.executable,
                 "-m",
-                "markchain.cli",
+                "hanger.cli",
                 *_global_arguments(arguments),
                 "daemon",
             ],
@@ -205,18 +205,18 @@ def main(argv: list[str] | None = None) -> int:
             for item in error.errors(include_input=False, include_url=False)
         )
         logger.error("invalid input: %s", details)
-        print(f"markchain: invalid input: {details}", file=sys.stderr)
+        print(f"hanger: invalid input: {details}", file=sys.stderr)
         return 1
-    except (MarkchainError, OSError, sqlite3.Error, ApiError, TransportError) as error:
+    except (HangerError, OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
-        print(f"markchain: {error}", file=sys.stderr)
+        print(f"hanger: {error}", file=sys.stderr)
         return 1
     return 0
 
 
 _SILENT = object()
-# Commands that work before a vault is configured.
-_NO_VAULT = {"setup", "config", "stop"}
+# Commands that work before a closet is configured.
+_NO_CLOSET = {"setup", "config", "stop"}
 
 
 def _dispatch(
@@ -253,13 +253,13 @@ def _config_path(arguments: argparse.Namespace) -> Path:
 def _config(arguments: argparse.Namespace) -> object:
     path = _config_path(arguments)
     if not path.exists():
-        print(f"No settings yet. Run: markchain setup  ({path})")
+        print(f"No settings yet. Run: hanger setup  ({path})")
         return _SILENT
     if arguments.edit:
         subprocess.run(shlex.split(edit_command(path)), check=False)
         return _SILENT
     print(path.read_text(), end="")
-    print(f"\n# {path}\n# edit: markchain config --edit  or  {edit_command(path)}")
+    print(f"\n# {path}\n# edit: hanger config --edit  or  {edit_command(path)}")
     return _SILENT
 
 
@@ -268,13 +268,13 @@ def _setup(
 ) -> object:
     state: Path = arguments.state.expanduser().resolve()
 
-    recorded = state / "vault.path"
+    recorded = state / "closet.path"
     previous = recorded.read_text() if recorded.exists() else None
     try:
         settings = run_setup(
             _config_path(arguments),
             settings,
-            vault=arguments.vault,
+            closet=arguments.closet,
             managed=arguments.managed,
         )
     except SetupAbortedError as error:
@@ -284,7 +284,7 @@ def _setup(
     engine = ElasticManager(_INSTALL_ROOT, state, settings)
     # Hold the start lock so connected clients cannot restart the service
     # (which would install or start the search engine) until setup ends.
-    root = str(Path(str(settings.vault.root)).resolve())
+    root = str(Path(str(settings.closet.root)).resolve())
     changed = previous is not None and previous != root
     with launcher.hold():
         install = arguments.reinstall or not engine.installed()
@@ -293,15 +293,15 @@ def _setup(
         step = ui.step(1, total, "Stop background service")
         stopped = launcher.stop()
         if arguments.reinstall:
-            # A fresh engine starts from an empty index rebuilt from the vault.
+            # A fresh engine starts from an empty index rebuilt from the closet.
             shutil.rmtree(state / "elasticsearch", ignore_errors=True)
         step.done("stopped" if stopped else "not running")
         if changed:
-            step = ui.step(2, total, "Reset for the new vault")
+            step = ui.step(2, total, "Reset for the new closet")
             # Opening the job store for the new root clears the old one; the
             # old search index is removed when the engine next starts.
             Runtime(Path(root), state, settings=settings).close()
-            step.done("previous vault jobs removed; its index goes on next start")
+            step.done("previous closet jobs removed; its index goes on next start")
         # A stopped service may have finished installing in the meantime.
         install = arguments.reinstall or not engine.installed()
         if install:
@@ -312,18 +312,18 @@ def _setup(
             step = ui.step(first, total, "Check search engine")
             step.done(f"Elasticsearch {ES_VERSION} already installed")
     ui.stream.write("\n")
-    ui.line("done", "Markchain is ready", str(settings.vault.root))
+    ui.line("done", "Hanger is ready", str(settings.closet.root))
     command = serve_command(state)
     ui.note("connect an MCP client (already registered clients need nothing):")
-    ui.note(f"  claude mcp add --scope user markchain -- {command}")
-    ui.note(f"  codex mcp add markchain -- {command}")
+    ui.note(f"  claude mcp add --scope user hanger -- {command}")
+    ui.note(f"  codex mcp add hanger -- {command}")
     ui.stream.write("\n")
     return _SILENT
 
 
 def serve_command(state: Path) -> str:
     """Return the MCP server command for a state folder, as setup prints it."""
-    command = shutil.which("markchain") or "markchain"
+    command = shutil.which("hanger") or "hanger"
     if state != _DEFAULT_STATE.resolve():
         command += f" --state {shlex.quote(str(state))}"
     return command + " serve"
@@ -337,7 +337,7 @@ def _daemon(
     while True:
         try:
             return _local(arguments, settings)
-        except MarkchainError as error:
+        except HangerError as error:
             if "already in use" not in str(error):
                 raise
         connection = launcher.connect()
@@ -346,7 +346,7 @@ def _daemon(
             logger.info("another service instance is already running")
             return _SILENT
         if time.monotonic() >= deadline:
-            raise MarkchainError(
+            raise HangerError(
                 "state folder is locked by another process", code="daemon_lock"
             )
         time.sleep(1)
@@ -416,17 +416,17 @@ def _local(arguments: argparse.Namespace, settings: Settings) -> object:
         index = stack.enter_context(
             closing(
                 SearchIndex(
-                    url, str(arguments.vault.resolve()), owned=engine is not None
+                    url, str(arguments.closet.resolve()), owned=engine is not None
                 )
             )
         )
-        synchronizer = Synchronizer(Documents(arguments.vault), index, settings)
+        synchronizer = Synchronizer(Documents(arguments.closet), index, settings)
         planner = Planner(synchronizer, CliModel(settings.models, arguments.model))
         trace = stack.enter_context(
             closing(Trace(state / "trace.jsonl" if arguments.trace else None))
         )
         runtime = stack.enter_context(
-            Runtime(arguments.vault, state, planner, trace=trace, settings=settings)
+            Runtime(arguments.closet, state, planner, trace=trace, settings=settings)
         )
         if arguments.command in {"daemon", "serve"}:
             return _serve(arguments, runtime, synchronizer, engine, settings)
@@ -440,7 +440,7 @@ def _serve(
     engine: ElasticManager | None,
     settings: Settings,
 ) -> object:
-    from markchain.daemon import Daemon
+    from hanger.daemon import Daemon
 
     service = Service(runtime, synchronizer, engine)
     if engine is not None:
@@ -504,7 +504,7 @@ def _execute(
         case "watch":
             stop = threading.Event()
             try:
-                VaultWatcher(synchronizer).run(stop)
+                ClosetWatcher(synchronizer).run(stop)
             except KeyboardInterrupt:
                 stop.set()
             return {"status": "stopped"}

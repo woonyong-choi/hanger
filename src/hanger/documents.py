@@ -8,12 +8,12 @@ import os
 import shutil
 from pathlib import Path
 
-from markchain.errors import ConflictError, RequestError
-from markchain.requests import Change, Proposal, digest
+from hanger.errors import ConflictError, RequestError
+from hanger.requests import Change, Proposal, digest
 
 logger = logging.getLogger(__name__)
 
-_DELETING = ".markchain-deleting"
+_DELETING = ".hanger-deleting"
 # Space kept free on the disk after collecting a file.
 _FREE_MARGIN = 1024 * 1024 * 1024
 
@@ -32,7 +32,7 @@ class Documents:
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise RequestError(
-                "문서 경로가 올바르지 않습니다. Vault 기준 상대 경로를 사용하십시오."
+                "문서 경로가 올바르지 않습니다. Closet 기준 상대 경로를 사용하십시오."
             )
         if path.as_posix() != relative:
             raise RequestError(
@@ -42,7 +42,7 @@ class Documents:
             raise RequestError("숨김 경로의 문서는 다룰 수 없습니다.")
         target = self.root / path
         if not target.resolve().is_relative_to(self.root):
-            raise RequestError("문서 경로가 Vault 밖을 가리킵니다.")
+            raise RequestError("문서 경로가 Closet 밖을 가리킵니다.")
         if any(p.is_symlink() for p in [target, *target.parents] if p != self.root):
             raise RequestError("심볼릭 링크를 거치는 경로는 다룰 수 없습니다.")
         return target
@@ -111,7 +111,7 @@ class Documents:
     # vars: n = file bytes, b = 1 MiB copy block
     # basis: estimate
     def store_file(self, relative: str, source: Path, expected: str) -> str:
-        """Copy any file into the vault unchanged, never replacing a file.
+        """Copy any file into the closet unchanged, never replacing a file.
 
         The copy is written to a hidden temporary name, checked against the
         expected SHA-256, then linked into place. Nothing is left behind if
@@ -219,7 +219,7 @@ class Documents:
         content is kept next to it under a visible name instead.
         """
         candidates = [target] + [
-            target.with_name(f"{target.stem}.markchain-recovered-{number}.md")
+            target.with_name(f"{target.stem}.hanger-recovered-{number}.md")
             for number in range(1, 1000)
         ]
         for destination in candidates:
@@ -248,10 +248,10 @@ class Documents:
         return target.with_name(f".{target.name}{_DELETING}")
 
     # cost: time O(f), heap O(d), stack O(1), io O(f)
-    # vars: f = files in the vault, d = directory width
+    # vars: f = files in the closet, d = directory width
     # basis: estimate
     def release(self) -> int:
-        """Remove Markchain's leftovers before this vault stops being managed.
+        """Remove Hanger's leftovers before this closet stops being managed.
 
         Unfinished writes are deleted. An unfinished delete is put back,
         because without its job the content cannot be confirmed as planned.
@@ -261,7 +261,7 @@ class Documents:
             folders[:] = [f for f in folders if not os.path.islink(Path(directory) / f)]
             for name in files:
                 path = Path(directory) / name
-                if name.startswith(".markchain-") and name.endswith(".pending"):
+                if name.startswith(".hanger-") and name.endswith(".pending"):
                     path.unlink(missing_ok=True)
                     cleaned += 1
                 elif name.startswith(".") and name.endswith(_DELETING):
@@ -276,7 +276,7 @@ class Documents:
         if parent != target.parent or not parent.is_relative_to(self.root):
             raise RequestError("문서가 있던 폴더가 바뀌어 안전하게 쓸 수 없습니다.")
         identity = digest((self._writer_id + ":" + relative).encode())[:32]
-        return target.with_name(f".markchain-{identity}.pending")
+        return target.with_name(f".hanger-{identity}.pending")
 
 
 def _hash_file(path: Path) -> str:

@@ -1,7 +1,7 @@
-"""Per-vault ignore rules: which files Markchain never indexes, searches or edits.
+"""Per-closet ignore rules: which files Hanger never indexes, searches or edits.
 
-The rules live in ``.markchainignore`` at the vault root and use .gitignore
-syntax. The text Markchain acts on is the *applied* copy kept in the state
+The rules live in ``.hangerignore`` at the closet root and use .gitignore
+syntax. The text Hanger acts on is the *applied* copy kept in the state
 database; a changed file only takes effect after the user approves the change.
 """
 
@@ -13,17 +13,17 @@ from pathlib import PurePosixPath
 
 import pathspec
 
-IGNORE_FILE = ".markchainignore"
+IGNORE_FILE = ".hangerignore"
 
 DEFAULT_IGNORE = """\
-# Markchain ignore rules for this vault
+# Hanger ignore rules for this closet
 #
 # Anything matched here is left out of the search index and is never read or
-# changed by Markchain. The syntax is the same as .gitignore: one pattern per
+# changed by Hanger. The syntax is the same as .gitignore: one pattern per
 # line, a trailing slash matches folders only, and a leading ! brings a path
 # back in.
 #
-# Markchain asks before it applies an edit to this file. Ignoring a folder
+# Hanger asks before it applies an edit to this file. Ignoring a folder
 # removes its notes from the index, and indexing them again later may not give
 # the same keywords and links.
 
@@ -33,14 +33,14 @@ DEFAULT_IGNORE = """\
 
 
 class IgnoreRules:
-    """Compiled ignore patterns for one vault."""
+    """Compiled ignore patterns for one closet."""
 
     def __init__(self, text: str) -> None:
         self.text = text
         self._spec = pathspec.GitIgnoreSpec.from_lines(text.splitlines())
 
     def ignored(self, path: str, *, folder: bool = False) -> bool:
-        """Return whether a vault-relative path is ignored.
+        """Return whether a closet-relative path is ignored.
 
         A path is also ignored when any folder above it is, as with .gitignore.
         """
@@ -59,7 +59,7 @@ class IgnoreRules:
 
 
 # cost: time O(f*p), heap O(f), stack O(1), io 0
-# vars: f = vault files checked, p = patterns
+# vars: f = closet files checked, p = patterns
 # basis: estimate
 def summarize_change(
     before: IgnoreRules, after: IgnoreRules, files: list[str]

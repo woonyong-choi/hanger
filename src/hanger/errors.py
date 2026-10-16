@@ -1,6 +1,6 @@
 __all__ = [
     "ConflictError",
-    "MarkchainError",
+    "HangerError",
     "ModelError",
     "RequestError",
     "ReviewRejectedError",
@@ -8,8 +8,8 @@ __all__ = [
 ]
 
 
-class MarkchainError(Exception):
-    """An actionable failure at a Markchain boundary."""
+class HangerError(Exception):
+    """An actionable failure at a Hanger boundary."""
 
     code = "error"
     retryable = False
@@ -20,20 +20,20 @@ class MarkchainError(Exception):
             self.code = code
 
 
-class ConflictError(MarkchainError):
+class ConflictError(HangerError):
     """The current document no longer matches the saved proposal."""
 
     code = "source_changed"
     retryable = True
 
 
-class RequestError(MarkchainError):
+class RequestError(HangerError):
     """The request identity or payload is invalid."""
 
     code = "invalid_request"
 
 
-class ReviewRejectedError(MarkchainError):
+class ReviewRejectedError(HangerError):
     """The content review rejected a generated proposal."""
 
     code = "review_rejected"
@@ -44,14 +44,14 @@ class ReviewRejectedError(MarkchainError):
         super().__init__("; ".join(issues) or "검토에서 승인되지 않았습니다.")
 
 
-class SearchUnavailableError(MarkchainError):
+class SearchUnavailableError(HangerError):
     """The managed search engine cannot answer right now."""
 
     code = "search_unavailable"
     retryable = True
 
 
-class ModelError(MarkchainError):
+class ModelError(HangerError):
     """The model command failed or returned output outside its contract."""
 
     code = "model_error"

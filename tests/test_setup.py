@@ -3,15 +3,15 @@ from pathlib import Path
 
 import pytest
 
-from markchain.cli import main
-from markchain.config import Settings, load_settings
-from markchain.documents import Documents
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
-from markchain.wizard import SetupAbortedError, run_setup
+from hanger.cli import main
+from hanger.config import Settings, load_settings
+from hanger.documents import Documents
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
+from hanger.wizard import SetupAbortedError, run_setup
 
 
-def _vault(root: Path) -> Path:
+def _closet(root: Path) -> Path:
     for folder in ("docs/a", "inbox", "career", ".obsidian"):
         (root / folder).mkdir(parents=True)
     (root / "docs/a/x.md").write_text("# x")
@@ -21,33 +21,33 @@ def _vault(root: Path) -> Path:
     return root
 
 
-# setup: a missing vault is asked three times, then setup stops unchanged.
-def test_three_invalid_vaults_abort(tmp_path: Path) -> None:
+# setup: a missing closet is asked three times, then setup stops unchanged.
+def test_three_invalid_closets_abort(tmp_path: Path) -> None:
     config = tmp_path / "state" / "config.toml"
     answers = io.StringIO("/nope\n\n/also/nope\n")
     out = io.StringIO()
     with pytest.raises(SetupAbortedError, match="3 attempts"):
         run_setup(config, Settings(), source=answers, out=out)
-    assert out.getvalue().count("?    Vault root folder") == 3
+    assert out.getvalue().count("?    Closet root folder") == 3
     assert "2 attempts left" in out.getvalue()
     assert not config.exists()
 
 
 # setup: folders are listed with note counts and toggled before saving.
 def test_folder_selection_is_saved_and_applied(tmp_path: Path) -> None:
-    vault = _vault(tmp_path / "vault")
+    closet = _closet(tmp_path / "closet")
     config = tmp_path / "state" / "config.toml"
-    answers = io.StringIO(f"/missing\n{vault}\n1\n\n\n")
+    answers = io.StringIO(f"/missing\n{closet}\n1\n\n\n")
     out = io.StringIO()
     settings = run_setup(config, Settings(), source=answers, out=out)
     text = out.getvalue()
     assert "career" in text and ".obsidian" not in text
-    assert "markchain config --edit" in text
-    assert settings.vault.root == str(vault.resolve())
-    assert settings.vault.managed == ("docs", "inbox")
+    assert "hanger config --edit" in text
+    assert settings.closet.root == str(closet.resolve())
+    assert settings.closet.managed == ("docs", "inbox")
     assert load_settings(config) == settings
     sync = Synchronizer(
-        Documents(vault), SearchIndex("http://127.0.0.1:9", "x"), settings
+        Documents(closet), SearchIndex("http://127.0.0.1:9", "x"), settings
     )
     assert sorted(sync.paths()) == ["docs/a/x.md", "inbox/y.md"]
     assert not settings.writable("career/new.md")
@@ -56,53 +56,53 @@ def test_folder_selection_is_saved_and_applied(tmp_path: Path) -> None:
 
 # setup: an existing choice is the default and Enter keeps it.
 def test_rerun_keeps_previous_answers(tmp_path: Path) -> None:
-    vault = _vault(tmp_path / "vault")
+    closet = _closet(tmp_path / "closet")
     config = tmp_path / "state" / "config.toml"
     first = run_setup(
-        config, Settings(), source=io.StringIO(f"{vault}\n3\n\n\n"), out=io.StringIO()
+        config, Settings(), source=io.StringIO(f"{closet}\n3\n\n\n"), out=io.StringIO()
     )
     out = io.StringIO()
     second = run_setup(config, first, source=io.StringIO("\n\n\n"), out=out)
-    assert second.vault.managed == first.vault.managed == ("career", "docs")
-    assert f"({vault.resolve()})" in out.getvalue()
+    assert second.closet.managed == first.closet.managed == ("career", "docs")
+    assert f"({closet.resolve()})" in out.getvalue()
 
 
-# cli: commands without a configured vault point to setup.
-def test_cli_requires_setup_or_vault(
+# cli: commands without a configured closet point to setup.
+def test_cli_requires_setup_or_closet(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main(["--state", str(tmp_path / "s"), "status", "x"]) == 1
-    assert "markchain setup" in capsys.readouterr().err
+    assert "hanger setup" in capsys.readouterr().err
     assert main(["--state", str(tmp_path / "s"), "config"]) == 0
-    assert "Run: markchain setup" in capsys.readouterr().out
+    assert "Run: hanger setup" in capsys.readouterr().out
 
 
 # setup: declining the confirmation saves nothing.
 def test_declined_confirmation_saves_nothing(tmp_path: Path) -> None:
-    vault = _vault(tmp_path / "vault")
+    closet = _closet(tmp_path / "closet")
     config = tmp_path / "state" / "config.toml"
     with pytest.raises(SetupAbortedError, match="cancelled"):
         run_setup(
-            config, Settings(), source=io.StringIO(f"{vault}\n\nn\n"), out=io.StringIO()
+            config, Settings(), source=io.StringIO(f"{closet}\n\nn\n"), out=io.StringIO()
         )
     assert not config.exists()
 
 
 # setup: choosing every folder stores an empty list so new folders are included.
 def test_all_folders_means_future_folders_too(tmp_path: Path) -> None:
-    vault = _vault(tmp_path / "vault")
+    closet = _closet(tmp_path / "closet")
     config = tmp_path / "state" / "config.toml"
     settings = run_setup(
-        config, Settings(), source=io.StringIO(f"{vault}\n\n\n"), out=io.StringIO()
+        config, Settings(), source=io.StringIO(f"{closet}\n\n\n"), out=io.StringIO()
     )
-    assert settings.vault.managed == ()
+    assert settings.closet.managed == ()
 
 
 # The printed MCP command is one the CLI accepts, including a custom state.
 def test_setup_prints_runnable_serve_command(tmp_path: Path) -> None:
     import shlex
 
-    from markchain.cli import _parser, serve_command
+    from hanger.cli import _parser, serve_command
 
     words = shlex.split(serve_command(tmp_path / "state"))
     arguments = _parser().parse_args(words[1:])

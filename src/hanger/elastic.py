@@ -1,4 +1,4 @@
-"""Install, run and supervise the Elasticsearch process Markchain depends on."""
+"""Install, run and supervise the Elasticsearch process Hanger depends on."""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ from pathlib import Path
 
 from filelock import FileLock
 
-from markchain.config import Settings
-from markchain.errors import MarkchainError, SearchUnavailableError
-from markchain.progress import Progress, Step
+from hanger.config import Settings
+from hanger.errors import HangerError, SearchUnavailableError
+from hanger.progress import Progress, Step
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +77,7 @@ def _archive() -> tuple[str, str]:
     try:
         return _ARCHIVES[(system, machine)]
     except KeyError as error:
-        raise MarkchainError(
+        raise HangerError(
             f"unsupported platform: {system}-{machine}", code="platform"
         ) from error
 
@@ -100,7 +100,7 @@ class ElasticManager:
         self.url = f"http://127.0.0.1:{self.settings.port}"
         # The cluster name ties a running server to this state directory.
         self.cluster = (
-            "markchain-"
+            "hanger-"
             + hashlib.sha256(str(state.resolve()).encode()).hexdigest()[:12]
         )
         self._download = downloader or _download
@@ -154,14 +154,14 @@ class ElasticManager:
     # vars: a = archive bytes (about 700 MB once per version)
     # basis: estimate
     def installed(self) -> bool:
-        return (self.home / ".markchain-installed").exists()
+        return (self.home / ".hanger-installed").exists()
 
     def install(
         self,
         progress: Progress | None = None,
         *,
         reinstall: bool = False,
-        title: str | None = "Markchain search engine setup",
+        title: str | None = "Hanger search engine setup",
         first: int = 1,
         total: int = INSTALL_STEPS,
     ) -> Path:
@@ -170,7 +170,7 @@ class ElasticManager:
         A reinstall builds the new copy beside the old one and swaps it in only
         after every step succeeded, so a failed download keeps the old server.
         """
-        marker = self.home / ".markchain-installed"
+        marker = self.home / ".hanger-installed"
         if marker.exists() and not reinstall:
             return self.home
         self.install_root.mkdir(parents=True, exist_ok=True)
@@ -189,7 +189,7 @@ class ElasticManager:
             try:
                 self._install_into(work, suffix, checksum, progress, first - 1, total)
             except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
-                raise MarkchainError(
+                raise HangerError(
                     f"Search engine install failed: {error}", code="search_install"
                 ) from error
             finally:
@@ -279,7 +279,7 @@ class ElasticManager:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
-        (extracted / ".markchain-installed").write_text(ES_VERSION)
+        (extracted / ".hanger-installed").write_text(ES_VERSION)
         shutil.rmtree(self.home, ignore_errors=True)
         extracted.rename(self.home)
         if current:
@@ -315,7 +315,7 @@ class ElasticManager:
         command = [
             sys.executable,
             "-m",
-            "markchain.guard",
+            "hanger.guard",
             str(os.getpid()),
             str(self.home / "bin" / "elasticsearch"),
             "-p",
@@ -371,7 +371,7 @@ class ElasticManager:
             identity = self._probe()
             if identity is not None:
                 if identity.get("cluster_name") != self.cluster:
-                    raise MarkchainError(
+                    raise HangerError(
                         f"port {self.settings.port} is in use by another program",
                         code="port_in_use",
                     )
@@ -384,7 +384,7 @@ class ElasticManager:
         deadline = time.monotonic() + _START_SECONDS
         while time.monotonic() < deadline and not self._stop.is_set():
             if self._process is not None and self._process.poll() is not None:
-                raise MarkchainError(
+                raise HangerError(
                     "search engine exited during start "
                     f"(code {self._process.returncode})",
                     code="search_start",
@@ -393,7 +393,7 @@ class ElasticManager:
                 self._set("ready")
                 return
             time.sleep(1)
-        raise MarkchainError("search engine did not start in time", code="search_start")
+        raise HangerError("search engine did not start in time", code="search_start")
 
     def _terminate(self) -> None:
         with self._lock:
@@ -416,7 +416,7 @@ class ElasticManager:
             return
         self._stop.clear()
         self._monitor = threading.Thread(
-            target=self._supervise, name="markchain-search", daemon=True
+            target=self._supervise, name="hanger-search", daemon=True
         )
         self._monitor.start()
 
@@ -442,7 +442,7 @@ class ElasticManager:
                 else:
                     failures = 0
                 self._stop.wait(_HEALTH_SECONDS)
-            except MarkchainError as error:
+            except HangerError as error:
                 delay = _RESTART_BACKOFF[min(restarts, len(_RESTART_BACKOFF) - 1)]
                 restarts += 1
                 self._set("failed", f"{error} (retry in {delay}s)", error.code)

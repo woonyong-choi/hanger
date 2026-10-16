@@ -8,10 +8,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from markchain.config import Settings
-from markchain.documents import Documents
-from markchain.errors import RequestError
-from markchain.requests import Change, Proposal
+from hanger.config import Settings
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.requests import Change, Proposal
 
 
 class _Replacement(BaseModel):

@@ -11,7 +11,7 @@ _FORMAT = "%(asctime)s %(levelname)-5s %(threadName)s %(name)s %(message)s"
 
 
 def configure(state: Path, *, console: int | None = logging.WARNING) -> None:
-    """Log to state/logs/markchain.log (rotated) and optionally to stderr."""
+    """Log to state/logs/hanger.log (rotated) and optionally to stderr."""
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     for handler in list(root.handlers):
@@ -21,7 +21,7 @@ def configure(state: Path, *, console: int | None = logging.WARNING) -> None:
         folder = state / "logs"
         folder.mkdir(parents=True, exist_ok=True)
         handler = RotatingFileHandler(
-            folder / "markchain.log",
+            folder / "hanger.log",
             maxBytes=1024 * 1024,
             backupCount=5,
             encoding="utf-8",
@@ -29,7 +29,7 @@ def configure(state: Path, *, console: int | None = logging.WARNING) -> None:
         handler.setFormatter(logging.Formatter(_FORMAT, "%Y-%m-%d %H:%M:%S"))
         root.addHandler(handler)
     except OSError as error:
-        print(f"markchain: cannot open log file: {error}", file=sys.stderr)
+        print(f"hanger: cannot open log file: {error}", file=sys.stderr)
     if console is not None:
         stream = logging.StreamHandler(sys.stderr)
         stream.setLevel(console)

@@ -14,16 +14,16 @@ import anyio
 import anyio.to_thread
 from mcp.server.fastmcp import Context, FastMCP
 
-from markchain.context import shape
-from markchain.errors import RequestError, SearchUnavailableError
-from markchain.model import Intent
-from markchain.runtime import Runtime
-from markchain.sync import Synchronizer
-from markchain.watcher import VaultWatcher
-from markchain.workflows import collect_file_target, collect_proposal
+from hanger.context import shape
+from hanger.errors import RequestError, SearchUnavailableError
+from hanger.model import Intent
+from hanger.runtime import Runtime
+from hanger.sync import Synchronizer
+from hanger.watcher import ClosetWatcher
+from hanger.workflows import collect_file_target, collect_proposal
 
 if TYPE_CHECKING:
-    from markchain.elastic import ElasticManager
+    from hanger.elastic import ElasticManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class Service:
         self.last_activity = time.monotonic()
         runtime.health = self.health
         self.mcp = FastMCP(
-            "markchain", instructions="Local canonical Markdown workflows"
+            "hanger", instructions="Local canonical Markdown workflows"
         )
         for tool in (
             self.issue_key,
@@ -73,10 +73,10 @@ class Service:
         self.runtime.cleanup()
         self._targets = {
             # A fresh watcher each time: a stopped observer cannot restart.
-            "markchain-watch": lambda: VaultWatcher(self.synchronizer).run(self._stop),
-            "markchain-worker-1": lambda: self._work("markchain-worker-1"),
-            "markchain-worker-2": lambda: self._work("markchain-worker-2"),
-            "markchain-monitor": self._maintain,
+            "hanger-watch": lambda: ClosetWatcher(self.synchronizer).run(self._stop),
+            "hanger-worker-1": lambda: self._work("hanger-worker-1"),
+            "hanger-worker-2": lambda: self._work("hanger-worker-2"),
+            "hanger-monitor": self._maintain,
         }
         for name in self._targets:
             self._spawn(name)
@@ -108,7 +108,7 @@ class Service:
             return self.engine.message()
         now = time.monotonic()
         for name, beat in self._beats.items():
-            if not name.startswith("markchain-worker"):
+            if not name.startswith("hanger-worker"):
                 continue
             started = self._busy.get(name)
             if started is not None and now - started > _BUSY_STALL_SECONDS:
@@ -194,7 +194,7 @@ class Service:
         folders: tuple[str, ...] = (),
         ctx: Context | None = None,  # type: ignore[type-arg]
     ) -> dict[str, Any]:
-        """Search listed vault folders (OR; empty means all).
+        """Search listed closet folders (OR; empty means all).
 
         Top results come with full text; the rest are listed with matched lines.
         Use read_document for a listed path. fallback_reason re-syncs the scope
@@ -338,7 +338,7 @@ class Service:
     def _maintain(self) -> None:
         next_cleanup = time.monotonic()
         while not self._stop.wait(_MONITOR_SECONDS):
-            self._beats["markchain-monitor"] = time.monotonic()
+            self._beats["hanger-monitor"] = time.monotonic()
             for name, thread in list(self._threads.items()):
                 if not thread.is_alive() and not self._stop.is_set():
                     logger.error("%s stopped unexpectedly, restarting", name)

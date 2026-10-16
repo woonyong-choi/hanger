@@ -1,6 +1,6 @@
-"""Model providers: the subscription CLIs Markchain runs models through.
+"""Model providers: the subscription CLIs Hanger runs models through.
 
-Markchain never holds API keys. It calls a CLI the user has already signed in
+Hanger never holds API keys. It calls a CLI the user has already signed in
 to: Claude Code (``claude``) or Codex (``codex``). With no provider set, the
 first one found in this order is used.
 """
@@ -19,7 +19,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Literal
 
-from markchain.errors import MarkchainError
+from hanger.errors import HangerError
 
 Provider = Literal["claude", "codex"]
 PROVIDERS: tuple[Provider, ...] = ("claude", "codex")
@@ -27,7 +27,7 @@ DEFAULT_MODELS: dict[Provider, str] = {"claude": "haiku", "codex": "gpt-6-luna"}
 _NAMES: dict[Provider, str] = {"claude": "Claude Code", "codex": "Codex"}
 
 
-class ProviderMissingError(MarkchainError):
+class ProviderMissingError(HangerError):
     """No signed-in model CLI is available."""
 
     code = "provider_missing"
@@ -66,6 +66,6 @@ def resolve_choice(provider: str, model: str, effort: str) -> Choice:
         raise ProviderMissingError(
             f"The configured provider {_NAMES[chosen]} ({chosen}) is not installed "
             "or not on PATH. Install it, or change the provider with: "
-            "markchain config set model.provider <claude|codex>"
+            "hanger config set model.provider <claude|codex>"
         )
     return Choice(chosen, model or DEFAULT_MODELS[chosen], effort)

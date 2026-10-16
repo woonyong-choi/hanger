@@ -7,17 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from markchain.documents import Documents
-from markchain.errors import RequestError
-from markchain.requests import Change, Proposal, digest
-from markchain.runtime import Runtime
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.requests import Change, Proposal, digest
+from hanger.runtime import Runtime
 
 
 @pytest.fixture
 def paths(tmp_path: Path) -> tuple[Path, Path]:
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    return vault, tmp_path / "state"
+    closet = tmp_path / "closet"
+    closet.mkdir()
+    return closet, tmp_path / "state"
 
 
 def test_delayed_submission_expires_from_key_issuance(
@@ -126,8 +126,8 @@ def test_run_killed_after_replace_reconciles_files(
     code = """
 import os, sys
 from pathlib import Path
-from markchain.documents import Documents
-from markchain.runtime import Runtime
+from hanger.documents import Documents
+from hanger.runtime import Runtime
 original = Documents.apply
 def crash(self, change):
     original(self, change)
@@ -151,7 +151,7 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
             runtime.cancel(key)
         elif stop == "expired":
             future = time.time() + 86401
-            monkeypatch.setattr("markchain.runtime.time.time", lambda: future)
+            monkeypatch.setattr("hanger.runtime.time.time", lambda: future)
         result = runtime.run_next()
         assert result is not None
         if stop:
@@ -193,8 +193,8 @@ def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None
     base = [
         sys.executable,
         "-m",
-        "markchain.cli",
-        "--vault",
+        "hanger.cli",
+        "--closet",
         str(paths[0]),
         "--state",
         str(paths[1]),
@@ -225,8 +225,8 @@ def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> Non
         [
             sys.executable,
             "-m",
-            "markchain.cli",
-            "--vault",
+            "hanger.cli",
+            "--closet",
             str(paths[0]),
             "--state",
             str(paths[1]),
@@ -263,7 +263,7 @@ def test_run_expired_request_does_not_write(
         )
     future = time.time() + 86401
     with Runtime(*paths) as runtime:
-        monkeypatch.setattr("markchain.runtime.time.time", lambda: future)
+        monkeypatch.setattr("hanger.runtime.time.time", lambda: future)
         result = runtime.run_next()
         assert result is not None and result["status"] == "expired"
         assert not (paths[0] / "a.md").exists()
@@ -311,26 +311,26 @@ def test_run_hundred_documents_completes(paths: tuple[Path, Path]) -> None:
     assert (paths[0] / "docs/99.md").read_text() == "99"
 
 
-# #2: a new vault root starts clean: old jobs never apply to it, and
-# Markchain's unfinished files in the old vault are removed.
-def test_runtime_new_vault_resets_jobs(paths: tuple[Path, Path]) -> None:
+# #2: a new closet root starts clean: old jobs never apply to it, and
+# Hanger's unfinished files in the old closet are removed.
+def test_runtime_new_closet_resets_jobs(paths: tuple[Path, Path]) -> None:
     with Runtime(*paths) as runtime:
         runtime.submit(
             runtime.issue_key(), Proposal(changes=(Change(path="a.md", after="x"),))
         )
-    leftover = paths[0] / ".markchain-0123.pending"
+    leftover = paths[0] / ".hanger-0123.pending"
     leftover.write_text("partial")
     (paths[0] / "b.md").write_text("planned delete")
-    interrupted = paths[0] / ".b.md.markchain-deleting"
+    interrupted = paths[0] / ".b.md.hanger-deleting"
     (paths[0] / "b.md").rename(interrupted)
-    other = paths[0].parent / "other-vault"
+    other = paths[0].parent / "other-closet"
     other.mkdir()
     with Runtime(other, paths[1]) as runtime:
         assert runtime.run_next() is None
     assert not (other / "a.md").exists()
     assert not leftover.exists() and not interrupted.exists()
     assert (paths[0] / "b.md").read_text() == "planned delete"
-    assert (paths[1] / "vault.path").read_text() == str(other.resolve())
+    assert (paths[1] / "closet.path").read_text() == str(other.resolve())
 
 
 # #2: invalid target replacement is terminal, rather than an invisible unacked task.
@@ -374,7 +374,7 @@ def test_submit_expired_or_forged_key_rejected(
             runtime.submit(key[:-1] + ("0" if key[-1] != "0" else "1"), proposal)
         assert forged.value.code == "invalid_key"
         future = time.time() + 86401
-        monkeypatch.setattr("markchain.requests.time.time", lambda: future)
+        monkeypatch.setattr("hanger.requests.time.time", lambda: future)
         with pytest.raises(RequestError, match="유효 기간"):
             runtime.submit(key, proposal)
         assert runtime.run_next() is None

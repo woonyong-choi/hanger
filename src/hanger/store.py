@@ -1,13 +1,13 @@
-"""State database: the vault catalog, settings, applied ignore rules and decisions.
+"""State database: the closet catalog, settings, applied ignore rules and decisions.
 
-One SQLite file per state folder (``markchain.db``). Every process that touches
-Markchain state — the daemon, terminal commands, MCP calls — reads and writes
+One SQLite file per state folder (``hanger.db``). Every process that touches
+Hanger state — the daemon, terminal commands, MCP calls — reads and writes
 it, so each method opens a short transaction and nothing is cached here.
 """
 
 from __future__ import annotations
 
-__all__ = ["Decision", "StateStore", "Vault"]
+__all__ = ["Decision", "StateStore", "Closet"]
 
 import json
 import os
@@ -21,12 +21,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from markchain.config import Settings, flatten, unflatten
-from markchain.errors import RequestError
+from hanger.config import Settings, flatten, unflatten
+from hanger.errors import RequestError
 
 _SCHEMA_VERSION = 1
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS vaults (
+CREATE TABLE IF NOT EXISTS closets (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL UNIQUE,
     added_at REAL NOT NULL
@@ -36,12 +36,12 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS ignores (
-    vault_id INTEGER PRIMARY KEY REFERENCES vaults(id) ON DELETE CASCADE,
+    closet_id INTEGER PRIMARY KEY REFERENCES closets(id) ON DELETE CASCADE,
     applied TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY,
-    vault_id INTEGER NOT NULL REFERENCES vaults(id) ON DELETE CASCADE,
+    closet_id INTEGER NOT NULL REFERENCES closets(id) ON DELETE CASCADE,
     kind TEXT NOT NULL,
     detail TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS meta (
 
 
 @dataclass(frozen=True)
-class Vault:
+class Closet:
     id: int
     path: Path
 
@@ -67,7 +67,7 @@ class Vault:
 @dataclass(frozen=True)
 class Decision:
     id: int
-    vault_id: int
+    closet_id: int
     kind: str
     detail: dict[str, Any]
     status: str
@@ -79,14 +79,14 @@ class StateStore:
     def __init__(self, state: Path) -> None:
         self.state = state.expanduser().resolve()
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.path = self.state / "markchain.db"
+        self.path = self.state / "hanger.db"
         with self._connect() as connection:
             connection.executescript(_SCHEMA)
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version > _SCHEMA_VERSION:
                 raise RequestError(
-                    "The state database was created by a newer Markchain. "
-                    "Update Markchain to use it.",
+                    "The state database was created by a newer Hanger. "
+                    "Update Hanger to use it.",
                     code="state_version",
                 )
             connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
@@ -122,101 +122,101 @@ class StateStore:
             ).fetchone()
         return int(row[0]) if row else 0
 
-    # ---------- vaults ----------
+    # ---------- closets ----------
 
-    def vaults(self) -> list[Vault]:
+    def closets(self) -> list[Closet]:
         with self._connect() as connection:
-            rows = connection.execute("SELECT id, path FROM vaults ORDER BY id")
-            return [Vault(int(i), Path(p)) for i, p in rows]
+            rows = connection.execute("SELECT id, path FROM closets ORDER BY id")
+            return [Closet(int(i), Path(p)) for i, p in rows]
 
-    def vault(self, reference: str) -> Vault | None:
-        """Find a vault by id or by path (the path may also be inside it)."""
-        vaults = self.vaults()
+    def closet(self, reference: str) -> Closet | None:
+        """Find a closet by id or by path (the path may also be inside it)."""
+        closets = self.closets()
         if reference.isdigit():
-            return next((v for v in vaults if v.id == int(reference)), None)
+            return next((v for v in closets if v.id == int(reference)), None)
         path = Path(reference).expanduser().resolve()
-        return next((v for v in vaults if path.is_relative_to(v.path)), None)
+        return next((v for v in closets if path.is_relative_to(v.path)), None)
 
     # cost: time O(v), heap O(v), stack O(1), io O(1)
-    # vars: v = registered vaults
+    # vars: v = registered closets
     # basis: estimate
-    def add_vault(self, path: Path, ignore_text: str) -> Vault:
-        """Register a folder; refuse duplicates and vaults inside other vaults."""
+    def add_closet(self, path: Path, ignore_text: str) -> Closet:
+        """Register a folder; refuse duplicates and closets inside other closets."""
         root = path.expanduser().resolve()
         if not root.is_dir():
-            raise RequestError(f"Not a folder: {root}", code="vault_missing")
+            raise RequestError(f"Not a folder: {root}", code="closet_missing")
         if not os.access(root, os.R_OK | os.W_OK):
             raise RequestError(
-                f"Markchain cannot read and write this folder: {root}",
-                code="vault_access",
+                f"Hanger cannot read and write this folder: {root}",
+                code="closet_access",
             )
         if self.state.is_relative_to(root):
             raise RequestError(
-                f"This folder contains Markchain's own state folder ({self.state}). "
+                f"This folder contains Hanger's own state folder ({self.state}). "
                 "Choose a folder that does not.",
-                code="vault_nested",
+                code="closet_nested",
             )
         with self._connect() as connection:
-            for (existing,) in connection.execute("SELECT path FROM vaults"):
+            for (existing,) in connection.execute("SELECT path FROM closets"):
                 other = Path(existing)
                 if root == other:
                     raise RequestError(
-                        f"This folder is already a vault: {root}",
-                        code="vault_exists",
+                        f"This folder is already a closet: {root}",
+                        code="closet_exists",
                     )
                 if root.is_relative_to(other):
                     raise RequestError(
-                        f"This folder is inside a registered vault: {other}. "
+                        f"This folder is inside a registered closet: {other}. "
                         "Its notes are already covered there.",
-                        code="vault_nested",
+                        code="closet_nested",
                     )
                 if other.is_relative_to(root):
                     raise RequestError(
-                        f"This folder contains a registered vault: {other}. "
-                        "Remove that vault first if you want to register the "
-                        "larger folder: markchain vault remove "
+                        f"This folder contains a registered closet: {other}. "
+                        "Remove that closet first if you want to register the "
+                        "larger folder: hanger closet remove "
                         f"{json.dumps(str(other))}",
-                        code="vault_nested",
+                        code="closet_nested",
                     )
             cursor = connection.execute(
-                "INSERT INTO vaults (path, added_at) VALUES (?, ?)",
+                "INSERT INTO closets (path, added_at) VALUES (?, ?)",
                 (str(root), time.time()),
             )
-            vault_id = int(cursor.lastrowid or 0)
+            closet_id = int(cursor.lastrowid or 0)
             connection.execute(
-                "INSERT INTO ignores (vault_id, applied) VALUES (?, ?)",
-                (vault_id, ignore_text),
+                "INSERT INTO ignores (closet_id, applied) VALUES (?, ?)",
+                (closet_id, ignore_text),
             )
             self._bump(connection)
-        return Vault(vault_id, root)
+        return Closet(closet_id, root)
 
-    def remove_vault(self, vault_id: int) -> None:
+    def remove_closet(self, closet_id: int) -> None:
         with self._connect() as connection:
-            connection.execute("DELETE FROM vaults WHERE id = ?", (vault_id,))
+            connection.execute("DELETE FROM closets WHERE id = ?", (closet_id,))
             self._bump(connection)
 
     # ---------- ignore rules ----------
 
-    def applied_ignore(self, vault_id: int) -> str:
+    def applied_ignore(self, closet_id: int) -> str:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT applied FROM ignores WHERE vault_id = ?", (vault_id,)
+                "SELECT applied FROM ignores WHERE closet_id = ?", (closet_id,)
             ).fetchone()
         return str(row[0]) if row else ""
 
-    def set_applied_ignore(self, vault_id: int, text: str) -> None:
+    def set_applied_ignore(self, closet_id: int, text: str) -> None:
         with self._connect() as connection:
             connection.execute(
                 "INSERT INTO ignores VALUES (?, ?) "
-                "ON CONFLICT(vault_id) DO UPDATE SET applied = excluded.applied",
-                (vault_id, text),
+                "ON CONFLICT(closet_id) DO UPDATE SET applied = excluded.applied",
+                (closet_id, text),
             )
             self._bump(connection)
 
     # ---------- decisions ----------
 
     def decisions(self, *, pending_only: bool = True) -> list[Decision]:
-        query = "SELECT id, vault_id, kind, detail, status FROM decisions"
+        query = "SELECT id, closet_id, kind, detail, status FROM decisions"
         if pending_only:
             query += " WHERE status = 'pending'"
         with self._connect() as connection:
@@ -226,19 +226,19 @@ class StateStore:
     def decision(self, decision_id: int) -> Decision | None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id, vault_id, kind, detail, status FROM decisions WHERE id = ?",
+                "SELECT id, closet_id, kind, detail, status FROM decisions WHERE id = ?",
                 (decision_id,),
             ).fetchone()
         if row is None:
             return None
         return Decision(int(row[0]), int(row[1]), row[2], json.loads(row[3]), row[4])
 
-    def open_decision(self, vault_id: int, kind: str, detail: dict[str, Any]) -> int:
+    def open_decision(self, closet_id: int, kind: str, detail: dict[str, Any]) -> int:
         """Record a question for the user; a newer one replaces a pending one."""
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM decisions WHERE vault_id = ? AND status = 'pending'",
-                (vault_id,),
+                "SELECT id FROM decisions WHERE closet_id = ? AND status = 'pending'",
+                (closet_id,),
             ).fetchone()
             if row is not None:
                 connection.execute(
@@ -248,9 +248,9 @@ class StateStore:
                 decision_id = int(row[0])
             else:
                 cursor = connection.execute(
-                    "INSERT INTO decisions (vault_id, kind, detail, created_at) "
+                    "INSERT INTO decisions (closet_id, kind, detail, created_at) "
                     "VALUES (?, ?, ?, ?)",
-                    (vault_id, kind, json.dumps(detail), time.time()),
+                    (closet_id, kind, json.dumps(detail), time.time()),
                 )
                 decision_id = int(cursor.lastrowid or 0)
             self._bump(connection)
@@ -291,7 +291,7 @@ class StateStore:
         known = flatten(Settings().model_dump(mode="json"))
         if key not in known:
             raise RequestError(
-                f"Unknown setting: {key}. See: markchain config list",
+                f"Unknown setting: {key}. See: hanger config list",
                 code="config",
             )
         values = {**self._values(), key: value}

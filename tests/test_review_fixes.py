@@ -8,17 +8,17 @@ from typing import Any
 
 import pytest
 
-from markchain.config import Settings
-from markchain.context import shape
-from markchain.documents import Documents
-from markchain.editing import Decision, EditPolicy, materialize
-from markchain.errors import RequestError
-from markchain.model import CliModel, Intent, Planner
-from markchain.requests import digest
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.service import Service
-from markchain.sync import Synchronizer
+from hanger.config import Settings
+from hanger.context import shape
+from hanger.documents import Documents
+from hanger.editing import Decision, EditPolicy, materialize
+from hanger.errors import RequestError
+from hanger.model import CliModel, Intent, Planner
+from hanger.requests import digest
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.service import Service
+from hanger.sync import Synchronizer
 
 
 def _edit(path: str, old: str, new: str) -> dict[str, Any]:
@@ -58,11 +58,11 @@ class Model(CliModel):
 
 
 @pytest.fixture
-def vault(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+def closet(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     try:
         yield root, tmp_path / "state", url
@@ -88,9 +88,9 @@ def _finish(runtime: Runtime) -> None:
 
 # R3: many matching documents no longer fail; extra ones are listed, not read.
 def test_large_candidate_set_is_listed_instead_of_failing(
-    vault: tuple[Path, Path, str],
+    closet: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = vault
+    root, state, url = closet
     body = "결제 재시도 정책은 서비스마다 다르다. " * 300
     for number in range(12):
         (root / f"docs/n{number:02d}.md").write_text(f"# 결제 {number}\n{body}")
@@ -112,8 +112,8 @@ def test_large_candidate_set_is_listed_instead_of_failing(
 
 
 # R3: the model can ask for a listed document and decide after reading it.
-def test_read_more_loads_listed_document(vault: tuple[Path, Path, str]) -> None:
-    root, state, url = vault
+def test_read_more_loads_listed_document(closet: tuple[Path, Path, str]) -> None:
+    root, state, url = closet
     for number in range(8):
         (root / f"docs/n{number}.md").write_text(f"# 결제 {number}\n결제 본문 {number}")
     model = Model()
@@ -146,9 +146,9 @@ def test_read_more_loads_listed_document(vault: tuple[Path, Path, str]) -> None:
 # 6: review rejections are retried with feedback, then reported briefly.
 @pytest.mark.parametrize("approve_on", [2, None])
 def test_review_rejection_retries_with_feedback(
-    vault: tuple[Path, Path, str], approve_on: int | None
+    closet: tuple[Path, Path, str], approve_on: int | None
 ) -> None:
-    root, state, url = vault
+    root, state, url = closet
     (root / "docs/a.md").write_text("# 결제\n재시도 2회")
     model = Model()
     model.decisions = [_edit("docs/a.md", "재시도 2회", "재시도 3회")]
@@ -178,9 +178,9 @@ def test_review_rejection_retries_with_feedback(
 
 # 6: the configured default mode applies when a request omits it.
 def test_configured_bypass_reconsiders_after_source_change(
-    vault: tuple[Path, Path, str],
+    closet: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = vault
+    root, state, url = closet
     target = root / "docs/a.md"
     target.write_text("# 결제\n재시도 2회")
     model = Model()
@@ -212,9 +212,9 @@ def test_configured_bypass_reconsiders_after_source_change(
 
 # R5/7: a reconsidered job reports only its own file effects.
 def test_reconsider_does_not_claim_previous_results(
-    vault: tuple[Path, Path, str],
+    closet: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = vault
+    root, state, url = closet
     for name in "ab":
         (root / f"docs/{name}.md").write_text(f"# {name} 결제\n재시도 2회")
     model = Model()
@@ -267,7 +267,7 @@ def test_reconsider_does_not_claim_previous_results(
 
 # 8: how much to change is the model's judgment; only exactness is enforced.
 def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     content = "# 문서\n" + "".join(
         f"문단 {n}: 내용이 길게 이어진다.\n" for n in range(200)
@@ -285,7 +285,7 @@ def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
 
 # Profiles that require evidence reject changes without a quoted source.
 def test_profile_evidence_requirement(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     content = "# 결제\n재시도 2회"
     sources = {"a.md": {"content": content, "hash": digest(content.encode())}}
@@ -308,14 +308,14 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
 
 
 # 5: configured write roots and exclusions are enforced before any model call.
-def test_configured_layout_rules(vault: tuple[Path, Path, str]) -> None:
-    root, state, url = vault
+def test_configured_layout_rules(closet: tuple[Path, Path, str]) -> None:
+    root, state, url = closet
     (root / "notes").mkdir()
     (root / "notes/a.md").write_text("# 결제\n재시도 2회")
     (root / "docs/agent").mkdir()
     (root / "docs/agent/b.md").write_text("# 결제\n에이전트")
     settings = Settings.model_validate(
-        {"vault": {"writable": ["docs", "inbox"], "exclude": ["agent"]}}
+        {"closet": {"writable": ["docs", "inbox"], "exclude": ["agent"]}}
     )
     model = Model()
     model.decisions = [_edit("notes/a.md", "재시도 2회", "재시도 3회")]
@@ -371,7 +371,7 @@ def test_shape_respects_budget_and_required_inputs() -> None:
 
 # 1/R1: a failing job never kills a worker, and a dead worker is restarted.
 def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:
@@ -385,26 +385,26 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
 
         runtime.run_next = explode  # type: ignore[method-assign]
         service._targets = {
-            "markchain-worker-1": lambda: service._work("markchain-worker-1")
+            "hanger-worker-1": lambda: service._work("hanger-worker-1")
         }
-        service._spawn("markchain-worker-1")
+        service._spawn("hanger-worker-1")
         time.sleep(3)
         assert calls >= 2
-        assert service._threads["markchain-worker-1"].is_alive()
+        assert service._threads["hanger-worker-1"].is_alive()
         assert service.health() is None
         service._stop.set()
-        service._threads["markchain-worker-1"].join(5)
+        service._threads["hanger-worker-1"].join(5)
         service._stop.clear()
-        service._beats["markchain-worker-1"] = time.monotonic() - 3600
+        service._beats["hanger-worker-1"] = time.monotonic() - 3600
         assert service.health() == "작업 처리기가 60초 넘게 응답하지 않습니다."
         dead = threading.Thread(target=lambda: None)
         dead.start()
         dead.join()
-        service._threads["markchain-worker-1"] = dead
+        service._threads["hanger-worker-1"] = dead
         monitor = threading.Thread(target=service._maintain, daemon=True)
         monitor.start()
         time.sleep(6)
-        assert service._threads["markchain-worker-1"] is not dead
+        assert service._threads["hanger-worker-1"] is not dead
         service.close()
 
 
@@ -422,7 +422,7 @@ class _Engine:
 
     def require(self) -> None:
         if not self.ready():
-            from markchain.errors import SearchUnavailableError
+            from hanger.errors import SearchUnavailableError
 
             raise SearchUnavailableError(self.message())
 
@@ -447,10 +447,10 @@ def test_search_waits_for_starting_server_with_progress(
 ) -> None:
     import asyncio
 
-    from markchain import service as service_module
-    from markchain.errors import SearchUnavailableError
+    from hanger import service as service_module
+    from hanger.errors import SearchUnavailableError
 
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:

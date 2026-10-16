@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["VaultWatcher"]
+__all__ = ["ClosetWatcher"]
 
 import logging
 import threading
@@ -14,13 +14,13 @@ from elasticsearch import ApiError
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from markchain.errors import MarkchainError
-from markchain.sync import Synchronizer
+from hanger.errors import HangerError
+from hanger.sync import Synchronizer
 
 logger = logging.getLogger(__name__)
 
 
-class VaultWatcher(FileSystemEventHandler):
+class ClosetWatcher(FileSystemEventHandler):
     def __init__(self, synchronizer: Synchronizer) -> None:
         self.synchronizer = synchronizer
         self._observer = Observer()
@@ -74,7 +74,7 @@ class VaultWatcher(FileSystemEventHandler):
                         raise InterruptedError("event synchronization interrupted")
                     self.synchronizer.sync_paths(list(batch))
                 self.synchronizer.index.refresh()
-        except (OSError, MarkchainError, TransportError, ApiError):
+        except (OSError, HangerError, TransportError, ApiError):
             with self._lock:
                 self._rescan = True
             raise
@@ -97,7 +97,7 @@ class VaultWatcher(FileSystemEventHandler):
                     if time.monotonic() >= next_audit:
                         self.synchronizer.audit()
                         next_audit = time.monotonic() + 60
-                except (OSError, MarkchainError, TransportError, ApiError) as error:
+                except (OSError, HangerError, TransportError, ApiError) as error:
                     logger.warning("search sync will retry: %s", error)
                     stop.wait(10)
                 except Exception:

@@ -13,9 +13,9 @@ from contextvars import ContextVar, Token
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from markchain.requests import digest
+from hanger.requests import digest
 
-_job: ContextVar[str] = ContextVar("markchain_trace_job", default="")
+_job: ContextVar[str] = ContextVar("hanger_trace_job", default="")
 logger = logging.getLogger(__name__)
 
 
@@ -81,7 +81,7 @@ class Trace:
                 self._path.chmod(0o600)
             self._handler.handle(
                 logging.LogRecord(
-                    "markchain.trace",
+                    "hanger.trace",
                     logging.INFO,
                     "",
                     0,

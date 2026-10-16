@@ -13,15 +13,15 @@ from typing import Any
 import pytest
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from markchain.documents import Documents
-from markchain.errors import RequestError
-from markchain.model import CliModel, Intent, Planner
-from markchain.profiles import Profile
-from markchain.requests import digest
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.service import Service
-from markchain.sync import Synchronizer
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.model import CliModel, Intent, Planner
+from hanger.profiles import Profile
+from hanger.requests import digest
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.service import Service
+from hanger.sync import Synchronizer
 
 
 class Model(CliModel):
@@ -64,10 +64,10 @@ class Model(CliModel):
 
 @pytest.fixture
 def flow(tmp_path: Path) -> Iterator[tuple[Runtime, Model]]:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     (root / "private").mkdir()
     (root / "docs/a.md").write_bytes(
@@ -301,10 +301,10 @@ def test_old_request_identity_and_nested_cleanup(
 def test_killed_workflow_resumes_saved_draft(
     tmp_path: Path, *, external_edit: bool
 ) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     target = root / "docs/a.md"
     target.write_text("# 원문\n이전")
@@ -328,11 +328,11 @@ def test_killed_workflow_resumes_saved_draft(
     code = """
 import os, sys
 from pathlib import Path
-from markchain.documents import Documents
-from markchain.model import CliModel, Planner
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
+from hanger.documents import Documents
+from hanger.model import CliModel, Planner
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
 root, state = Path(sys.argv[1]), Path(sys.argv[2])
 class Model(CliModel):
     def generate(self, prompt, cancelled):

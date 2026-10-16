@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from markchain.errors import RequestError
+from hanger.errors import RequestError
 
 KEY_LIFETIME_SECONDS = 24 * 60 * 60
 

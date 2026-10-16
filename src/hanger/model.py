@@ -19,15 +19,15 @@ from pydantic import (
     model_validator,
 )
 
-from markchain.config import _Model, _Models
-from markchain.context import shape
-from markchain.editing import Decision, Review
-from markchain.errors import ConflictError, ModelError, RequestError
-from markchain.profiles import Profile
-from markchain.scope import SearchScope
-from markchain.sync import Synchronizer
-from markchain.trace import Trace
-from markchain.workflows import run_workflow
+from hanger.config import _Model, _Models
+from hanger.context import shape
+from hanger.editing import Decision, Review
+from hanger.errors import ConflictError, ModelError, RequestError
+from hanger.profiles import Profile
+from hanger.scope import SearchScope
+from hanger.sync import Synchronizer
+from hanger.trace import Trace
+from hanger.workflows import run_workflow
 
 
 class Intent(BaseModel):
@@ -46,7 +46,7 @@ class Intent(BaseModel):
     )
     folders: tuple[str, ...] = Field(
         default=(),
-        description="Vault-relative folder array with OR scope; empty means all",
+        description="Closet-relative folder array with OR scope; empty means all",
     )
     profile: Profile = "note"
     mode: Literal["normal", "bypass"] | None = Field(
@@ -227,7 +227,7 @@ class CliModel:
             raise ConflictError(
                 "원문이 변경되었거나 작업이 취소되어 모델 호출을 중단했습니다."
             )
-        with tempfile.TemporaryDirectory(prefix="markchain-model-") as temp:
+        with tempfile.TemporaryDirectory(prefix="hanger-model-") as temp:
             folder = Path(temp)
             return self._run(prompt, is_cancelled, schema, choice, folder)
 
@@ -360,7 +360,7 @@ class Planner:
             "coverage": search.get("coverage"),
             "previous": previous,
             "feedback": feedback or [],
-            "writable": list(settings.vault.writable),
+            "writable": list(settings.closet.writable),
             "applied": sorted(applied),
             "signatures": {path: doc["signature"] for path, doc in documents.items()},
         }

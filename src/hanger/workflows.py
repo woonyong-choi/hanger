@@ -25,28 +25,28 @@ from typing import TYPE_CHECKING, Any, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
-from markchain.context import encoded_size
-from markchain.editing import (
+from hanger.context import encoded_size
+from hanger.editing import (
     Decision,
     EditPolicy,
     Review,
     describe_changes,
     materialize,
 )
-from markchain.errors import (
+from hanger.errors import (
     ConflictError,
     ModelError,
     RequestError,
     ReviewRejectedError,
 )
-from markchain.profiles import PROFILES, ProfilePolicy
-from markchain.prompts import draft_prompt, review_prompt
-from markchain.requests import Change, Proposal
-from markchain.sync import Synchronizer
-from markchain.trace import Trace
+from hanger.profiles import PROFILES, ProfilePolicy
+from hanger.prompts import draft_prompt, review_prompt
+from hanger.requests import Change, Proposal
+from hanger.sync import Synchronizer
+from hanger.trace import Trace
 
 if TYPE_CHECKING:
-    from markchain.model import CliModel
+    from hanger.model import CliModel
 
 
 class _State(TypedDict):

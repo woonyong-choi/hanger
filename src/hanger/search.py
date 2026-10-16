@@ -7,17 +7,17 @@ from typing import Any
 
 from elasticsearch import Elasticsearch, helpers
 
-from markchain.errors import RequestError
-from markchain.requests import digest
-from markchain.scope import SearchScope
+from hanger.errors import RequestError
+from hanger.requests import digest
+from hanger.scope import SearchScope
 
 
 class SearchIndex:
-    def __init__(self, url: str, vault_identity: str, *, owned: bool = False) -> None:
-        self.name = "markchain-" + digest(vault_identity.encode())[:24] + "-v2"
+    def __init__(self, url: str, closet_identity: str, *, owned: bool = False) -> None:
+        self.name = "hanger-" + digest(closet_identity.encode())[:24] + "-v2"
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
-        # The managed server belongs to one state folder and so to one vault:
-        # any other Markchain index on it is left over from an earlier root.
+        # The managed server belongs to one state folder and so to one closet:
+        # any other Hanger index on it is left over from an earlier root.
         self.owned = owned
 
     def close(self) -> None:
@@ -29,7 +29,7 @@ class SearchIndex:
         if self.owned:
             leftovers = [
                 name
-                for name in self.client.indices.get(index="markchain-*")
+                for name in self.client.indices.get(index="hanger-*")
                 if name != self.name
             ]
             for name in leftovers:

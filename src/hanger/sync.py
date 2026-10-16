@@ -14,13 +14,13 @@ from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
 from elasticsearch.helpers import BulkIndexError
 
-from markchain.config import Settings
-from markchain.context import snippets
-from markchain.documents import Documents
-from markchain.errors import ConflictError, RequestError, SearchUnavailableError
-from markchain.requests import digest
-from markchain.scope import SearchScope
-from markchain.search import SearchIndex
+from hanger.config import Settings
+from hanger.context import snippets
+from hanger.documents import Documents
+from hanger.errors import ConflictError, RequestError, SearchUnavailableError
+from hanger.requests import digest
+from hanger.scope import SearchScope
+from hanger.search import SearchIndex
 
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 
@@ -180,7 +180,7 @@ class Synchronizer:
                 "reason": fallback_reason or "ranked",
                 "unverified": stale,
                 "folders": list(scope.folders),
-                "excluded_names": list(self.settings.vault.exclude),
+                "excluded_names": list(self.settings.closet.exclude),
             }
 
     # cost: time O(f), heap O(w), stack O(d), io O(f)

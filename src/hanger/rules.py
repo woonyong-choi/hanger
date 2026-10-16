@@ -1,8 +1,8 @@
-"""Folder rules: RULES.md files that tell Markchain how to keep each part of a vault.
+"""Folder rules: RULES.md files that tell Hanger how to keep each part of a closet.
 
 A RULES.md applies to its folder and everything below it. Settings at the top
 of the file (between ``---`` lines) follow the nearest file; the written rules
-are all passed on, from the vault root down to the nearest folder.
+are all passed on, from the closet root down to the nearest folder.
 """
 
 from __future__ import annotations
@@ -23,9 +23,9 @@ DEFAULT_RULES = """\
 write: true
 ---
 
-# How to keep this vault
+# How to keep this closet
 
-Markchain reads this file before it adds or changes notes here. Write the rules
+Hanger reads this file before it adds or changes notes here. Write the rules
 the way you would explain them to a careful assistant. A RULES.md in a subfolder
 adds rules for that folder, and when two files disagree, the one closer to the
 note wins.
@@ -47,17 +47,17 @@ note wins.
 
 - New notes go in inbox/ unless the request names another folder.
 - Never delete a note unless the request asks for it.
-- To keep Markchain from changing anything in a folder, put a RULES.md there
+- To keep Hanger from changing anything in a folder, put a RULES.md there
   with `write: false` in its settings.
 """
 
 
 @dataclass(frozen=True)
 class FolderRules:
-    """Rules that apply to one vault path."""
+    """Rules that apply to one closet path."""
 
     settings: dict[str, str]
-    # (rule file path, written rules) from the vault root down.
+    # (rule file path, written rules) from the closet root down.
     texts: tuple[tuple[str, str], ...]
 
     @property
@@ -83,7 +83,7 @@ def _split(text: str) -> tuple[dict[str, str], str]:
 # vars: d = folder depth, r = rule file bytes
 # basis: estimate
 def rules_for(root: Path, path: str, *, folder: bool = False) -> FolderRules:
-    """Collect the RULES.md files that apply to a vault-relative path."""
+    """Collect the RULES.md files that apply to a closet-relative path."""
     parts = PurePosixPath(path).parts
     depth = len(parts) if folder else len(parts) - 1
     settings: dict[str, str] = {}

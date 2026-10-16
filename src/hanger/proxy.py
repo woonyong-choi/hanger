@@ -21,9 +21,9 @@ import mcp.types as types
 from filelock import FileLock, Timeout
 from packaging.version import InvalidVersion, Version
 
-from markchain import __version__
-from markchain.daemon import DaemonInfo, socket_path
-from markchain.errors import MarkchainError, RequestError
+from hanger import __version__
+from hanger.daemon import DaemonInfo, socket_path
+from hanger.errors import HangerError, RequestError
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ _CONNECT_SECONDS = 60
 _STOP_SECONDS = 90
 _PING_SECONDS = 30
 _PING_TIMEOUT = 90
-_INTERNAL = "markchain-proxy-"
+_INTERNAL = "hanger-proxy-"
 _CALL_SECONDS = 600
 
 
@@ -87,7 +87,7 @@ def _is_daemon(pid: int) -> bool:
         ).stdout
     except OSError:
         return False
-    return "markchain" in command and "daemon" in command
+    return "hanger" in command and "daemon" in command
 
 
 class Launcher:
@@ -141,7 +141,7 @@ class Launcher:
             lock = FileLock(self.state / "spawn.lock", timeout=_CONNECT_SECONDS * 2)
             lock.acquire()
         except Timeout as error:
-            raise MarkchainError(
+            raise HangerError(
                 "background service is being set up; try again shortly",
                 code="daemon_busy",
             ) from error
@@ -161,7 +161,7 @@ class Launcher:
         finally:
             lock.release()
         if client is None:
-            raise MarkchainError(
+            raise HangerError(
                 f"background service did not start; see {self.state / 'logs'}",
                 code="daemon_start",
             )
@@ -351,7 +351,7 @@ class Relay:
                 self._generation += 1
                 self._connected.set()
                 return
-            except (OSError, ValueError, MarkchainError) as error:
+            except (OSError, ValueError, HangerError) as error:
                 logger.error("service reconnect failed: %s", error)
                 if connection is not None:
                     connection.close()
@@ -413,7 +413,7 @@ def call_tool(launcher: Launcher, name: str, arguments: dict[str, Any]) -> Any:
                             reply["error"].get("message", "request failed")
                         )
                     return reply["result"]
-            raise MarkchainError(
+            raise HangerError(
                 "background service connection lost", code="daemon_lost"
             )
 
@@ -423,7 +423,7 @@ def call_tool(launcher: Launcher, name: str, arguments: dict[str, Any]) -> Any:
             {
                 "protocolVersion": types.LATEST_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "markchain-cli", "version": __version__},
+                "clientInfo": {"name": "hanger-cli", "version": __version__},
             },
         )
         connection.sendall(
