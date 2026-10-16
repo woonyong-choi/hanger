@@ -1,15 +1,14 @@
+"""Time indexing and Korean search quality on a large synthetic closet."""
+
 import argparse
-import importlib
 import json
 import platform
 import resource
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
 from hanger.documents import Documents
-from hanger.requests import digest
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
 
@@ -40,7 +39,6 @@ QUERIES = {
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", type=Path, required=True)
-    parser.add_argument("--legacy-source", type=Path, required=True)
     parser.add_argument("--count", type=int, default=100000)
     parser.add_argument("--reuse-corpus", action="store_true")
     args = parser.parse_args()
@@ -60,12 +58,7 @@ def main() -> None:
     }
     try:
         results.update(_synchronize(sync))
-        (args.directory / "summary.json").write_text(
-            json.dumps(results, ensure_ascii=False, indent=2)
-        )
-        legacy, measured = _legacy(sync, args.legacy_source, args.directory)
-        results["legacy_rebuild"] = measured
-        results["queries"] = _queries(index, legacy)
+        results["queries"] = _queries(index)
         (args.directory / "summary.json").write_text(
             json.dumps(results, ensure_ascii=False, indent=2)
         )
@@ -107,58 +100,22 @@ def _synchronize(sync: Synchronizer) -> dict[str, Any]:
     return results
 
 
-def _legacy(
-    sync: Synchronizer, source: Path, output: Path
-) -> tuple[Any, dict[str, Any]]:
-    sys.dont_write_bytecode = True
-    sys.path.insert(0, str(source))
-    adapter = importlib.import_module("woon_core.knowledge.adapters.sqlite_search")
-    domain = importlib.import_module("woon_core.knowledge.domain")
-    legacy = adapter.SQLiteFtsSearchIndex(output / "legacy.sqlite")
-
-    def documents() -> Any:
-        for relative in sync.paths():
-            text = (sync.documents.root / relative).read_text()
-            yield domain.IndexedDocument(
-                relative,
-                None,
-                text.splitlines()[0][2:],
-                "",
-                text,
-                relative,
-                digest(text.encode()),
-                "synthetic",
-            )
-
-    started = time.perf_counter()
-    rebuilt = legacy.rebuild(documents())
-    return legacy, {
-        "documents": rebuilt,
-        "seconds": time.perf_counter() - started,
-        "peak_rss_raw": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
-    }
-
-
-def _queries(index: SearchIndex, legacy: Any) -> list[dict[str, Any]]:
+def _queries(index: SearchIndex) -> list[dict[str, Any]]:
     results = []
     for query, names in QUERIES.items():
         expected = {f"docs/{name}.md" for name in names}
-        row: dict[str, Any] = {"query": query, "expected": sorted(expected)}
-        for engine in ("elasticsearch", "legacy_fts5"):
-            started = time.perf_counter()
-            found = (
-                [hit["path"] for hit in index.find(query, 20)]
-                if engine == "elasticsearch"
-                else [hit.relative_path for hit in legacy.search(query, 20)]
-            )
-            row[engine] = {
+        started = time.perf_counter()
+        found = [hit["path"] for hit in index.find(query, 20)]
+        results.append(
+            {
+                "query": query,
                 "paths": found,
                 "matched": len(expected & set(found)),
                 "expected": len(expected),
                 "extra": sorted(set(found) - expected),
                 "milliseconds": (time.perf_counter() - started) * 1000,
             }
-        results.append(row)
+        )
     return results
 
 

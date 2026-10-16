@@ -488,9 +488,10 @@ def _tidy_citations(decision: Decision) -> Decision:
     """
 
     def name(path: str) -> str | None:
-        if PurePosixPath(path).name == RULES_FILE:
+        path = path.strip()
+        if not path or PurePosixPath(path).name == RULES_FILE:
             return None
-        return REQUEST_SOURCE if path.split()[0].startswith("request") else path
+        return REQUEST_SOURCE if path.startswith("request") else path
 
     sources = list(dict.fromkeys(n for p in decision.sources if (n := name(p))))
     evidence = [

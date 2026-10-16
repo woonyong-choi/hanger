@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["CliModel", "Decision", "Intent", "Planner"]
+__all__ = ["CliModel", "Intent", "Planner"]
 
 import json
 import subprocess
@@ -16,7 +16,6 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
-    model_validator,
 )
 
 from hanger.config import Settings
@@ -60,14 +59,6 @@ class Intent(BaseModel):
     fallback_reason: (
         Literal["insufficient_evidence", "user_reported_missing"] | None
     ) = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_retired(cls, value: Any) -> Any:
-        # Jobs queued by earlier versions may still carry retired fields.
-        if isinstance(value, dict) and "allow_rewrite" in value:
-            value = {k: v for k, v in value.items() if k != "allow_rewrite"}
-        return value
 
     @field_validator("folders")
     @classmethod

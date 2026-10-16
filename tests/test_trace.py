@@ -7,13 +7,14 @@ import pytest
 
 from hanger.documents import Documents
 from hanger.model import CliModel, Intent, Planner
+from hanger.requests import issue_key
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
 from hanger.trace import Trace
 
 
-# #6: telemetry cannot alter the resulting document or introduce a model call.
+# telemetry cannot alter the resulting document or introduce a model call.
 def test_trace_records_metrics_without_source_or_extra_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -72,7 +73,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
         trace = Trace(log if enabled else None)
         try:
             with Runtime(root, log.parent, planner, trace=trace) as runtime:
-                key = runtime.issue_key()
+                key = issue_key(runtime._secret)
                 runtime.submit_intent(
                     key,
                     Intent(
@@ -107,7 +108,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
     assert calls == 2
 
 
-# #6: local diagnostic retention is bounded independently of the request lifecycle.
+# local diagnostic retention is bounded independently of the request lifecycle.
 def test_trace_rotation_is_bounded(tmp_path: Path) -> None:
     trace = Trace(tmp_path / "trace.jsonl")
     try:
@@ -128,7 +129,7 @@ def test_trace_rotation_is_bounded(tmp_path: Path) -> None:
     assert sum(path.stat().st_size for path in files) <= 3 * 1024 * 1024
 
 
-# #6: failure of the optional log must not fail or retry the document operation.
+# failure of the optional log must not fail or retry the document operation.
 def test_trace_storage_failure_disables_recording(tmp_path: Path) -> None:
     blocked = tmp_path / "file"
     blocked.write_text("not a directory")

@@ -59,10 +59,21 @@ class ModelError(HangerError):
     retryable = True
 
 
+_TELL = "Tell the user: "
+_THEN = "\nThen: "
+
+
 def guidance(tell: str, then: str = "") -> str:
     """A message for an AI client: what to tell the user, then what to do.
 
     The client relays the "Tell the user" part as it is, translated, so the
     user hears the same words from every client.
     """
-    return f"Tell the user: {tell}" + (f"\nThen: {then}" if then else "")
+    return _TELL + tell + (_THEN + then if then else "")
+
+
+def for_terminal(message: str) -> str:
+    """The part of a message meant for the user, without the AI instructions."""
+    if not message.startswith(_TELL):
+        return message
+    return message[len(_TELL) :].split(_THEN, 1)[0]

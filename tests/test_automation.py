@@ -9,13 +9,13 @@ import pytest
 
 from hanger.documents import Documents
 from hanger.model import CliModel, Intent, Planner
-from hanger.requests import Change
+from hanger.requests import Change, issue_key
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
 
 
-# #4: cancellation invalidates an in-flight result, even if the model returns late.
+# cancellation invalidates an in-flight result, even if the model returns late.
 @pytest.mark.parametrize("stop", ["cancel", "shutdown"])
 def test_cancel_running_model_never_applies_late_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
@@ -41,7 +41,7 @@ def test_cancel_running_model_never_applies_late_result(
     planner = Planner(Synchronizer(Documents(root), index), CliModel())
     try:
         with Runtime(root, tmp_path / "state", planner) as runtime:
-            key = runtime.issue_key()
+            key = issue_key(runtime._secret)
             runtime.submit_intent(key, Intent(kind="write", query="a", instruction="a"))
             with ThreadPoolExecutor(max_workers=1) as workers:
                 future = workers.submit(runtime.run_next)
@@ -72,7 +72,7 @@ def test_cancel_running_model_never_applies_late_result(
         index.close()
 
 
-# #4: independent model jobs overlap, but conflicting replacements cannot both apply.
+# independent model jobs overlap, but conflicting replacements cannot both apply.
 def test_parallel_proposals_recheck_shared_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -106,7 +106,7 @@ def test_parallel_proposals_recheck_shared_source(
         with Runtime(root, tmp_path / "state", planner) as runtime:
             for text in ("first", "second"):
                 runtime.submit_intent(
-                    runtime.issue_key(),
+                    issue_key(runtime._secret),
                     Intent(kind="edit", query="a", instruction=text),
                 )
             with ThreadPoolExecutor(max_workers=2) as workers:
@@ -159,7 +159,7 @@ class EditingModel(CliModel):
         return {"review": {"approved": True, "issues": []}, "usage": None}
 
 
-# #4: normal mode preserves external edits; bypass regenerates from the new source.
+# normal mode preserves external edits; bypass regenerates from the new source.
 @pytest.mark.parametrize(
     "mode, status, calls", [("normal", "conflict", 1), ("bypass", "completed", 2)]
 )
@@ -179,7 +179,7 @@ def test_model_conflict_uses_selected_mode(
     model = EditingModel(target, conflict=True)
     try:
         with Runtime(root, tmp_path / "state", Planner(sync, model)) as runtime:
-            key = runtime.issue_key()
+            key = issue_key(runtime._secret)
             intent = Intent.model_validate(
                 {
                     "kind": "edit",
@@ -200,7 +200,7 @@ def test_model_conflict_uses_selected_mode(
         index.close()
 
 
-# #4: opt-in actual Claude contract, with no filesystem tools and synthetic input.
+# opt-in actual Claude contract, with no filesystem tools and synthetic input.
 def test_live_claude_returns_structured_change() -> None:
     if not os.environ.get("HANGER_TEST_LIVE_MODEL"):
         pytest.skip("requires explicit model invocation")
@@ -216,7 +216,7 @@ def test_live_claude_returns_structured_change() -> None:
     assert result["usage"] is not None
 
 
-# #4: inconsistent model changes terminate one job without killing the worker.
+# inconsistent model changes terminate one job without killing the worker.
 def test_invalid_model_proposal_does_not_block_next_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -242,11 +242,11 @@ def test_invalid_model_proposal_does_not_block_next_job(
         with Runtime(root, tmp_path / "state", Planner(sync, model)) as runtime:
             intent = Intent(kind="edit", query="결제", instruction="절 추가")
             monkeypatch.setattr(model, "generate", invalid)
-            runtime.submit_intent(runtime.issue_key(), intent)
+            runtime.submit_intent(issue_key(runtime._secret), intent)
             failed = runtime.run_next()
             assert failed is not None and failed["status"] == "failed"
             monkeypatch.setattr(model, "generate", original)
-            runtime.submit_intent(runtime.issue_key(), intent)
+            runtime.submit_intent(issue_key(runtime._secret), intent)
             succeeded = runtime.run_next()
             assert succeeded is not None and succeeded["status"] == "completed"
     finally:
@@ -254,7 +254,7 @@ def test_invalid_model_proposal_does_not_block_next_job(
         index.close()
 
 
-# #4: bypass replanning receives prior effects and retains their current evidence.
+# bypass replanning receives prior effects and retains their current evidence.
 @pytest.mark.parametrize("mode", ["normal", "bypass"])
 @pytest.mark.parametrize("delete_first", [False, True])
 def test_partial_replan_preserves_applied_context(
@@ -338,12 +338,12 @@ def test_partial_replan_preserves_applied_context(
                     allow_delete=delete_first,
                 )
             )
-            key = runtime.issue_key()
+            key = issue_key(runtime._secret)
             runtime.submit_intent(key, intent)
             result = runtime.run_next()
             if mode == "normal":
                 assert result is not None and result["status"] == "conflict"
-                new_key = runtime.issue_key()
+                new_key = issue_key(runtime._secret)
                 assert runtime.reconsider(key, new_key) == "accepted"
                 assert runtime.reconsider(key, new_key) == "duplicate"
                 result = runtime.run_next()

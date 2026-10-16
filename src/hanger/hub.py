@@ -111,10 +111,12 @@ class ClosetHub:
         """Bring the open closets in line with the catalog and ignore files."""
         removed: list[OpenCloset] = []
         with self._lock:
+            # Revision first: a closet removed after this read bumps it again,
+            # so the next refresh still closes it.
+            revision = self.store.revision()
             closets = {c.id: c for c in self.store.closets()}
             for closet in closets.values():
                 self._check(closet)
-            revision = self.store.revision()
             if revision != self._revision:
                 self._revision = revision
                 self._pruned = False
@@ -134,7 +136,8 @@ class ClosetHub:
             elif self._broken and time.monotonic() >= self._retry_at:
                 # A missing folder may be back, or a lock released.
                 for closet_id in list(self._broken):
-                    self._try_open(closets[closet_id])
+                    if closet_id in closets:
+                        self._try_open(closets[closet_id])
                 self._retry_at = time.monotonic() + _RETRY_SECONDS
         # Closing waits for running jobs; other requests go on meanwhile.
         for opened in removed:

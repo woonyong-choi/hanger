@@ -39,7 +39,6 @@ class Synchronizer:
         self.policy = policy or ClosetPolicy(documents.root)
         self.index = index
         self.read_count = 0
-        self.read_bytes = 0
         self.diagnostics: deque[dict[str, str]] = deque(maxlen=100)
         self._writer = threading.RLock()
         self._retry_paths: set[str] = set()
@@ -240,7 +239,6 @@ class Synchronizer:
         with target.open("rb") as source:
             data = source.read(MAX_DOCUMENT_BYTES + 1)
         self.read_count += 1
-        self.read_bytes += len(data)
         if len(data) > MAX_DOCUMENT_BYTES or _signature(target) != before:
             raise ConflictError(f"The note changed while it was read: {path}")
         try:

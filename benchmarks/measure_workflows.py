@@ -1,4 +1,4 @@
-"""Measure issue #9 with synthetic sources and the same model/review path."""
+"""Time planning, review and apply with synthetic notes and a real model."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict
 
 from hanger.documents import Documents
 from hanger.model import CliModel, Intent, Planner
-from hanger.requests import digest
+from hanger.requests import digest, issue_key
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
@@ -161,7 +161,7 @@ def _run(case: dict[str, str], mode: str, output: Path) -> dict[str, Any]:
                     + case["new"],
                 }
             )
-            key = runtime.issue_key()
+            key = issue_key(runtime._secret)
             runtime.submit_intent(key, intent)
             result = runtime.run_next() or {}
         observed = target.read_text(encoding="utf-8")

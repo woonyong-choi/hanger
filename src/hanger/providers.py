@@ -7,13 +7,7 @@ first one found in this order is used.
 
 from __future__ import annotations
 
-__all__ = [
-    "DEFAULT_MODELS",
-    "PROVIDERS",
-    "ProviderMissingError",
-    "detect_provider",
-    "resolve_choice",
-]
+__all__ = ["Choice", "ProviderMissingError", "resolve_choice"]
 
 import shutil
 from dataclasses import dataclass

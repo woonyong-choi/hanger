@@ -12,15 +12,21 @@ notes did not change meanwhile.
 
 ## Language
 
-Hanger answers in English. Before you show any Hanger message, question or
-choice to the user, translate it into the language the user writes in or has
-set for you. Keep commands, paths and ids as they are.
+Hanger answers in English. Some messages come in two parts:
+
+- `Tell the user: ...` is for the user. Relay it in full, translated into the
+  language the user writes in or has set for you. Do not shorten or reword it.
+- `Then: ...` is for you. Do it; do not show it to the user.
+
+Keep commands, paths, ids and the names closet, Hanger, `.hangerignore` and
+`HANGER.md` as they are when you translate.
 
 ## First use
 
 1. Call `list_closets`.
-2. If no closet is registered, ask the user which folder holds their notes and
-   call `register_closet` with its absolute path. Do not guess a folder.
+2. If no closet is registered, relay the question Hanger returns and call
+   `register_closet` with the absolute path the user gives. Do not guess a
+   folder.
 3. With more than one closet, pass `closet` on every call: an id from
    `list_closets`, or a path inside the closet (the current working folder
    often works).

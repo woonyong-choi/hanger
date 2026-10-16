@@ -8,3 +8,4 @@ dist/
 build/
 *.egg-info/
 tests/.runtime/
+benchmarks/.runtime/

@@ -1,5 +1,4 @@
 import copy
-import json
 import os
 import sqlite3
 import subprocess
@@ -18,7 +17,7 @@ from hanger.documents import Documents
 from hanger.errors import RequestError
 from hanger.model import CliModel, Intent, Planner
 from hanger.profiles import Profile
-from hanger.requests import digest
+from hanger.requests import issue_key
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
@@ -101,7 +100,7 @@ def run(
             "mode": mode,
         }
     )
-    key = runtime.issue_key()
+    key = issue_key(runtime._secret)
     runtime.submit_intent(key, intent)
     result = runtime.run_next()
     assert result is not None
@@ -109,7 +108,7 @@ def run(
     return result
 
 
-# #9: each purpose executes draft and review while preserving untouched source bytes.
+# each purpose executes draft and review while preserving untouched source bytes.
 @pytest.mark.parametrize(
     "profile, policy",
     [
@@ -137,7 +136,7 @@ def test_profile_graph_preserves_source_and_search_scope(
     assert result["usage"]["review"]["input_tokens"] == 130
 
 
-# #9: rejected content and invalid patches must never reach the shared file writer.
+# rejected content and invalid patches must never reach the shared file writer.
 @pytest.mark.parametrize(
     "defect",
     [
@@ -191,7 +190,7 @@ def test_invalid_workflow_preserves_source(
     ).read_text() == "# 제목\n범위 밖 비공개"
 
 
-# #9: observed user edits invalidate the draft before validation or replacement.
+# observed user edits invalidate the draft before validation or replacement.
 def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) -> None:
     runtime, model = flow
     path = runtime.documents.root / "docs/a.md"
@@ -213,13 +212,13 @@ def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) 
         with pytest.raises(RequestError, match="reconsider"):
             service.resolve_conflict(
                 result["key"],
-                runtime.issue_key(),
+                issue_key(runtime._secret),
                 "overwrite",  # type: ignore[arg-type]
             )
     assert path.read_text() == "사용자 변경"
 
 
-# #9: missing evidence must be distinguishable from completed integration.
+# missing evidence must be distinguishable from completed integration.
 def test_deferred_workflow_preserves_input_without_review(
     flow: tuple[Runtime, Model],
 ) -> None:
@@ -233,7 +232,7 @@ def test_deferred_workflow_preserves_input_without_review(
     assert (runtime.documents.root / "docs/a.md").read_bytes() == before
 
 
-# #9: late review approval cannot resurrect a cancelled or expired operation.
+# late review approval cannot resurrect a cancelled or expired operation.
 @pytest.mark.parametrize("stop", ["cancel", "expire"])
 def test_late_review_cannot_apply_stopped_request(
     flow: tuple[Runtime, Model], monkeypatch: pytest.MonkeyPatch, stop: str
@@ -241,7 +240,7 @@ def test_late_review_cannot_apply_stopped_request(
     runtime, model = flow
     path = runtime.documents.root / "docs/a.md"
     before = path.read_bytes()
-    key = runtime.issue_key()
+    key = issue_key(runtime._secret)
     runtime.submit_intent(
         key, Intent(kind="edit", query="제목", instruction="교체", folders=("docs",))
     )
@@ -264,26 +263,15 @@ def test_late_review_cannot_apply_stopped_request(
     assert runtime.run_next() is None
 
 
-# #9: default new fields preserve the previously published request identity contract.
-def test_old_request_identity_and_nested_cleanup(
+def test_finished_job_is_cleaned_up(
     flow: tuple[Runtime, Model], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime, _ = flow
-    legacy = {
-        "kind": "edit",
-        "query": "제목",
-        "instruction": "교체",
-        "paths": [],
-        "mode": "normal",
-        "allow_delete": False,
-        "fallback_reason": None,
-    }
-    key = runtime.issue_key()
-    intent = Intent.model_validate(legacy)
+    key = issue_key(runtime._secret)
+    intent = Intent(kind="edit", query="제목", instruction="교체")
     runtime.submit_intent(key, intent)
     result = runtime.run_next()
     assert result is not None and result["status"] == "completed"
-    assert result["fingerprint"] == digest(json.dumps(legacy, sort_keys=True).encode())
     assert runtime.submit_intent(key, intent) == "duplicate"
     future = time.time() + 25 * 3600
     monkeypatch.setattr(time, "time", lambda: future)
@@ -296,7 +284,7 @@ def test_old_request_identity_and_nested_cleanup(
     assert runtime.status(key) == {}
 
 
-# #9: a real process crash after draft persistence must not regenerate the draft.
+# a real process crash after draft persistence must not regenerate the draft.
 @pytest.mark.parametrize("external_edit", [False, True])
 def test_killed_workflow_resumes_saved_draft(
     tmp_path: Path, *, external_edit: bool
@@ -314,7 +302,7 @@ def test_killed_workflow_resumes_saved_draft(
     with Runtime(
         root, state, Planner(Synchronizer(Documents(root), index), Model())
     ) as runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(
             key,
             Intent(

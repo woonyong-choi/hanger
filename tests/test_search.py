@@ -9,7 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+from conftest import OFFLINE
 
+from hanger.closets import ClosetPolicy
 from hanger.documents import Documents
 from hanger.errors import RequestError, SearchUnavailableError
 from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE
@@ -34,7 +36,7 @@ def sync(tmp_path: Path) -> Iterator[Synchronizer]:
     index.close()
 
 
-# #3: rebuild after missing every event, including rename and deletion.
+# rebuild after missing every event, including rename and deletion.
 def test_reconcile_recovers_offline_changes(sync: Synchronizer) -> None:
     root = sync.documents.root
     source = root / "a.md"
@@ -54,7 +56,7 @@ def test_reconcile_recovers_offline_changes(sync: Synchronizer) -> None:
     assert not list(sync.index.entries())
 
 
-# #3: unchanged trees must not reread all bodies during metadata reconciliation.
+# unchanged trees must not reread all bodies during metadata reconciliation.
 def test_reconcile_large_tree_reads_only_changed_body(sync: Synchronizer) -> None:
     root = sync.documents.root
     for number in range(1000):
@@ -67,7 +69,7 @@ def test_reconcile_large_tree_reads_only_changed_body(sync: Synchronizer) -> Non
     assert sync.audit(7) == {"checked": 7, "read": 7}
 
 
-# #3: a retrieved stale version must be repaired before its source is used.
+# a retrieved stale version must be repaired before its source is used.
 def test_search_stale_hit_repairs_before_return(sync: Synchronizer) -> None:
     target = sync.documents.root / "a.md"
     target.write_text("# 결제\n이전 내용")
@@ -79,7 +81,7 @@ def test_search_stale_hit_repairs_before_return(sync: Synchronizer) -> None:
     assert result["documents"][0]["bytes"] == len("# 결제\n최신 조건".encode())
 
 
-# #3: Korean grammatical particles must not turn unrelated notes into candidates.
+# Korean grammatical particles must not turn unrelated notes into candidates.
 @pytest.mark.parametrize("query", ["멱등성이", "멱등셩"])
 def test_search_korean_particle_and_typo_excludes_unrelated(
     sync: Synchronizer, query: str
@@ -92,7 +94,7 @@ def test_search_korean_particle_and_typo_excludes_unrelated(
     assert [hit["path"] for hit in sync.index.find(query, 20)] == ["payment.md"]
 
 
-# #9: Nori split '재시도 횟수' differently and omitted a required edit target.
+# Nori split '재시도 횟수' differently and omitted a required edit target.
 def test_search_same_korean_word_in_different_contexts(sync: Synchronizer) -> None:
     root = sync.documents.root
     (root / "retry.md").write_text("# 재시도\n기본 재시도는 2회다.")
@@ -106,7 +108,7 @@ def test_search_same_korean_word_in_different_contexts(sync: Synchronizer) -> No
     }
 
 
-# #3: an unindexed file is found after a reasoned scope re-sync, not by a scan.
+# an unindexed file is found after a reasoned scope re-sync, not by a scan.
 def test_search_unindexed_file_found_after_scope_resync(sync: Synchronizer) -> None:
     sync.reconcile()
     target = sync.documents.root / "a.md"
@@ -119,7 +121,7 @@ def test_search_unindexed_file_found_after_scope_resync(sync: Synchronizer) -> N
     assert sync.search("결제")["documents"][0]["path"] == "a.md"
 
 
-# #3: indexed hits do not prevent a reasoned search for missing evidence.
+# indexed hits do not prevent a reasoned search for missing evidence.
 def test_search_missing_evidence_starts_at_first_file(sync: Synchronizer) -> None:
     (sync.documents.root / "z.md").write_text("# 결제\n기존 문서")
     sync.reconcile()
@@ -130,7 +132,7 @@ def test_search_missing_evidence_starts_at_first_file(sync: Synchronizer) -> Non
     assert sync.index.metadata(["a.md"])
 
 
-# #3: a directory replacing a document must not retain its search entry.
+# a directory replacing a document must not retain its search entry.
 def test_reconcile_file_replaced_by_directory_removes_entry(sync: Synchronizer) -> None:
     path = sync.documents.root / "a.md"
     path.write_text("# 결제")
@@ -141,7 +143,7 @@ def test_reconcile_file_replaced_by_directory_removes_entry(sync: Synchronizer) 
     assert not list(sync.index.entries())
 
 
-# #3: search can finish while reconciliation waits between filesystem batches.
+# search can finish while reconciliation waits between filesystem batches.
 def test_reconcile_allows_search_between_batches(
     sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -167,7 +169,7 @@ def test_reconcile_allows_search_between_batches(
         scan.result(timeout=10)
 
 
-# #3: a transient read failure is retried without another filesystem event.
+# a transient read failure is retried without another filesystem event.
 def test_watch_retries_unreadable_new_file(
     sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -192,7 +194,7 @@ def test_watch_retries_unreadable_new_file(
     assert sync.index.metadata(["a.md"])
 
 
-# #3: out-of-order signals reread current files instead of indexing old payloads.
+# out-of-order signals reread current files instead of indexing old payloads.
 def test_repeated_signal_never_replays_old_content(sync: Synchronizer) -> None:
     target = sync.documents.root / "a.md"
     target.write_text("# 결제\n이전")
@@ -205,7 +207,7 @@ def test_repeated_signal_never_replays_old_content(sync: Synchronizer) -> None:
     assert sync.read(found["path"])["content"] == "# 결제\n현재"
 
 
-# #3: native observer detects a file saved outside Obsidian.
+# The native observer detects a file saved by another program.
 def test_native_watch_receives_external_file(sync: Synchronizer) -> None:
     watcher = ClosetWatcher(sync)
     watcher.start()
@@ -223,7 +225,7 @@ def test_native_watch_receives_external_file(sync: Synchronizer) -> None:
         watcher.close()
 
 
-# #3: unreadable Markdown must not starve valid file synchronization.
+# unreadable Markdown must not starve valid file synchronization.
 @pytest.mark.parametrize("invalid", [b"\xff", b"a" * (2 * 1024 * 1024 + 1)])
 def test_invalid_file_does_not_block_sync(sync: Synchronizer, invalid: bytes) -> None:
     (sync.documents.root / "a.md").write_bytes(invalid)
@@ -234,7 +236,7 @@ def test_invalid_file_does_not_block_sync(sync: Synchronizer, invalid: bytes) ->
     assert sync.search("missing")["documents"] == []
 
 
-# #9: a search outage is an explicit error, never a silent local scan.
+# a search outage is an explicit error, never a silent local scan.
 def test_search_outage_raises_without_local_scan(sync: Synchronizer) -> None:
     (sync.documents.root / "a.md").write_text("# 결제\n자료")
     sync.reconcile()
@@ -250,7 +252,7 @@ def test_search_outage_raises_without_local_scan(sync: Synchronizer) -> None:
         sync.index.client = SearchIndex(url, str(sync.documents.root)).client
 
 
-# #9: folder filtering precedes top-k and is identical in fallback and continuation.
+# folder filtering precedes top-k and is identical in fallback and continuation.
 @pytest.mark.parametrize("source", ["indexed", "stale", "unindexed"])
 def test_search_folders_preserve_union_and_boundaries(
     sync: Synchronizer, source: str
@@ -290,7 +292,7 @@ def test_search_folders_preserve_union_and_boundaries(
     assert not sync.search("재시도", folders=("missing",))["documents"]
 
 
-# #9: many absent folders must not broaden the selected scope.
+# many absent folders must not broaden the selected scope.
 def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
     root = sync.documents.root
     for folder in ("chosen", "unrelated"):
@@ -306,7 +308,7 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
     assert len(result["folders"]) == 1101
 
 
-# #9: invalid scopes fail rather than silently reverting to the full closet.
+# invalid scopes fail rather than silently reverting to the full closet.
 @pytest.mark.parametrize(
     "folder",
     [
@@ -331,7 +333,7 @@ def test_search_ignored_folder_is_rejected(sync: Synchronizer) -> None:
         sync.search("retry", folders=(".hidden",))
 
 
-# #9: CLI folder flags are repeatable and errors in other folders stay out of scope.
+# CLI folder flags are repeatable and errors in other folders stay out of scope.
 def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
     root = sync.documents.root
     for folder in ("문서/개발", "docs/[api]", "private"):
@@ -386,3 +388,31 @@ def test_reconcile_refuses_a_missing_or_empty_folder(sync: Synchronizer) -> None
     with pytest.raises(RequestError, match="missing or empty"):
         sync.reconcile()
     assert [entry["path"] for entry in sync.index.entries()] == ["a.md"]
+
+
+# The watcher keeps running after an unexpected error.
+def test_watcher_survives_unexpected_error(
+    layout: tuple[Path, Path, ClosetPolicy], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root, _, policy = layout
+    sync = Synchronizer(Documents(root), SearchIndex(OFFLINE, str(root)), None, policy)
+    watcher = ClosetWatcher(sync)
+    calls = 0
+
+    def flaky(*_: object) -> None:
+        nonlocal calls
+        calls += 1
+        raise ValueError("unexpected")
+
+    monkeypatch.setattr(watcher, "flush", flaky)
+    monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
+    stop = threading.Event()
+    thread = threading.Thread(target=watcher.run, args=(stop,), daemon=True)
+    monkeypatch.setattr(stop, "wait", lambda seconds: time.sleep(0.05) or False)
+    thread.start()
+    time.sleep(0.5)
+    assert thread.is_alive()
+    assert calls >= 2
+    stop.set()
+    monkeypatch.undo()
+    thread.join(timeout=5)

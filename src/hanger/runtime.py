@@ -14,7 +14,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 from filelock import FileLock, Timeout
 from langchain_core.runnables import RunnableConfig
@@ -33,20 +33,19 @@ from hanger.errors import (
     ReviewRejectedError,
     SearchUnavailableError,
 )
+from hanger.jobs import EXTRA, FINAL, KEPT, JobState, describe_job, initial_state
 from hanger.model import Intent, Planner
 from hanger.requests import (
     KEY_LIFETIME_SECONDS,
     Proposal,
     digest,
-    issue_key,
     load_secret,
     validate_key,
 )
 from hanger.trace import Trace
 
 logger = logging.getLogger(__name__)
-# Retry delays for unexpected job errors; the last value repeats.
-# Short internal retries; after the last one the caller reports the failure.
+# Wait before an unexpected job error is retried.
 _RETRY_SECONDS = 10
 _KEY_REUSED = (
     "This request key was already used for a different request. Get a new one "
@@ -65,32 +64,6 @@ class Limits:
     pending_bytes: int = 64 * 1024 * 1024
     state_bytes: int = 2 * 1024 * 1024 * 1024
     free_bytes: int = 5 * 1024 * 1024 * 1024
-
-
-class _State(TypedDict):
-    key: str
-    fingerprint: str
-    proposal: dict[str, Any]
-    deadline: float
-    cursor: int
-    status: str
-    results: dict[str, str]
-    intent: dict[str, Any]
-    dependencies: dict[str, str]
-    revision: int
-    decision: dict[str, Any]
-    review: dict[str, Any]
-    usage: dict[str, Any] | None
-    search: dict[str, Any]
-    error: str
-    error_code: str
-    applied: dict[str, str | None]
-    prior_results: dict[str, str]
-    # Set on a conflict once reconsider has moved it to a new key.
-    resolved_by: str
-    feedback: list[str]
-    review_attempt: int
-    model_attempt: int
 
 
 class Runtime:
@@ -242,9 +215,6 @@ class Runtime:
             self._connection.execute("VACUUM")
         return removed
 
-    def issue_key(self) -> str:
-        return issue_key(self._secret)
-
     def pending_count(self) -> int:
         with self._admission:
             return len(self._pending)
@@ -277,7 +247,7 @@ class Runtime:
                     f"This note is ignored or is a rule file: {path}",
                     code="excluded",
                 )
-        payload = _intent_payload(self._resolved(intent))
+        payload = self._resolved(intent).model_dump(mode="json")
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
         return self._enqueue(key, {"intent": payload}, fingerprint, deadline)
 
@@ -327,40 +297,41 @@ class Runtime:
         return validate_key(key, self._secret) - KEY_LIFETIME_SECONDS
 
     def reconsider(self, key: str, new_key: str) -> str:
-        deadline = validate_key(new_key, self._secret)
-        previous = self.status(key)
-        if previous.get("status") != "conflict":
-            raise RequestError(_RECONSIDER_ONLY, code="not_conflict")
-        if previous.get("resolved_by"):
-            if previous["resolved_by"] == new_key:
-                return "duplicate"
-            raise RequestError(
-                "This job is already being reconsidered under key "
-                f"{previous['resolved_by']}. Check that key's status."
-            )
-        if not previous.get("intent"):
-            raise RequestError(
-                "A job without a model instruction cannot be reconsidered. Send a "
-                "new request based on the current notes."
-            )
-        intent = Intent.model_validate(previous["intent"])
-        payload = {
-            "intent": _intent_payload(intent),
-            "prior": {
-                "proposal": previous.get("proposal", {}),
-                "results": {
-                    **previous.get("prior_results", {}),
-                    **previous.get("results", {}),
+        with self._admission:
+            deadline = validate_key(new_key, self._secret)
+            previous = self.status(key)
+            if previous.get("status") != "conflict":
+                raise RequestError(_RECONSIDER_ONLY, code="not_conflict")
+            if previous.get("resolved_by"):
+                if previous["resolved_by"] == new_key:
+                    return "duplicate"
+                raise RequestError(
+                    "This job is already being reconsidered under key "
+                    f"{previous['resolved_by']}. Check that key's status."
+                )
+            if not previous.get("intent"):
+                raise RequestError(
+                    "A job without a model instruction cannot be reconsidered. Send a "
+                    "new request based on the current notes."
+                )
+            intent = Intent.model_validate(previous["intent"])
+            payload = {
+                "intent": intent.model_dump(mode="json"),
+                "prior": {
+                    "proposal": previous.get("proposal", {}),
+                    "results": {
+                        **previous.get("prior_results", {}),
+                        **previous.get("results", {}),
+                    },
+                    "applied": previous.get("applied", {}),
                 },
-                "applied": previous.get("applied", {}),
-            },
-        }
-        fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
-        outcome = self._enqueue(new_key, payload, fingerprint, deadline)
-        if outcome == "accepted":
-            # The new job carries everything forward; keep only the result here.
-            self._discard(key, resolved=new_key)
-        return outcome
+            }
+            fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
+            outcome = self._enqueue(new_key, payload, fingerprint, deadline)
+            if outcome == "accepted":
+                # The new job carries everything forward; keep only the result here.
+                self._discard(key, resolved=new_key)
+            return outcome
 
     def _validate_proposal(self, proposal: Proposal) -> None:
         canonical_paths = set()
@@ -489,55 +460,7 @@ class Runtime:
                 "message": "No job was accepted with this key.",
                 "next_actions": [{"tool": "request_change"}, {"tool": "collect"}],
             }
-        status = state["status"]
-        actions: list[dict[str, Any]]
-        if status in {"queued", "planning", "running"}:
-            message = self.health() or state.get("error") or "The job is running."
-            actions = [{"tool": "job_status"}, {"tool": "cancel_job"}]
-        elif status == "failed":
-            message = state.get("error") or "The job failed."
-            actions = [
-                {"tool": "issue_key", "note": "get a new key"},
-                {"tool": "request_change", "note": "send the same request again"},
-            ]
-        elif status == "conflict" and state.get("resolved_by"):
-            message = (
-                "This job stopped on a changed note and is being reconsidered "
-                "under key " + state["resolved_by"]
-            )
-            actions = [{"tool": "job_status", "args": {"key": state["resolved_by"]}}]
-        elif status == "conflict":
-            message = state.get("error") or "The job stopped because a note changed."
-            actions = [{"tool": "read_document"}]
-            if state.get("intent"):
-                actions += _resolution("reconsider")
-            else:
-                actions += [
-                    {"tool": "issue_key", "note": "get a new key"},
-                    {"tool": "request_change", "note": "ask again on current notes"},
-                ]
-        elif status == "completed":
-            changed = len(state.get("results", {}))
-            message = (
-                f"Done. Files changed: {changed}."
-                if changed
-                else "Done. No file needed a change."
-            )
-            actions = [{"tool": "read_document"}]
-        elif status == "deferred":
-            message = "Held back for lack of evidence: " + state.get(
-                "decision", {}
-            ).get("reason", "no reason given")
-            actions = [{"tool": "read_document"}, {"tool": "request_change"}]
-        else:
-            message = {
-                "cancelled": "The job was cancelled.",
-                "expired": "The job stopped because its request key expired.",
-            }.get(
-                status, "The job stopped."
-            ) + " Files already changed are listed in results."
-            actions = [{"tool": "read_document"}, {"tool": "request_change"}]
-        return {**state, "message": message, "next_actions": actions}
+        return describe_job(state, self.health)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = queued request bytes
@@ -557,6 +480,8 @@ class Runtime:
     # basis: estimate
     def run_next(self) -> dict[str, Any] | None:
         with self._consumer:
+            if self._interrupted.is_set():
+                return None
             item = self._take_ready()
             if item is None:
                 return None
@@ -572,8 +497,10 @@ class Runtime:
                     if snapshot.next:
                         self._graph.invoke(None, config, durability="sync")
                 else:
-                    self._graph.invoke(_initial(request), config, durability="sync")
-                if self.status(key).get("status") in _FINAL:
+                    self._graph.invoke(
+                        initial_state(request), config, durability="sync"
+                    )
+                if self.status(key).get("status") in FINAL:
                     self._discard(key)
                 result = self.status(key)
                 self._finish(key, item["pqid"])
@@ -678,7 +605,7 @@ class Runtime:
         if proposal:
             self.documents.discard_pending(Proposal.model_validate(proposal))
         status = state.get("status", "")
-        kept = _KEPT + (() if resolved else _EXTRA.get(status, ()))
+        kept = KEPT + (() if resolved else EXTRA.get(status, ()))
         record = {name: state[name] for name in kept if name in state}
         if resolved:
             record["resolved_by"] = resolved
@@ -708,7 +635,7 @@ class Runtime:
         )
         self._resources.callback(self._connection.close)
         self._saver = SqliteSaver(self._connection)
-        builder = StateGraph(_State)
+        builder = StateGraph(JobState)
         builder.add_node("prepare", self._prepare)
         builder.add_node("apply", self._apply)
         builder.add_conditional_edges(START, _route)
@@ -727,7 +654,7 @@ class Runtime:
     # vars: n = context and model result bytes, t = model latency
     # vars: d = directory depth, f = dependency files
     # basis: estimate
-    def _prepare(self, state: _State) -> dict[str, Any]:
+    def _prepare(self, state: JobState) -> dict[str, Any]:
         if self._planner is None:
             raise RequestError("No model is configured for this closet.")
 
@@ -812,16 +739,22 @@ class Runtime:
             return {"status": "failed", "error": str(error), "error_code": error.code}
 
     def _again(
-        self, state: _State, counter: str, limit: int, error: HangerError
+        self, state: JobState, counter: str, limit: int, error: HangerError
     ) -> dict[str, Any]:
         """Re-plan a retryable failure with feedback, up to the configured limit."""
         attempt = int(state.get(counter, 0)) + 1  # type: ignore[call-overload]
-        label = (
-            "the review rejected the draft"
-            if error.code == "review_rejected"
-            else "the model output broke an edit rule"
+        if error.code == "review_rejected":
+            label = "the review rejected the draft"
+        elif error.code == "model_error":
+            label = "the model call failed"
+        else:
+            label = "the model output broke an edit rule"
+        # A failed call says nothing about the draft, so it gets no feedback.
+        feedback = (
+            []
+            if error.code == "model_error"
+            else list(getattr(error, "issues", [str(error)]))
         )
-        feedback = list(getattr(error, "issues", [str(error)]))
         if attempt < limit:
             logger.info(
                 "job=%s redrafting after %s (%d/%d)",
@@ -845,7 +778,7 @@ class Runtime:
             "error_code": error.code,
         }
 
-    def _conflict(self, state: _State, reason: str) -> dict[str, Any]:
+    def _conflict(self, state: JobState, reason: str) -> dict[str, Any]:
         mode = state["intent"].get("mode") or self.settings.jobs.default_mode
         limit = self.settings.jobs.source_changed_retries
         if mode == "bypass" and state["revision"] < limit:
@@ -879,72 +812,68 @@ class Runtime:
     # cost: time O(n), heap O(n), stack O(1), io O(f)
     # vars: n = target and proposal bytes, f = target count
     # basis: estimate
-    def _apply(self, state: _State) -> dict[str, Any]:
+    def _apply(self, state: JobState) -> dict[str, Any]:
         """Write every remaining file in one step.
 
         One graph step for all files keeps the checkpoint from storing the
         whole proposal again per file. After a crash the step runs again and
         each file is recognised as already applied, pending or changed.
         """
-        with self._admission:
-            proposal = Proposal.model_validate(state["proposal"])
-            results = dict(state["results"])
-            applied = dict(state.get("applied", {}))
-            targets = {change.path for change in proposal.changes}
-            for cursor in range(state["cursor"], len(proposal.changes)):
-                if self._interrupted.is_set():
-                    raise InterruptedError(
-                        "runtime stopped before document replacement"
-                    )
-                request = self._pending[state["key"]]
-                if request["cancelled"]:
-                    return self._stopped(proposal, "cancelled")
-                if time.time() >= state["deadline"]:
-                    return self._stopped(proposal, "expired")
-                try:
-                    self._check_storage()
-                except RequestError as error:
-                    return {
-                        **self._stopped(proposal, "failed"),
-                        "error": str(error),
-                        "error_code": "storage",
-                    }
-                change = proposal.changes[cursor]
-                try:
-                    for path, expected in state.get("dependencies", {}).items():
-                        if path in targets:
-                            continue
-                        if self.documents.read_hash(path) != expected:
-                            raise ConflictError(
-                                f"A note used as a source changed: {path}"
-                            )
-                    self.documents.check_proposal(proposal, cursor)
-                    with self._trace.measure("apply"):
-                        outcome = self.documents.apply(change)
-                except ConflictError as error:
-                    stopped = self._stopped(proposal, "conflict")
-                    return {
-                        **stopped,
-                        **self._conflict(state, str(error)),
-                        "cursor": cursor,
-                        "applied": {**applied, **stopped["applied"]},
-                    }
-                except RequestError as error:
-                    return {
-                        **self._stopped(proposal, "failed"),
-                        "error": f"This change cannot be applied: {error}",
-                        "error_code": "invalid_target",
-                    }
-                results[change.path] = outcome
-                applied[change.path] = (
-                    None if change.after is None else digest(change.after.encode())
-                )
+        proposal = Proposal.model_validate(state["proposal"])
+        results = dict(state["results"])
+        applied = dict(state.get("applied", {}))
+        targets = {change.path for change in proposal.changes}
+        try:
+            self._check_storage()
+        except RequestError as error:
             return {
-                "cursor": len(proposal.changes),
-                "results": results,
-                "status": "completed",
-                "applied": applied,
+                **self._stopped(proposal, "failed"),
+                "error": str(error),
+                "error_code": "storage",
             }
+        for cursor in range(state["cursor"], len(proposal.changes)):
+            if self._interrupted.is_set():
+                raise InterruptedError("runtime stopped before document replacement")
+            with self._admission:
+                request = self._pending[state["key"]]
+            if request["cancelled"]:
+                return self._stopped(proposal, "cancelled")
+            if time.time() >= state["deadline"]:
+                return self._stopped(proposal, "expired")
+            change = proposal.changes[cursor]
+            try:
+                for path, expected in state.get("dependencies", {}).items():
+                    if path in targets:
+                        continue
+                    if self.documents.read_hash(path) != expected:
+                        raise ConflictError(f"A note used as a source changed: {path}")
+                self.documents.check_proposal(proposal, cursor)
+                with self._trace.measure("apply"):
+                    outcome = self.documents.apply(change)
+            except ConflictError as error:
+                stopped = self._stopped(proposal, "conflict")
+                return {
+                    **stopped,
+                    **self._conflict(state, str(error)),
+                    "cursor": cursor,
+                    "applied": {**applied, **stopped["applied"]},
+                }
+            except RequestError as error:
+                return {
+                    **self._stopped(proposal, "failed"),
+                    "error": f"This change cannot be applied: {error}",
+                    "error_code": "invalid_target",
+                }
+            results[change.path] = outcome
+            applied[change.path] = (
+                None if change.after is None else digest(change.after.encode())
+            )
+        return {
+            "cursor": len(proposal.changes),
+            "results": results,
+            "status": "completed",
+            "applied": applied,
+        }
 
     # cost: time O(n), heap O(m+f), stack O(1), io O(f)
     # vars: n = target bytes, m = largest target bytes, f = targets
@@ -972,46 +901,10 @@ class Runtime:
 
 # Model output that breaks an edit rule is redrafted with the violation.
 _REDRAFT = {"model_output", "write_denied", "delete_denied"}
-# Jobs in these states keep one record and no history (see Runtime._discard).
-_FINAL = {"completed", "deferred", "conflict", "failed", "cancelled", "expired"}
-# What each state keeps beyond the result: a summary of what was decided, or
-# the instruction and proposal an open conflict needs for reconsider.
-_EXTRA: dict[str, tuple[str, ...]] = {
-    "completed": ("intent", "decision", "review", "search", "usage", "prior_results"),
-    "deferred": ("intent", "decision", "review", "search", "usage", "prior_results"),
-    "conflict": ("intent", "proposal", "prior_results", "decision", "search"),
-}
-_KEPT = (
-    "key",
-    "fingerprint",
-    "deadline",
-    "status",
-    "error",
-    "error_code",
-    "results",
-    "applied",
-)
-
-
-def _resolution(choice: str) -> list[dict[str, Any]]:
-    return [
-        {"tool": "issue_key", "note": "get a new key"},
-        {"tool": "resolve_conflict", "args": {"choice": choice}},
-    ]
 
 
 def _config(key: str) -> RunnableConfig:
     return {"configurable": {"thread_id": key}, "recursion_limit": 2002}
-
-
-def _intent_payload(intent: Intent) -> dict[str, Any]:
-    payload = intent.model_dump(mode="json")
-    # Omitted new defaults preserve identities issued before folder/profile support.
-    if not intent.folders:
-        payload.pop("folders")
-    if intent.profile == "note":
-        payload.pop("profile")
-    return payload
 
 
 def _job(key: str) -> str:
@@ -1019,35 +912,7 @@ def _job(key: str) -> str:
     return digest(key.encode())[:8]
 
 
-def _initial(request: dict[str, Any]) -> _State:
-    prior = request.get("prior", {})
-    return {
-        "key": request["key"],
-        "fingerprint": request["fingerprint"],
-        "proposal": request.get("proposal", prior.get("proposal", {})),
-        "deadline": request["deadline"],
-        "cursor": 0,
-        "status": "planning" if "intent" in request else "running",
-        "results": {},
-        "prior_results": prior.get("results", {}),
-        "feedback": [],
-        "review_attempt": 0,
-        "model_attempt": 0,
-        "error_code": "",
-        "intent": request.get("intent", {}),
-        "dependencies": {},
-        "revision": 0,
-        "decision": {},
-        "review": {},
-        "usage": None,
-        "search": {},
-        "error": "",
-        "applied": prior.get("applied", {}),
-        "resolved_by": "",
-    }
-
-
-def _route(state: _State) -> str:
+def _route(state: JobState) -> str:
     if state["status"] == "planning":
         return "prepare"
     return "apply" if state["status"] == "running" else END

@@ -162,7 +162,6 @@ class ElasticManager:
         progress: Progress | None = None,
         *,
         reinstall: bool = False,
-        title: str | None = "Hanger search engine setup",
         first: int = 1,
         total: int = INSTALL_STEPS,
     ) -> Path:
@@ -179,11 +178,6 @@ class ElasticManager:
             if marker.exists() and not reinstall:
                 return self.home
             suffix, checksum = _archive()
-            if progress is not None and title:
-                progress.title(
-                    title,
-                    f"Elasticsearch {ES_VERSION} ({suffix}) + Nori Korean analyzer",
-                )
             work = self.install_root / f".install-{os.getpid()}"
             shutil.rmtree(work, ignore_errors=True)
             work.mkdir()
@@ -349,6 +343,10 @@ class ElasticManager:
             pid = int(pid_file.read_text().strip())
         except (OSError, ValueError):
             return
+        if not _is_search_server(pid):
+            # The server is gone and its pid may now belong to another process.
+            pid_file.unlink(missing_ok=True)
+            return
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -486,3 +484,16 @@ def _download(
             done += len(chunk)
             if report is not None:
                 report(done, total)
+
+
+def _is_search_server(pid: int) -> bool:
+    try:
+        command = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+    except OSError:
+        return False
+    return "elasticsearch" in command
