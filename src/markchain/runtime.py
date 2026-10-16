@@ -78,6 +78,8 @@ class _State(TypedDict):
     error_code: str
     applied: dict[str, str | None]
     prior_results: dict[str, str]
+    # Set on a conflict once reconsider has moved it to a new key.
+    resolved_by: str
     feedback: list[str]
     review_attempt: int
     model_attempt: int
@@ -300,6 +302,13 @@ class Runtime:
                 "충돌로 중단된 작업만 재검토할 수 있습니다. "
                 "실패한 작업은 issue_key로 새 키를 발급받아 다시 요청하십시오."
             )
+        if previous.get("resolved_by"):
+            if previous["resolved_by"] == new_key:
+                return "duplicate"
+            raise RequestError(
+                "이미 다른 키로 재검토 중인 작업입니다: "
+                f"{previous['resolved_by']}. 그 키로 상태를 확인하십시오."
+            )
         if not previous.get("intent"):
             raise RequestError(
                 "모델 지시가 없는 작업은 재검토할 수 없습니다. 현재 원문 "
@@ -318,7 +327,11 @@ class Runtime:
             },
         }
         fingerprint = digest(json.dumps(payload, sort_keys=True).encode())
-        return self._enqueue(new_key, payload, fingerprint, deadline)
+        outcome = self._enqueue(new_key, payload, fingerprint, deadline)
+        if outcome == "accepted":
+            # The new job carries everything forward; keep only the result here.
+            self._discard(key, resolved=new_key)
+        return outcome
 
     def _validate_proposal(self, proposal: Proposal) -> None:
         canonical_paths = set()
@@ -462,6 +475,12 @@ class Runtime:
                 {"tool": "issue_key", "note": "새 키 발급"},
                 {"tool": "request_change", "note": "같은 내용으로 다시 요청"},
             ]
+        elif status == "conflict" and state.get("resolved_by"):
+            message = (
+                "원문 변경으로 중단된 작업을 다른 키로 재검토하고 있습니다: "
+                + state["resolved_by"]
+            )
+            actions = [{"tool": "job_status", "args": {"key": state["resolved_by"]}}]
         elif status == "conflict":
             message = state.get("error") or "원문이 변경되어 작업을 중단했습니다."
             actions = [{"tool": "read_document"}]
@@ -529,7 +548,7 @@ class Runtime:
                         self._graph.invoke(None, config, durability="sync")
                 else:
                     self._graph.invoke(_initial(request), config, durability="sync")
-                if self.status(key).get("status") in _DISCARDED:
+                if self.status(key).get("status") in _FINAL:
                     self._discard(key)
                 result = self.status(key)
                 self._finish(key, item["pqid"])
@@ -624,17 +643,23 @@ class Runtime:
 
     # cost: time O(1), heap O(1), stack O(1), io O(1)
     # basis: estimate
-    def _discard(self, key: str) -> None:
-        """Drop the working data of a job that will not continue.
+    def _discard(self, key: str, *, resolved: str = "") -> None:
+        """Reduce a finished or stopped job to its result.
 
-        Only a small record stays for job_status and duplicate detection until
-        the key expires. Unfinished temporary files are removed.
+        The step-by-step history is deleted and one record remains until the
+        key expires: the result for job_status and duplicate detection, plus
+        what reconsider needs while a conflict is still open. Unfinished
+        temporary files are removed.
         """
         state = self.status(key)
         proposal = state.get("proposal")
         if proposal:
             self.documents.discard_pending(Proposal.model_validate(proposal))
-        record = {name: state[name] for name in _KEPT if name in state}
+        status = state.get("status", "")
+        kept = _KEPT + (() if resolved else _EXTRA.get(status, ()))
+        record = {name: state[name] for name in kept if name in state}
+        if resolved:
+            record["resolved_by"] = resolved
         self._saver.delete_thread(key)
         self._graph.update_state(_config(key), record, as_node="apply")
 
@@ -965,8 +990,15 @@ class Runtime:
         return {"status": status, "results": results, "applied": applied}
 
 
-# Jobs that end here keep only a small record; their working data is dropped.
-_DISCARDED = {"failed", "cancelled", "expired"}
+# Jobs in these states keep one record and no history (see Runtime._discard).
+_FINAL = {"completed", "deferred", "conflict", "failed", "cancelled", "expired"}
+# What each state keeps beyond the result: a summary of what was decided, or
+# the instruction and proposal an open conflict needs for reconsider.
+_EXTRA: dict[str, tuple[str, ...]] = {
+    "completed": ("intent", "decision", "review", "search", "usage", "prior_results"),
+    "deferred": ("intent", "decision", "review", "search", "usage", "prior_results"),
+    "conflict": ("intent", "proposal", "prior_results", "decision", "search"),
+}
 _KEPT = (
     "key",
     "fingerprint",
@@ -1029,6 +1061,7 @@ def _initial(request: dict[str, Any]) -> _State:
         "search": {},
         "error": "",
         "applied": prior.get("applied", {}),
+        "resolved_by": "",
     }
 
 
