@@ -7,48 +7,58 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import service_for
 from test_review_fixes import Model, _edit, _finish, _runtime, closet  # noqa: F401
 
+from hanger.closets import ClosetPolicy, register_closet
 from hanger.config import Settings
 from hanger.documents import Documents
 from hanger.errors import RequestError
+from hanger.hub import ClosetHub
+from hanger.ignore import DEFAULT_IGNORE
 from hanger.model import Intent
 from hanger.requests import Change, Proposal
+from hanger.rules import RULES_FILE
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.service import Service
+from hanger.store import StateStore
 from hanger.sync import Synchronizer
 from hanger.watcher import ClosetWatcher
 
 _OFFLINE = "http://127.0.0.1:9"
 
 
-def _service(root: Path, state: Path, settings: Settings) -> tuple[Service, Runtime]:
-    sync = Synchronizer(Documents(root), SearchIndex(_OFFLINE, str(root)), settings)
-    runtime = Runtime(root, state, settings=settings)
-    return Service(runtime, sync), runtime
+def _service(
+    root: Path, state: Path, policy: ClosetPolicy | None = None
+) -> tuple[Service, Runtime]:
+    policy = policy or ClosetPolicy(root)
+    sync = Synchronizer(Documents(root), SearchIndex(_OFFLINE, str(root)), None, policy)
+    runtime = Runtime(root, state)
+    runtime.policy = policy
+    return service_for(runtime, sync), runtime
 
 
 @pytest.fixture
-def layout(tmp_path: Path) -> tuple[Path, Path, Settings]:
+def layout(tmp_path: Path) -> tuple[Path, Path, ClosetPolicy]:
+    """Ignores other/ and any private/ folder; inbox/ is read-only."""
     root = tmp_path / "closet"
     for folder in ("notes", "notes/private", "other", "inbox"):
         (root / folder).mkdir(parents=True)
     (root / "notes/a.md").write_text("# a")
     (root / "notes/private/s.md").write_text("# secret")
     (root / "other/c.md").write_text("# c")
-    settings = Settings.model_validate(
-        {"closet": {"managed": ["notes"], "exclude": ["private"]}}
-    )
-    return root, tmp_path / "state", settings
+    (root / "inbox" / RULES_FILE).write_text("---\nwrite: false\n---\n")
+    policy = ClosetPolicy(root, DEFAULT_IGNORE + "other/\nprivate/\n")
+    return root, tmp_path / "state", policy
 
 
-# read_document honours managed and excluded folders.
-def test_read_document_rejects_unmanaged_and_excluded(
-    layout: tuple[Path, Path, Settings],
+# read_document honours the ignore rules.
+def test_read_document_rejects_ignored(
+    layout: tuple[Path, Path, ClosetPolicy],
 ) -> None:
-    root, state, settings = layout
-    service, runtime = _service(root, state, settings)
+    root, state, policy = layout
+    service, runtime = _service(root, state, policy)
     with runtime:
         assert service.read_document("notes/a.md")["content"] == "# a"
         for path in ("other/c.md", "notes/private/s.md"):
@@ -59,10 +69,10 @@ def test_read_document_rejects_unmanaged_and_excluded(
 
 # A missing document is a clear not_found error without the absolute path.
 def test_read_document_missing_is_not_found(
-    layout: tuple[Path, Path, Settings],
+    layout: tuple[Path, Path, ClosetPolicy],
 ) -> None:
-    root, state, settings = layout
-    service, runtime = _service(root, state, settings)
+    root, state, policy = layout
+    service, runtime = _service(root, state, policy)
     with runtime, pytest.raises(RequestError) as caught:
         service.read_document("notes/missing.md")
     assert caught.value.code == "not_found"
@@ -71,28 +81,29 @@ def test_read_document_missing_is_not_found(
 
 # collect refuses to write where Hanger may not write, and bad Unicode.
 def test_collect_respects_writable_and_rejects_bad_unicode(
-    layout: tuple[Path, Path, Settings],
+    layout: tuple[Path, Path, ClosetPolicy],
 ) -> None:
-    root, state, settings = layout
-    service, runtime = _service(root, state, settings)
+    root, state, policy = layout
+    service, runtime = _service(root, state, policy)
     with runtime:
         with pytest.raises(RequestError) as caught:
             service.collect(runtime.issue_key(), "memo")
         assert caught.value.code == "write_denied"
-        with pytest.raises(RequestError, match="유니코드"):
+        with pytest.raises(RequestError, match="invalid Unicode"):
             service.collect(runtime.issue_key(), "a\ud800b")
-    assert not any((root / "inbox").iterdir())
+    assert [p.name for p in (root / "inbox").iterdir()] == [RULES_FILE]
 
 
 # Proposals submitted directly obey the same write policy as model edits.
 def test_direct_proposal_outside_writable_is_rejected(
-    layout: tuple[Path, Path, Settings],
+    layout: tuple[Path, Path, ClosetPolicy],
 ) -> None:
-    root, state, settings = layout
+    root, state, policy = layout
     with (
-        Runtime(root, state, settings=settings) as runtime,
+        Runtime(root, state) as runtime,
         pytest.raises(RequestError) as caught,
     ):
+        runtime.policy = policy
         runtime.submit(
             runtime.issue_key(),
             Proposal(changes=(Change(path="other/x.md", after="x"),)),
@@ -152,15 +163,15 @@ def test_rule_violation_is_redrafted(closet: tuple[Path, Path, str]) -> None:  #
         status = runtime.describe(key)
     assert status["status"] == "completed", status.get("error")
     assert (root / "docs/a.md").read_text().startswith("# 결제 정책")
-    assert any("정확히 한 번" in prompt for prompt in model.prompts)
+    assert any("exactly once" in prompt for prompt in model.prompts)
 
 
 # The watcher keeps running after an unexpected error.
 def test_watcher_survives_unexpected_error(
-    layout: tuple[Path, Path, Settings], monkeypatch: pytest.MonkeyPatch
+    layout: tuple[Path, Path, ClosetPolicy], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root, _, settings = layout
-    sync = Synchronizer(Documents(root), SearchIndex(_OFFLINE, str(root)), settings)
+    root, _, policy = layout
+    sync = Synchronizer(Documents(root), SearchIndex(_OFFLINE, str(root)), None, policy)
     watcher = ClosetWatcher(sync)
     calls = 0
 
@@ -203,7 +214,7 @@ def test_retry_is_visible_and_failure_leaves_no_work_data(
             with pytest.raises(OSError):
                 runtime.run_next()
             message = runtime.describe(key)["message"]
-            assert f"10초 후 다시 시도합니다 ({attempt}/3)" in message
+            assert f"retrying in 10s ({attempt}/3)" in message
             clock += 11
         result = runtime.run_next()
         assert result is not None and result["status"] == "failed"
@@ -217,7 +228,7 @@ def test_retry_is_visible_and_failure_leaves_no_work_data(
             runtime.submit(key, Proposal(changes=(Change(path="a.md", after="x"),)))
             == "duplicate"
         )
-        with pytest.raises(RequestError, match="새 키를 발급받아"):
+        with pytest.raises(RequestError, match="get a new key"):
             runtime.reconsider(key, runtime.issue_key())
 
 
@@ -302,21 +313,28 @@ def test_listed_results_are_not_loaded() -> None:
     ]
 
 
-# The managed engine keeps only the current closet's index.
-def test_owned_index_removes_other_closet_indexes(tmp_path: Path) -> None:
+# A search server Hanger runs keeps only the indexes of registered closets.
+def test_owned_search_keeps_only_registered_indexes(tmp_path: Path) -> None:
     url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    old = SearchIndex(url, str(tmp_path / "old"))
-    new = SearchIndex(url, str(tmp_path / "new"), owned=True)
+    root = tmp_path / "closet"
+    root.mkdir()
+    old = SearchIndex(url, str(tmp_path / "removed"))
+    store = StateStore(tmp_path / "state")
+    register_closet(store, root)
+    hub = ClosetHub(store, Settings(), url, owns_search=True)
+    current = SearchIndex(url, str(root.resolve()))
     try:
         old.ensure()
-        new.ensure()
+        current.ensure()
+        hub.refresh()
         assert not old.client.indices.exists(index=old.name)
-        assert new.client.indices.exists(index=new.name)
+        assert current.client.indices.exists(index=current.name)
     finally:
-        for index in (old, new):
-            index.client.options(ignore_status=404).indices.delete(index=index.name)
+        hub.close()
+        for index in (old, current):
+            index.delete()
             index.close()
 
 
@@ -346,7 +364,7 @@ def test_inbox_name_rule(text: str, title: str) -> None:
 def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
     root = tmp_path / "closet"
     root.mkdir()
-    service, runtime = _service(root, tmp_path / "state", Settings())
+    service, runtime = _service(root, tmp_path / "state")
     with runtime:
         key = runtime.issue_key()
         first = service.collect(key, "# 링크 모음\nhttps://example.com")
@@ -399,7 +417,7 @@ def test_similar_document_is_checked_before_create(
         _finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "completed", status.get("error")
-    assert any("비슷한 기존 문서" in prompt for prompt in model.prompts)
+    assert any("look like the one you are about to create" in p for p in model.prompts)
     assert not (root / "docs/retry.md").exists()
     assert "3회" in (root / "docs/payment.md").read_text()
 
@@ -411,7 +429,7 @@ def test_collect_any_file(tmp_path: Path) -> None:
     picture = tmp_path / "회의 사진 (1).PNG"
     data = bytes(range(256)) * 4000
     picture.write_bytes(data)
-    service, runtime = _service(root, tmp_path / "state", Settings())
+    service, runtime = _service(root, tmp_path / "state")
     with runtime:
         key = runtime.issue_key()
         result = service.collect(key, file=str(picture))
@@ -423,14 +441,14 @@ def test_collect_any_file(tmp_path: Path) -> None:
         assert runtime.describe(key)["status"] == "completed"
         other = tmp_path / "other.pdf"
         other.write_bytes(b"%PDF-1.7")
-        with pytest.raises(RequestError, match="다른 내용으로 사용된"):
+        with pytest.raises(RequestError, match="already used for a different request"):
             service.collect(key, file=str(other))
-        with pytest.raises(RequestError, match="절대 경로"):
+        with pytest.raises(RequestError, match="absolute file path"):
             service.collect(runtime.issue_key(), file="other.pdf")
         with pytest.raises(RequestError) as missing:
             service.collect(runtime.issue_key(), file=str(tmp_path / "none.bin"))
         assert missing.value.code == "not_found"
-        with pytest.raises(RequestError, match="하나만"):
+        with pytest.raises(RequestError, match="exactly one of text or file"):
             service.collect(runtime.issue_key(), text="a", file=str(other))
     leftovers = [p.name for p in (root / "inbox").iterdir() if p.name.startswith(".")]
     assert leftovers == []
@@ -454,11 +472,13 @@ def test_collect_file_changed_while_copying(tmp_path: Path) -> None:
 
 
 # Collecting a file into a folder that is not writable is refused.
-def test_collect_file_respects_writable(layout: tuple[Path, Path, Settings]) -> None:
-    root, state, settings = layout
+def test_collect_file_respects_writable(
+    layout: tuple[Path, Path, ClosetPolicy],
+) -> None:
+    root, state, policy = layout
     source = root.parent / "a.txt"
     source.write_text("x")
-    service, runtime = _service(root, state, settings)
+    service, runtime = _service(root, state, policy)
     with runtime, pytest.raises(RequestError) as caught:
         service.collect(runtime.issue_key(), file=str(source))
     assert caught.value.code == "write_denied"
@@ -467,11 +487,13 @@ def test_collect_file_respects_writable(layout: tuple[Path, Path, Settings]) -> 
 # A missing model command fails at once with a clear message, without retries.
 def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
     from hanger.model import CliModel
+    from hanger.providers import ProviderMissingError
 
     monkeypatch.setenv("PATH", "/nonexistent")
-    with pytest.raises(RequestError) as caught:
+    with pytest.raises(ProviderMissingError) as caught:
         CliModel().generate("prompt", lambda: False)
-    assert caught.value.code == "model_missing"
+    assert caught.value.code == "provider_missing"
+    assert not caught.value.retryable
 
 
 # A finished or stopped job keeps one record, not its step history.

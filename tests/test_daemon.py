@@ -12,9 +12,11 @@ from pathlib import Path
 import pytest
 
 from hanger import proxy
+from hanger.closets import register_closet
 from hanger.daemon import DaemonInfo, socket_path
 from hanger.proxy import Launcher, Relay, call_tool
 from hanger.search import SearchIndex
+from hanger.store import StateStore
 
 
 @pytest.fixture
@@ -26,14 +28,13 @@ def env(tmp_path: Path) -> Iterator[tuple[Path, Path, Launcher]]:
     (root / "docs").mkdir(parents=True)
     (root / "docs/a.md").write_text("# 결제\n멱등성 키")
     state = tmp_path / "s"
-    state.mkdir()
-    (state / "config.toml").write_text("[service]\nidle_minutes = 0.05\n")
+    store = StateStore(state)
+    store.set_setting("service.idle_minutes", 0.05)
+    register_closet(store, root)
     command = [
         sys.executable,
         "-m",
         "hanger.cli",
-        "--closet",
-        str(root),
         "--state",
         str(state),
         "--search-url",

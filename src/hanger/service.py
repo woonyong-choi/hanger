@@ -53,7 +53,10 @@ holds their notes and call register_closet with its absolute path. With more
 than one closet, pass closet (an id, or a path inside it) to every call.
 When a call fails with decision_required, show the question and both choices
 to the user, wait for their answer, then call decide. Never answer for them.
-Every request_change or collect needs a fresh key from issue_key."""
+Every request_change or collect needs a fresh key from issue_key.
+Hanger writes its messages, questions and choices in English. Before showing
+any of them to the user, translate them into the language the user writes in
+or has set for you; keep commands, paths and ids as they are."""
 
 
 class Service:
@@ -152,9 +155,9 @@ class Service:
                 f"  decline: {described['choices']['decline']}",
             ]
         lines.append(
-            "Show these choices to the user and call decide with their answer. "
-            "Do not choose for them. In a terminal: hanger decide <id> "
-            "approve|decline"
+            "Show this question and both choices to the user, translated into "
+            "their language, and call decide with their answer. Do not choose "
+            "for them. In a terminal: hanger decide <id> approve|decline"
         )
         raise RequestError("\n".join(lines), code="decision_required")
 
@@ -190,7 +193,7 @@ class Service:
     def register_closet(self, path: str) -> dict[str, Any]:
         """Register a folder of Markdown notes as a closet (absolute path).
 
-        Creates .hangerignore and RULES.md at its root when they are missing.
+        Creates .hangerignore and HANGER.md at its root when they are missing.
         Refuses a folder inside, or containing, a registered closet.
         """
         self.touch()

@@ -1,6 +1,6 @@
-"""Folder rules: RULES.md files that tell Hanger how to keep each part of a closet.
+"""Folder rules: HANGER.md files that tell Hanger how to keep each part of a closet.
 
-A RULES.md applies to its folder and everything below it. Settings at the top
+A HANGER.md applies to its folder and everything below it. Settings at the top
 of the file (between ``---`` lines) follow the nearest file; the written rules
 are all passed on, from the closet root down to the nearest folder.
 """
@@ -12,13 +12,13 @@ __all__ = ["DEFAULT_RULES", "RULES_FILE", "FolderRules", "rules_for"]
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-RULES_FILE = "RULES.md"
+RULES_FILE = "HANGER.md"
 # Total rule text passed to the model per request.
 _MAX_RULE_BYTES = 32 * 1024
 
 DEFAULT_RULES = """\
 ---
-# Settings for this folder and everything below it. A RULES.md in a subfolder
+# Settings for this folder and everything below it. A HANGER.md in a subfolder
 # can set the same key again to change it there.
 write: true
 ---
@@ -26,7 +26,7 @@ write: true
 # How to keep this closet
 
 Hanger reads this file before it adds or changes notes here. Write the rules
-the way you would explain them to a careful assistant. A RULES.md in a subfolder
+the way you would explain them to a careful assistant. A HANGER.md in a subfolder
 adds rules for that folder, and when two files disagree, the one closer to the
 note wins.
 
@@ -47,7 +47,7 @@ note wins.
 
 - New notes go in inbox/ unless the request names another folder.
 - Never delete a note unless the request asks for it.
-- To keep Hanger from changing anything in a folder, put a RULES.md there
+- To keep Hanger from changing anything in a folder, put a HANGER.md there
   with `write: false` in its settings.
 """
 
@@ -83,7 +83,7 @@ def _split(text: str) -> tuple[dict[str, str], str]:
 # vars: d = folder depth, r = rule file bytes
 # basis: estimate
 def rules_for(root: Path, path: str, *, folder: bool = False) -> FolderRules:
-    """Collect the RULES.md files that apply to a closet-relative path."""
+    """Collect the HANGER.md files that apply to a closet-relative path."""
     parts = PurePosixPath(path).parts
     depth = len(parts) if folder else len(parts) - 1
     settings: dict[str, str] = {}

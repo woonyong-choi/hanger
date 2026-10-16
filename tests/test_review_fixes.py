@@ -7,17 +7,20 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import service_for
 
+from hanger.closets import ClosetPolicy
 from hanger.config import Settings
 from hanger.context import shape
 from hanger.documents import Documents
 from hanger.editing import Decision, EditPolicy, materialize
 from hanger.errors import RequestError
+from hanger.ignore import DEFAULT_IGNORE
 from hanger.model import CliModel, Intent, Planner
 from hanger.requests import digest
+from hanger.rules import RULES_FILE
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
-from hanger.service import Service
 from hanger.sync import Synchronizer
 
 
@@ -73,10 +76,15 @@ def closet(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
 
 
 def _runtime(
-    root: Path, state: Path, url: str, model: Model, settings: Settings | None = None
+    root: Path,
+    state: Path,
+    url: str,
+    model: Model,
+    settings: Settings | None = None,
+    policy: ClosetPolicy | None = None,
 ) -> tuple[Runtime, Synchronizer]:
     settings = settings or Settings()
-    sync = Synchronizer(Documents(root), SearchIndex(url, str(root)), settings)
+    sync = Synchronizer(Documents(root), SearchIndex(url, str(root)), settings, policy)
     sync.reconcile()
     return Runtime(root, state, Planner(sync, model), settings=settings), sync
 
@@ -167,7 +175,8 @@ def test_review_rejection_retries_with_feedback(
         assert status["status"] == "failed"
         assert (
             status["message"]
-            == "검토 거절로 3회 다시 작성했으나 실패했습니다: 출처 없는 수치"
+            == "Failed after 3 drafts because the review rejected the draft: "
+            "출처 없는 수치"
         )
         assert status["error_code"] == "review_rejected"
         assert (root / "docs/a.md").read_text() == "# 결제\n재시도 2회"
@@ -262,7 +271,7 @@ def test_reconsider_does_not_claim_previous_results(
     assert status["status"] == "completed"
     assert status["results"] == {}
     assert status["prior_results"]["docs/a.md"] == "result_present"
-    assert status["message"] == "작업을 완료했습니다. 변경한 파일은 없습니다."
+    assert status["message"] == "Done. No file needed a change."
 
 
 # 8: how much to change is the model's judgment; only exactness is enforced.
@@ -308,28 +317,29 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
 
 
 # 5: configured write roots and exclusions are enforced before any model call.
-def test_configured_layout_rules(closet: tuple[Path, Path, str]) -> None:
+def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) -> None:
     root, state, url = closet
     (root / "notes").mkdir()
     (root / "notes/a.md").write_text("# 결제\n재시도 2회")
+    (root / "notes" / RULES_FILE).write_text(
+        "---\nwrite: false  # finished notes\n---\nNotes here are final.\n"
+    )
     (root / "docs/agent").mkdir()
     (root / "docs/agent/b.md").write_text("# 결제\n에이전트")
-    settings = Settings.model_validate(
-        {"closet": {"writable": ["docs", "inbox"], "exclude": ["agent"]}}
-    )
+    policy = ClosetPolicy(root, DEFAULT_IGNORE + "docs/agent/\n")
     model = Model()
     model.decisions = [_edit("notes/a.md", "재시도 2회", "재시도 3회")]
     model.checks = [{"approved": True, "issues": []}]
-    runtime, sync = _runtime(root, state, url, model, settings)
+    runtime, sync = _runtime(root, state, url, model, policy=policy)
     with runtime:
-        with pytest.raises(RequestError, match="관리 범위 밖이거나 제외된"):
+        with pytest.raises(RequestError, match="ignored"):
             runtime.submit_intent(
                 runtime.issue_key(),
                 Intent(
                     kind="edit", instruction="x", query="결제", folders=("docs/agent",)
                 ),
             )
-        with pytest.raises(RequestError, match="관리 범위 밖이거나 제외된"):
+        with pytest.raises(RequestError, match="ignored"):
             sync.search("결제", folders=("docs/agent",))
         found = {d["path"] for d in sync.search("결제")["documents"]}
         assert found == {"notes/a.md"}
@@ -338,12 +348,17 @@ def test_configured_layout_rules(closet: tuple[Path, Path, str]) -> None:
         _finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "failed"
-    assert status["message"] == (
-        "모델 출력 오류로 3회 다시 작성했으나 실패했습니다: "
-        "쓰기 허용 범위 밖의 경로입니다: notes/a.md"
+    assert status["message"].startswith(
+        "Failed after 3 drafts because the model output broke an edit rule: "
+        "This path may not be written"
     )
     assert all(a.get("args", {}).get("choice") is None for a in status["next_actions"])
-    assert "Writable folders: docs, inbox." in model.prompts[0]
+    assert "Notes here are final." in model.prompts[0]
+    assert (
+        "READ-ONLY NOTES (cite them if useful; never change them): notes/a.md"
+        in (model.prompts[0])
+    )
+    assert (root / "notes/a.md").read_text() == "# 결제\n재시도 2회"
 
 
 # 4/R3: context shaping keeps required inputs and stays inside the fill budget.
@@ -365,7 +380,7 @@ def test_shape_respects_budget_and_required_inputs() -> None:
     huge = {
         "x.md": {"path": "x.md", "title": "x", "content": "가" * 20000, "hash": "h"}
     }
-    with pytest.raises(RequestError, match="모델 입력 한도"):
+    with pytest.raises(RequestError, match="model input limit"):
         shape([], huge, settings, [])
 
 
@@ -375,7 +390,7 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:
-        service = Service(runtime, sync)
+        service = service_for(runtime, sync)
         calls = 0
 
         def explode() -> None:
@@ -394,7 +409,9 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
         service._threads["hanger-worker-1"].join(5)
         service._stop.clear()
         service._beats["hanger-worker-1"] = time.monotonic() - 3600
-        assert service.health() == "작업 처리기가 60초 넘게 응답하지 않습니다."
+        assert service.health() == (
+            "A job worker has not responded for more than 60 seconds."
+        )
         dead = threading.Thread(target=lambda: None)
         dead.start()
         dead.join()
@@ -452,7 +469,7 @@ def test_search_waits_for_starting_server_with_progress(
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:
-        service = Service(runtime, sync, _Engine(ready_after=2))  # type: ignore[arg-type]
+        service = service_for(runtime, sync, _Engine(ready_after=2))
         monkeypatch.setattr(service, "search", lambda *args: {"documents": []})
         context = _Context()
         result = asyncio.run(service.search_documents("결제", ctx=context))  # type: ignore[arg-type]
@@ -461,7 +478,5 @@ def test_search_waits_for_starting_server_with_progress(
         assert context.logs[0].startswith("검색 서버 시작 중")
         monkeypatch.setattr(service_module, "SEARCH_WAIT_SECONDS", 2)
         service.engine = _Engine(ready_after=100)  # type: ignore[assignment]
-        with pytest.raises(
-            SearchUnavailableError, match="2초 안에 준비되지 않았습니다"
-        ):
+        with pytest.raises(SearchUnavailableError, match="not ready within 2s"):
             asyncio.run(service.search_documents("결제", ctx=_Context()))  # type: ignore[arg-type]

@@ -6,7 +6,7 @@ steer Hanger:
 * ``.hangerignore`` says which files Hanger leaves alone. Hanger acts on the
   copy it last applied; an edited or deleted file becomes a question for the
   user (a *decision*) and takes effect only once the user approves it.
-* ``RULES.md`` files tell the model how notes are kept, folder by folder.
+* ``HANGER.md`` files tell the model how notes are kept, folder by folder.
 """
 
 from __future__ import annotations

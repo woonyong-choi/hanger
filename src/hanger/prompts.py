@@ -84,7 +84,7 @@ def _closet_rules(state: dict[str, Any]) -> list[str]:
     if not rules:
         return []
     return [
-        "CLOSET RULES: the user's standing rules for this closet, from RULES.md "
+        "CLOSET RULES: the user's standing rules for this closet, from HANGER.md "
         "files listed from the closet root down. When two rules disagree, the "
         "one nearer the note wins; the request itself wins over both.\n"
         + json.dumps(rules, ensure_ascii=False)

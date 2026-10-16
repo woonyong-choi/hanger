@@ -53,15 +53,18 @@ def _ui() -> Progress:
     return Progress(sys.stdout)
 
 
-def _confirm(ui: Progress, question: str, *, yes: bool) -> bool:
-    if yes:
-        return True
-    if not sys.stdin.isatty():
+def _can_confirm(*, yes: bool) -> None:
+    """Fail before changing anything when no one can answer the question."""
+    if not yes and not sys.stdin.isatty():
         raise RequestError(
             "This needs confirmation. Run it in a terminal, or add --yes.",
             code="confirm",
         )
-    return ui.ask(question + " (y/N)").lower() in {"y", "yes"}
+
+
+def _confirm(ui: Progress, question: str, *, yes: bool) -> bool:
+    _can_confirm(yes=yes)
+    return yes or ui.ask(question + " (y/N)").lower() in {"y", "yes"}
 
 
 def _pick(store: StateStore, reference: str | None) -> Closet:
@@ -183,7 +186,7 @@ def closet_command(
     closet = _pick(store, target)
     question = (
         f"Remove closet #{closet.id} {closet.path}? Its search index and job "
-        f"history are deleted; the notes, {IGNORE_FILE} and RULES.md stay"
+        f"history are deleted; the notes, {IGNORE_FILE} and HANGER.md stay"
     )
     if not _confirm(ui, question, yes=yes):
         ui.line("fail", "Closet kept", str(closet.path))
@@ -240,6 +243,7 @@ def ignore_command(
         if check_ignore(store, closet) is not None:
             ui.line("ask", "Unapplied edit", "the file differs: hanger decisions")
         return
+    _can_confirm(yes=yes)
     current = path.read_text(encoding="utf-8") if path.exists() else ""
     lines = current.splitlines()
     if action == "add":

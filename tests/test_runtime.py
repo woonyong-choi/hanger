@@ -7,10 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from hanger.closets import register_closet
+from hanger.config import Settings
 from hanger.documents import Documents
 from hanger.errors import RequestError
+from hanger.hub import ClosetHub
 from hanger.requests import Change, Proposal, digest
 from hanger.runtime import Runtime
+from hanger.store import StateStore
 
 
 @pytest.fixture
@@ -63,7 +67,7 @@ def test_submit_completed_key_survives_restart(paths: tuple[Path, Path]) -> None
     with Runtime(*paths) as runtime:
         assert runtime.submit(key, proposal) == "duplicate"
         changed = Proposal(changes=(Change(path="a.md", after="second"),))
-        with pytest.raises(RequestError, match="다른 내용으로 사용된"):
+        with pytest.raises(RequestError, match="already used for a different request"):
             runtime.submit(key, changed)
 
 
@@ -98,7 +102,7 @@ def test_apply_modified_source_stops_without_overwrite(
         tools = [action["tool"] for action in status["next_actions"]]
         assert "request_change" in tools
         assert "resolve_conflict" not in tools
-        with pytest.raises(RequestError, match="모델 지시가 없는"):
+        with pytest.raises(RequestError, match="without a model instruction"):
             runtime.reconsider(key, runtime.issue_key())
 
 
@@ -128,6 +132,7 @@ import os, sys
 from pathlib import Path
 from hanger.documents import Documents
 from hanger.runtime import Runtime
+from hanger.store import StateStore
 original = Documents.apply
 def crash(self, change):
     original(self, change)
@@ -194,13 +199,12 @@ def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None
         sys.executable,
         "-m",
         "hanger.cli",
-        "--closet",
-        str(paths[0]),
         "--state",
         str(paths[1]),
         "--search-url",
         "http://127.0.0.1:19200",
     ]
+    subprocess.run([*base, "closet", "add", str(paths[0])], check=True, timeout=30)
     key_result = subprocess.run(
         [*base, "key"], capture_output=True, check=True, timeout=30
     )
@@ -226,8 +230,6 @@ def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> Non
             sys.executable,
             "-m",
             "hanger.cli",
-            "--closet",
-            str(paths[0]),
             "--state",
             str(paths[1]),
             "automate",
@@ -311,26 +313,34 @@ def test_run_hundred_documents_completes(paths: tuple[Path, Path]) -> None:
     assert (paths[0] / "docs/99.md").read_text() == "99"
 
 
-# #2: a new closet root starts clean: old jobs never apply to it, and
-# Hanger's unfinished files in the old closet are removed.
-def test_runtime_new_closet_resets_jobs(paths: tuple[Path, Path]) -> None:
-    with Runtime(*paths) as runtime:
+# #2: a removed closet is closed cleanly: its job state is deleted, and
+# Hanger's unfinished files in it are removed or put back.
+def test_removed_closet_is_cleaned_up(paths: tuple[Path, Path]) -> None:
+    store = StateStore(paths[1] / "hub")
+    register_closet(store, paths[0])
+    hub = ClosetHub(store, Settings(), "http://127.0.0.1:9")
+    try:
+        opened = hub.get(None)
+        runtime = opened.runtime
         runtime.submit(
             runtime.issue_key(), Proposal(changes=(Change(path="a.md", after="x"),))
         )
-    leftover = paths[0] / ".hanger-0123.pending"
-    leftover.write_text("partial")
-    (paths[0] / "b.md").write_text("planned delete")
-    interrupted = paths[0] / ".b.md.hanger-deleting"
-    (paths[0] / "b.md").rename(interrupted)
-    other = paths[0].parent / "other-closet"
-    other.mkdir()
-    with Runtime(other, paths[1]) as runtime:
-        assert runtime.run_next() is None
-    assert not (other / "a.md").exists()
-    assert not leftover.exists() and not interrupted.exists()
-    assert (paths[0] / "b.md").read_text() == "planned delete"
-    assert (paths[1] / "closet.path").read_text() == str(other.resolve())
+        leftover = paths[0] / ".hanger-0123.pending"
+        leftover.write_text("partial")
+        (paths[0] / "b.md").write_text("planned delete")
+        interrupted = paths[0] / ".b.md.hanger-deleting"
+        (paths[0] / "b.md").rename(interrupted)
+        state = hub.folder / str(opened.id)
+        assert state.is_dir()
+        store.remove_closet(opened.id)
+        hub.refresh()
+        assert not hub.opened()
+        assert not state.exists()
+        assert not leftover.exists() and not interrupted.exists()
+        assert (paths[0] / "b.md").read_text() == "planned delete"
+        assert not (paths[0] / "a.md").exists()
+    finally:
+        hub.close()
 
 
 # #2: invalid target replacement is terminal, rather than an invisible unacked task.
@@ -370,12 +380,12 @@ def test_submit_expired_or_forged_key_rejected(
     with Runtime(*paths) as runtime:
         key = runtime.issue_key()
         proposal = Proposal(changes=(Change(path="a.md", after="a"),))
-        with pytest.raises(RequestError, match="발급한 키가 아님") as forged:
+        with pytest.raises(RequestError, match="not issued by this Hanger") as forged:
             runtime.submit(key[:-1] + ("0" if key[-1] != "0" else "1"), proposal)
         assert forged.value.code == "invalid_key"
         future = time.time() + 86401
         monkeypatch.setattr("hanger.requests.time.time", lambda: future)
-        with pytest.raises(RequestError, match="유효 기간"):
+        with pytest.raises(RequestError, match="expired"):
             runtime.submit(key, proposal)
         assert runtime.run_next() is None
 

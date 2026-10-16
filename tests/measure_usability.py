@@ -208,7 +208,7 @@ class Scenario:
             server = [
                 row.split(None, 2)[0]
                 for row in rows
-                if f"-m hanger.cli --closet {self.root}" in row
+                if f"-m hanger.cli --state {self.state}" in row
             ]
             if any(
                 row.split(None, 2)[1] in server and "--output-format json" in row
@@ -316,8 +316,6 @@ class Scenario:
             args=[
                 "-m",
                 "hanger.cli",
-                "--closet",
-                str(self.root),
                 "--state",
                 str(self.state),
                 "--search-url",
@@ -337,6 +335,9 @@ class Scenario:
                     self.session = session
                     await session.initialize()
                     if first:
+                        await session.call_tool(
+                            "register_closet", {"path": str(self.root)}
+                        )
                         await self.intake()
                         if live_model:
                             await self.edit()

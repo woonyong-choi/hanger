@@ -108,7 +108,7 @@ def materialize(
         if policy.closet is not None and not policy.closet.writable(edit.path):
             raise RequestError(
                 f"This path may not be written (ignored, or write: false in its "
-                f"RULES.md): {edit.path}",
+                f"HANGER.md): {edit.path}",
                 code="write_denied",
             )
         source = sources.get(edit.path)

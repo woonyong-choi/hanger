@@ -369,7 +369,7 @@ class Runtime:
             if not self.policy.writable(change.path):
                 raise RequestError(
                     "This path may not be written (ignored, a rule file, or "
-                    f"write: false in its RULES.md): {change.path}",
+                    f"write: false in its HANGER.md): {change.path}",
                     code="write_denied",
                 )
             canonical = unicodedata.normalize("NFC", change.path).casefold()

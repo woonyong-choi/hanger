@@ -27,8 +27,6 @@ def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
                 sys.executable,
                 "-m",
                 "hanger.cli",
-                "--closet",
-                str(root),
                 "--state",
                 str(tmp_path / "state"),
                 "--search-url",
@@ -49,8 +47,6 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         args=[
             "-m",
             "hanger.cli",
-            "--closet",
-            str(root),
             "--state",
             str(state),
             "--search-url",
@@ -68,6 +64,11 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         assert {"collect", "search_documents", "request_change", "cancel_job"} <= {
             tool.name for tool in tools.tools
         }
+        empty = await session.call_tool("list_closets", {})
+        assert empty.structuredContent is not None
+        assert "register_closet" in empty.structuredContent["next"]
+        added = await session.call_tool("register_closet", {"path": str(root)})
+        assert not added.isError
         key = await _key(session)
         unused = await session.call_tool("job_status", {"key": key})
         assert unused.structuredContent is not None

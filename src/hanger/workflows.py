@@ -57,7 +57,7 @@ class _State(TypedDict):
     coverage: Any
     previous: dict[str, Any] | None
     feedback: list[str]
-    # RULES.md texts that apply to the closet and the notes in play.
+    # HANGER.md texts that apply to the closet and the notes in play.
     rules: list[dict[str, str]]
     # Given notes the model may read but not change.
     read_only: list[str]

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import service_for
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from hanger.documents import Documents
@@ -20,7 +21,6 @@ from hanger.profiles import Profile
 from hanger.requests import digest
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
-from hanger.service import Service
 from hanger.sync import Synchronizer
 
 
@@ -205,7 +205,7 @@ def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) 
     with closing(
         SearchIndex("http://127.0.0.1:19200", str(runtime.documents.root))
     ) as index:
-        service = Service(runtime, Synchronizer(runtime.documents, index))
+        service = service_for(runtime, Synchronizer(runtime.documents, index))
         status = service.job_status(result["key"])
         assert status["error"] and status["message"]
         choices = [a.get("args", {}).get("choice") for a in status["next_actions"]]

@@ -313,13 +313,18 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
         "docs/../private",
         "docs//api",
         "docs/./api",
-        ".hidden",
         "docs\\api",
     ],
 )
 def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> None:
-    with pytest.raises(RequestError, match="상대 폴더 경로"):
+    with pytest.raises(RequestError, match="relative to the closet root"):
         sync.search("retry", folders=(folder,))
+
+
+# Ignored folders cannot be searched; the default rules ignore hidden ones.
+def test_search_ignored_folder_is_rejected(sync: Synchronizer) -> None:
+    with pytest.raises(RequestError, match="ignored in .hangerignore"):
+        sync.search("retry", folders=(".hidden",))
 
 
 # #9: CLI folder flags are repeatable and errors in other folders stay out of scope.
@@ -331,17 +336,19 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
     (root / "docs/[api]/b.md").write_text("# retry\nkey")
     (root / "private/c.md").write_bytes(b"\xff")
     sync.reconcile()
+    base = [
+        sys.executable,
+        "-m",
+        "hanger.cli",
+        "--state",
+        str(root.parent / "cli-state"),
+        "--search-url",
+        os.environ["HANGER_TEST_SEARCH_URL"],
+    ]
+    subprocess.run([*base, "closet", "add", str(root)], check=True)
     result = subprocess.run(
         [
-            sys.executable,
-            "-m",
-            "hanger.cli",
-            "--closet",
-            str(root),
-            "--state",
-            str(root.parent / "cli-state"),
-            "--search-url",
-            os.environ["HANGER_TEST_SEARCH_URL"],
+            *base,
             "search",
             "retry",
             "--folder",

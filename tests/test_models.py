@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from hanger.config import Settings, dump_settings, load_settings
-from hanger.errors import RequestError
+from hanger.config import Settings, unflatten
 from hanger.model import CliModel
+from hanger.providers import ProviderMissingError
 
 _DECISION = {
     "action": "keep",
@@ -69,13 +69,21 @@ def _calls(log: Path) -> list[dict[str, object]]:
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
 
-def _settings(text: str, tmp_path: Path) -> Settings:
-    path = tmp_path / "config.toml"
-    path.write_text(text, encoding="utf-8")
-    return load_settings(path)
+def _settings(**values: object) -> Settings:
+    return Settings.model_validate(unflatten(values))
 
 
-def test_default_runs_claude_sonnet_without_coding_agent_prompt(fake_cli: Path) -> None:
+def _only(fake_cli: Path, name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leave only one provider CLI on PATH."""
+    folder = fake_cli.parent / f"only-{name}"
+    folder.mkdir()
+    (folder / name).symlink_to(fake_cli.parent / "bin" / name)
+    monkeypatch.setenv("PATH", str(folder))
+
+
+def test_default_prefers_claude_haiku_without_coding_agent_prompt(
+    fake_cli: Path,
+) -> None:
     result = CliModel().generate("판단 요청", lambda: False)
     assert result["decision"]["action"] == "keep"
     assert result["usage"] == {"input_tokens": 7}
@@ -83,19 +91,35 @@ def test_default_runs_claude_sonnet_without_coding_agent_prompt(fake_cli: Path) 
     args = call["args"]
     assert call["cli"] == "claude"
     assert call["prompt"] == "판단 요청"
-    assert args[args.index("--model") + 1] == "sonnet"
+    assert args[args.index("--model") + 1] == "haiku"
     assert "--system-prompt" in args
     assert args[args.index("--tools") + 1] == ""
     assert "--effort" not in args
 
 
-def test_roles_choose_provider_model_and_effort(fake_cli: Path, tmp_path: Path) -> None:
+def test_default_falls_back_to_codex_luna(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only(fake_cli, "codex", monkeypatch)
+    CliModel().generate("초안 요청", lambda: False)
+    (call,) = _calls(fake_cli)
+    assert call["cli"] == "codex"
+    assert call["args"][call["args"].index("--model") + 1] == "gpt-6-luna"
+    assert not any("model_reasoning_effort" in a for a in call["args"])
+
+
+def test_roles_choose_provider_model_and_effort(fake_cli: Path) -> None:
     settings = _settings(
-        '[models.draft]\nprovider = "codex"\nmodel = "gpt-test"\neffort = "low"\n'
-        '[models.review]\nprovider = "claude"\nmodel = "opus"\neffort = "high"\n',
-        tmp_path,
+        **{
+            "models.draft.provider": "codex",
+            "models.draft.name": "gpt-test",
+            "models.draft.effort": "low",
+            "models.review.provider": "claude",
+            "models.review.name": "opus",
+            "models.review.effort": "high",
+        }
     )
-    model = CliModel(settings.models)
+    model = CliModel(settings)
     draft = model.generate("초안 요청", lambda: False)
     model.review("검토 요청", lambda: False)
     assert draft["usage"]["output_tokens"] == 2
@@ -113,38 +137,37 @@ def test_roles_choose_provider_model_and_effort(fake_cli: Path, tmp_path: Path) 
     assert set(schema["required"]) == set(schema["properties"])
 
 
+def test_role_settings_fall_back_to_the_shared_model(fake_cli: Path) -> None:
+    settings = _settings(
+        **{"model.provider": "codex", "model.name": "gpt-x", "models.review.name": "y"}
+    )
+    model = CliModel(settings)
+    assert model.choice("draft").describe() == "Codex (codex), model gpt-x"
+    assert model.choice("review").model == "y"
+    assert model.choice("review").provider == "codex"
+
+
 def test_command_line_model_overrides_every_role(fake_cli: Path) -> None:
-    CliModel(override="haiku").review("검토 요청", lambda: False)
+    CliModel(override="sonnet").review("검토 요청", lambda: False)
     (call,) = _calls(fake_cli)
-    assert call["args"][call["args"].index("--model") + 1] == "haiku"
+    assert call["args"][call["args"].index("--model") + 1] == "sonnet"
 
 
-def test_empty_model_and_effort_use_cli_defaults(
-    fake_cli: Path, tmp_path: Path
+def test_configured_provider_must_be_installed(
+    fake_cli: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    settings = _settings('[models.draft]\nprovider = "codex"\nmodel = ""\n', tmp_path)
-    CliModel(settings.models).generate("초안 요청", lambda: False)
-    (call,) = _calls(fake_cli)
-    assert "--model" not in call["args"]
-    assert not any("model_reasoning_effort" in a for a in call["args"])
+    _only(fake_cli, "claude", monkeypatch)
+    model = CliModel(_settings(**{"model.provider": "codex"}))
+    with pytest.raises(ProviderMissingError) as caught:
+        model.generate("초안 요청", lambda: False)
+    assert caught.value.code == "provider_missing"
+    assert "hanger config set model.provider" in str(caught.value)
 
 
-def test_missing_cli_is_reported(
+def test_no_provider_at_all_is_reported(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("PATH", str(tmp_path))
-    settings = _settings('[models.draft]\nprovider = "codex"\n', tmp_path)
-    with pytest.raises(RequestError) as caught:
-        CliModel(settings.models).generate("초안 요청", lambda: False)
-    assert caught.value.code == "model_missing"
-    assert "codex" in str(caught.value)
-
-
-def test_models_section_round_trips(tmp_path: Path) -> None:
-    settings = _settings(
-        '[models.review]\nprovider = "codex"\neffort = "medium"\n', tmp_path
-    )
-    text = dump_settings(settings)
-    assert "[models.review]" in text
-    assert "[models]\n" not in text
-    assert _settings(text, tmp_path) == settings
+    with pytest.raises(ProviderMissingError) as caught:
+        CliModel().generate("초안 요청", lambda: False)
+    assert "No model provider found" in str(caught.value)
