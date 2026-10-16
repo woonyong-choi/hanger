@@ -40,7 +40,7 @@ If you keep a handful of notes in one folder and editing them yourself is quicke
 ## How it works
 
 1. **Register a closet**: a notes folder Hanger keeps is called a closet. You can register several. A folder inside, or containing, a registered closet is refused as a duplicate. Registering creates a default `.hangerignore` and `HANGER.md` at the root only when they are missing.
-2. **Index**: a background service watches for file changes and keeps the search index current. Files matched by `.hangerignore` (`.gitignore` syntax) and `HANGER.md` files are not indexed. By default hidden files and folders (`.obsidian`, `.git` and so on) are left out.
+2. **Index**: a background service watches for file changes and keeps the search index current. Files matched by `.hangerignore` (`.gitignore` syntax) and `HANGER.md` files are not indexed. The default file holds only syntax notes and no patterns, so at first every Markdown note is indexed.
 3. **Request**: an AI tool searches, or asks to write, edit or organize. Change requests are queued and the service works through them.
 4. **Draft and review**: the model gets the related notes together with the `HANGER.md` rules for their folders and drafts a change; a separate call reviews it. A rejected draft is written again with the reasons.
 5. **Write**: files change only after Hanger confirms the source is unchanged. Folders with `write: false` and ignored files are never changed.

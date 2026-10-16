@@ -18,37 +18,22 @@ _MAX_RULE_BYTES = 32 * 1024
 
 DEFAULT_RULES = """\
 ---
-# Settings for this folder and everything below it. A HANGER.md in a subfolder
-# can set the same key again to change it there.
+# Settings for this folder and everything below it. A HANGER.md in a
+# subfolder can set the same key again to change it there.
+#
+# write: false keeps Hanger from creating, changing or deleting notes here.
 write: true
 ---
 
-# How to keep this closet
+# Rules for this folder
 
-Hanger reads this file before it adds or changes notes here. Write the rules
-the way you would explain them to a careful assistant. A HANGER.md in a
-subfolder adds rules for that folder, and when two files disagree, the one
-closer to the note wins. Hanger never edits these files itself.
+Hanger reads this file before it adds or changes notes in this folder or
+below. Write here how notes in this folder should be kept, the way you would
+explain it to a careful assistant: what belongs here, how notes are named and
+laid out, and what must never change.
 
-## Notes
-
-- One note per topic, with the topic as its first heading.
-- Add to an existing note rather than writing a near copy of it.
-- Keep the writer's own words, opinions and open questions. Don't add facts
-  that no source supports.
-
-## Links
-
-- Link related notes with [[wiki links]].
-- A note made of bullet links is an index, and the notes it lists sit under it.
-- A link inside a sentence only says that two notes are related.
-
-## Changes
-
-- New notes go in inbox/ unless the request names another folder.
-- Never delete a note unless the request asks for it.
-- To keep Hanger from changing anything in a folder, put a HANGER.md there
-  with `write: false` in its settings.
+A HANGER.md in a subfolder adds rules for that folder. When two files
+disagree, the one nearer the note wins. Hanger never edits these files.
 """
 
 

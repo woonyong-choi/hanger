@@ -246,7 +246,7 @@ def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> Non
 
 
 # #2: a forged identity or escaping path must fail before queue admission.
-@pytest.mark.parametrize("path", ["../outside.md", "/outside.md", ".obsidian/a.md"])
+@pytest.mark.parametrize("path", ["../outside.md", "/outside.md", "HANGER.md"])
 def test_submit_invalid_path_rejected(paths: tuple[Path, Path], path: str) -> None:
     with Runtime(*paths) as runtime:
         proposal = Proposal(changes=(Change(path=path, after="invalid"),))
