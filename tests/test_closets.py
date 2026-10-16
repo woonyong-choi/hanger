@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import os
 import shlex
 from pathlib import Path
 
 import pytest
 
 from hanger.cli import _parser, main
-from hanger.closets import ClosetPolicy, check_ignore, register_closet
+from hanger.closets import ClosetPolicy, check_ignore, register_closet, resolve_decision
 from hanger.commands import serve_command
 from hanger.config import Settings
+from hanger.documents import Documents
+from hanger.editing import Decision, materialize
 from hanger.errors import RequestError
 from hanger.hub import ClosetHub
 from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE
 from hanger.rules import DEFAULT_RULES, RULES_FILE
+from hanger.search import SearchIndex
 from hanger.service import Service
 from hanger.store import StateStore
 
@@ -293,8 +297,6 @@ def test_missing_folder_withdraws_its_decision(
 # Rule files are not citable; any spelling of the request becomes "request",
 # whose text can back a change; prompts carry the time for file names.
 def test_request_text_is_a_source_and_rules_are_not(tmp_path: Path) -> None:
-    from hanger.documents import Documents
-    from hanger.editing import Decision, materialize
     from hanger.prompts import draft_prompt
     from hanger.workflows import REQUEST_SOURCE, _tidy_citations
 
@@ -321,3 +323,50 @@ def test_request_text_is_a_source_and_rules_are_not(tmp_path: Path) -> None:
     )
     assert '"now_for_file_names": "' in prompt
     assert "never list a HANGER.md file" not in prompt  # no rules given here
+
+
+# A search server Hanger runs keeps only the indexes of registered closets.
+def test_owned_search_keeps_only_registered_indexes(tmp_path: Path) -> None:
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    if not url:
+        pytest.skip("requires explicit Elasticsearch test endpoint")
+    root = tmp_path / "closet"
+    root.mkdir()
+    old = SearchIndex(url, str(tmp_path / "removed"))
+    store = StateStore(tmp_path / "state")
+    register_closet(store, root)
+    hub = ClosetHub(store, Settings(), url, owns_search=True)
+    current = SearchIndex(url, str(root.resolve()))
+    try:
+        old.ensure()
+        current.ensure()
+        hub.refresh()
+        assert not old.client.indices.exists(index=old.name)
+        assert current.client.indices.exists(index=current.name)
+    finally:
+        hub.close()
+        for index in (old, current):
+            index.delete()
+            index.close()
+
+
+def test_terminal_shows_only_the_user_part() -> None:
+    from hanger.errors import for_terminal, guidance
+
+    assert for_terminal(guidance("Pick a closet.", "Call decide.")) == "Pick a closet."
+    assert for_terminal("Plain message.") == "Plain message."
+
+
+def test_answer_for_removed_closet_is_not_found(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state")
+    root = tmp_path / "notes"
+    root.mkdir()
+    (root / "a.md").write_text("# a")
+    closet = register_closet(store, root)["closet"]
+    (root / ".hangerignore").write_text("drafts/\n")
+    decision = check_ignore(store, store.closets()[0])
+    assert decision is not None
+    store.remove_closet(closet["id"])
+    with pytest.raises(RequestError) as caught:
+        resolve_decision(store, decision, "approve")
+    assert caught.value.code in {"not_found", "decision_withdrawn", "decision_closed"}

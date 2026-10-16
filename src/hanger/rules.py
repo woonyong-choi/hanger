@@ -7,7 +7,7 @@ are all passed on, from the closet root down to the nearest folder.
 
 from __future__ import annotations
 
-__all__ = ["DEFAULT_RULES", "RULES_FILE", "FolderRules", "rules_for"]
+__all__ = ["DEFAULT_RULES", "RULES_FILE", "rules_for"]
 
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath

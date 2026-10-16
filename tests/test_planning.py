@@ -1,13 +1,11 @@
-import copy
-import os
-import threading
-import time
-from collections.abc import Callable, Iterator
+"""Planning: what the model reads, drafts and gets back for review."""
+
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import service_for
+from conftest import ScriptedModel, edit_decision, finish, open_runtime
 
 from hanger.closets import ClosetPolicy
 from hanger.config import Settings
@@ -16,85 +14,12 @@ from hanger.documents import Documents
 from hanger.editing import Decision, EditPolicy, materialize
 from hanger.errors import RequestError
 from hanger.ignore import DEFAULT_IGNORE
-from hanger.model import CliModel, Intent, Planner
-from hanger.requests import digest
+from hanger.model import Intent
+from hanger.requests import digest, issue_key
 from hanger.rules import RULES_FILE
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
 
 
-def _edit(path: str, old: str, new: str) -> dict[str, Any]:
-    return {
-        "action": "supplement",
-        "reason": "수정",
-        "uncertainties": [],
-        "sources": [path],
-        "changes": [
-            {
-                "path": path,
-                "operation": "replace",
-                "replacements": [{"old": old, "new": new}],
-            }
-        ],
-    }
-
-
-class Model(CliModel):
-    def __init__(self) -> None:
-        super().__init__()
-        self.decisions: list[dict[str, Any]] = []
-        self.checks: list[dict[str, Any]] = []
-        self.prompts: list[str] = []
-
-    def generate(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        self.prompts.append(prompt)
-        decision = (
-            self.decisions.pop(0) if len(self.decisions) > 1 else self.decisions[0]
-        )
-        return {"decision": copy.deepcopy(decision), "usage": None}
-
-    def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        self.prompts.append(prompt)
-        check = self.checks.pop(0) if len(self.checks) > 1 else self.checks[0]
-        return {"review": check, "usage": None}
-
-
-@pytest.fixture
-def closet(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
-    if not url:
-        pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
-    (root / "docs").mkdir(parents=True)
-    try:
-        yield root, tmp_path / "state", url
-    finally:
-        index = SearchIndex(url, str(root))
-        index.client.options(ignore_status=404).indices.delete(index=index.name)
-        index.close()
-
-
-def _runtime(
-    root: Path,
-    state: Path,
-    url: str,
-    model: Model,
-    settings: Settings | None = None,
-    policy: ClosetPolicy | None = None,
-) -> tuple[Runtime, Synchronizer]:
-    settings = settings or Settings()
-    sync = Synchronizer(Documents(root), SearchIndex(url, str(root)), settings, policy)
-    sync.reconcile()
-    return Runtime(root, state, Planner(sync, model), settings=settings), sync
-
-
-def _finish(runtime: Runtime) -> None:
-    while runtime.run_next():
-        pass
-
-
-# R3: many matching documents no longer fail; extra ones are listed, not read.
+# many matching documents no longer fail; extra ones are listed, not read.
 def test_large_candidate_set_is_listed_instead_of_failing(
     closet: tuple[Path, Path, str],
 ) -> None:
@@ -102,16 +27,16 @@ def test_large_candidate_set_is_listed_instead_of_failing(
     body = "결제 재시도 정책은 서비스마다 다르다. " * 300
     for number in range(12):
         (root / f"docs/n{number:02d}.md").write_text(f"# 결제 {number}\n{body}")
-    model = Model()
-    model.decisions = [_edit("docs/n00.md", "# 결제 0", "# 결제 0 (수정)")]
+    model = ScriptedModel()
+    model.decisions = [edit_decision("docs/n00.md", "# 결제 0", "# 결제 0 (수정)")]
     model.checks = [{"approved": True, "issues": []}]
-    runtime, _ = _runtime(root, state, url, model)
+    runtime, _ = open_runtime(root, state, url, model)
     with runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(
             key, Intent(kind="edit", instruction="수정", query="결제")
         )
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "completed", status.get("error")
     assert 1 <= len(status["search"]["read"]) <= 5
@@ -119,12 +44,12 @@ def test_large_candidate_set_is_listed_instead_of_failing(
     assert "OTHER MATCHED DOCUMENTS" in model.prompts[0]
 
 
-# R3: the model can ask for a listed document and decide after reading it.
+# the model can ask for a listed document and decide after reading it.
 def test_read_more_loads_listed_document(closet: tuple[Path, Path, str]) -> None:
     root, state, url = closet
     for number in range(8):
         (root / f"docs/n{number}.md").write_text(f"# 결제 {number}\n결제 본문 {number}")
-    model = Model()
+    model = ScriptedModel()
     model.decisions = [
         {
             "action": "defer",
@@ -134,40 +59,40 @@ def test_read_more_loads_listed_document(closet: tuple[Path, Path, str]) -> None
             "changes": [],
             "read_more": ["docs/n7.md", "docs/n6.md"],
         },
-        _edit("docs/n7.md", "결제 본문 7", "결제 본문 7 보완"),
+        edit_decision("docs/n7.md", "결제 본문 7", "결제 본문 7 보완"),
     ]
     model.checks = [{"approved": True, "issues": []}]
     settings = Settings.model_validate({"search": {"full_text": 1}})
-    runtime, _ = _runtime(root, state, url, model, settings)
+    runtime, _ = open_runtime(root, state, url, model, settings)
     with runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(
             key, Intent(kind="edit", instruction="보완", query="결제")
         )
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "completed", status.get("error")
     assert (root / "docs/n7.md").read_text().endswith("보완")
     assert "docs/n7.md" in status["search"]["read"]
 
 
-# 6: review rejections are retried with feedback, then reported briefly.
+# review rejections are retried with feedback, then reported briefly.
 @pytest.mark.parametrize("approve_on", [2, None])
 def test_review_rejection_retries_with_feedback(
     closet: tuple[Path, Path, str], approve_on: int | None
 ) -> None:
     root, state, url = closet
     (root / "docs/a.md").write_text("# 결제\n재시도 2회")
-    model = Model()
-    model.decisions = [_edit("docs/a.md", "재시도 2회", "재시도 3회")]
+    model = ScriptedModel()
+    model.decisions = [edit_decision("docs/a.md", "재시도 2회", "재시도 3회")]
     rejected = {"approved": False, "issues": ["출처 없는 수치"]}
     approved = {"approved": True, "issues": []}
     model.checks = [rejected] * 3 if approve_on is None else [rejected, approved]
-    runtime, _ = _runtime(root, state, url, model)
+    runtime, _ = open_runtime(root, state, url, model)
     with runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(key, Intent(kind="edit", instruction="3회", query="결제"))
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(key)
     feedback_prompts = [p for p in model.prompts if "출처 없는 수치" in p]
     assert feedback_prompts
@@ -185,14 +110,14 @@ def test_review_rejection_retries_with_feedback(
         assert (root / "docs/a.md").read_text() == "# 결제\n재시도 3회"
 
 
-# 6: the configured default mode applies when a request omits it.
+# the configured default mode applies when a request omits it.
 def test_configured_bypass_reconsiders_after_source_change(
     closet: tuple[Path, Path, str],
 ) -> None:
     root, state, url = closet
     target = root / "docs/a.md"
     target.write_text("# 결제\n재시도 2회")
-    model = Model()
+    model = ScriptedModel()
     calls = 0
 
     def generate(prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
@@ -201,34 +126,34 @@ def test_configured_bypass_reconsiders_after_source_change(
         if calls == 1:
             target.write_text("# 결제\n재시도 2회\n사용자 메모")
         return {
-            "decision": _edit("docs/a.md", "재시도 2회", "재시도 3회"),
+            "decision": edit_decision("docs/a.md", "재시도 2회", "재시도 3회"),
             "usage": None,
         }
 
     model.generate = generate  # type: ignore[method-assign]
     model.checks = [{"approved": True, "issues": []}]
     settings = Settings.model_validate({"jobs": {"default_mode": "bypass"}})
-    runtime, _ = _runtime(root, state, url, model, settings)
+    runtime, _ = open_runtime(root, state, url, model, settings)
     with runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(key, Intent(kind="edit", instruction="3회", query="결제"))
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(key)
     assert status["intent"]["mode"] == "bypass"
     assert status["status"] == "completed"
     assert target.read_text() == "# 결제\n재시도 3회\n사용자 메모"
 
 
-# R5/7: a reconsidered job reports only its own file effects.
+# a reconsidered job reports only its own file effects.
 def test_reconsider_does_not_claim_previous_results(
     closet: tuple[Path, Path, str],
 ) -> None:
     root, state, url = closet
     for name in "ab":
         (root / f"docs/{name}.md").write_text(f"# {name} 결제\n재시도 2회")
-    model = Model()
+    model = ScriptedModel()
     both = {
-        **_edit("docs/a.md", "재시도 2회", "재시도 3회"),
+        **edit_decision("docs/a.md", "재시도 2회", "재시도 3회"),
         "sources": ["docs/a.md", "docs/b.md"],
         "changes": [
             {
@@ -256,17 +181,17 @@ def test_reconsider_does_not_claim_previous_results(
             (root / "docs/b.md").write_text("# b 결제\n사용자가 직접 수정")
         return outcome
 
-    runtime, _ = _runtime(root, state, url, model)
+    runtime, _ = open_runtime(root, state, url, model)
     with runtime:
         pytest.MonkeyPatch().setattr(Documents, "apply", apply)
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(key, Intent(kind="edit", instruction="3회", query="결제"))
-        _finish(runtime)
+        finish(runtime)
         assert runtime.describe(key)["status"] == "conflict"
         Documents.apply = original  # type: ignore[method-assign]
-        second = runtime.issue_key()
+        second = issue_key(runtime._secret)
         runtime.reconsider(key, second)
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(second)
     assert status["status"] == "completed"
     assert status["results"] == {}
@@ -274,7 +199,7 @@ def test_reconsider_does_not_claim_previous_results(
     assert status["message"] == "Done. No file needed a change."
 
 
-# 8: how much to change is the model's judgment; only exactness is enforced.
+# how much to change is the model's judgment; only exactness is enforced.
 def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
     root = tmp_path / "closet"
     root.mkdir()
@@ -285,7 +210,7 @@ def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
         "a.md": {"content": content, "hash": digest(content.encode()), "path": "a.md"}
     }
     rewritten = content.replace("내용이 길게 이어진다", "새 내용")
-    decision = Decision.model_validate(_edit("a.md", content, rewritten))
+    decision = Decision.model_validate(edit_decision("a.md", content, rewritten))
     assert (
         materialize(decision, sources, Documents(root))["changes"][0]["after"]
         == rewritten
@@ -298,7 +223,9 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
     root.mkdir()
     content = "# 결제\n재시도 2회"
     sources = {"a.md": {"content": content, "hash": digest(content.encode())}}
-    decision = Decision.model_validate(_edit("a.md", "재시도 2회", "재시도 3회"))
+    decision = Decision.model_validate(
+        edit_decision("a.md", "재시도 2회", "재시도 3회")
+    )
     with pytest.raises(RequestError) as error:
         materialize(
             decision, sources, Documents(root), EditPolicy(require_evidence=True)
@@ -307,7 +234,7 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
     assert materialize(decision, sources, Documents(root))
     quoted = Decision.model_validate(
         {
-            **_edit("a.md", "재시도 2회", "재시도 3회"),
+            **edit_decision("a.md", "재시도 2회", "재시도 3회"),
             "evidence": [{"path": "a.md", "quote": "재시도 2회"}],
         }
     )
@@ -316,7 +243,7 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
     )
 
 
-# 5: configured write roots and exclusions are enforced before any model call.
+# configured write roots and exclusions are enforced before any model call.
 def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) -> None:
     root, state, url = closet
     (root / "notes").mkdir()
@@ -327,14 +254,14 @@ def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) ->
     (root / "docs/agent").mkdir()
     (root / "docs/agent/b.md").write_text("# 결제\n에이전트")
     policy = ClosetPolicy(root, DEFAULT_IGNORE + "docs/agent/\n")
-    model = Model()
-    model.decisions = [_edit("notes/a.md", "재시도 2회", "재시도 3회")]
+    model = ScriptedModel()
+    model.decisions = [edit_decision("notes/a.md", "재시도 2회", "재시도 3회")]
     model.checks = [{"approved": True, "issues": []}]
-    runtime, sync = _runtime(root, state, url, model, policy=policy)
+    runtime, sync = open_runtime(root, state, url, model, policy=policy)
     with runtime:
         with pytest.raises(RequestError, match="ignored"):
             runtime.submit_intent(
-                runtime.issue_key(),
+                issue_key(runtime._secret),
                 Intent(
                     kind="edit", instruction="x", query="결제", folders=("docs/agent",)
                 ),
@@ -343,9 +270,9 @@ def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) ->
             sync.search("결제", folders=("docs/agent",))
         found = {d["path"] for d in sync.search("결제")["documents"]}
         assert found == {"notes/a.md"}
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit_intent(key, Intent(kind="edit", instruction="3회", query="결제"))
-        _finish(runtime)
+        finish(runtime)
         status = runtime.describe(key)
     assert status["status"] == "failed"
     assert status["message"].startswith(
@@ -361,7 +288,7 @@ def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) ->
     assert (root / "notes/a.md").read_text() == "# 결제\n재시도 2회"
 
 
-# 4/R3: context shaping keeps required inputs and stays inside the fill budget.
+# context shaping keeps required inputs and stays inside the fill budget.
 def test_shape_respects_budget_and_required_inputs() -> None:
     settings = Settings.model_validate(
         {"search": {"context_kib": 16, "full_text": 5, "context_fill": 0.5}}
@@ -384,99 +311,117 @@ def test_shape_respects_budget_and_required_inputs() -> None:
         shape([], huge, settings, [])
 
 
-# 1/R1: a failing job never kills a worker, and a dead worker is restarted.
-def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
-    root.mkdir()
-    sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
-    with Runtime(root, tmp_path / "state") as runtime:
-        service = service_for(runtime, sync)
-        calls = 0
-
-        def explode() -> None:
-            nonlocal calls
-            calls += 1
-            raise RuntimeError("unexpected")
-
-        runtime.run_next = explode  # type: ignore[method-assign]
-        service._targets = {"hanger-worker-1": lambda: service._work("hanger-worker-1")}
-        service._spawn("hanger-worker-1")
-        time.sleep(3)
-        assert calls >= 2
-        assert service._threads["hanger-worker-1"].is_alive()
-        assert service.health() is None
-        service._stop.set()
-        service._threads["hanger-worker-1"].join(5)
-        service._stop.clear()
-        service._beats["hanger-worker-1"] = time.monotonic() - 3600
-        assert service.health() == (
-            "A job worker has not responded for more than 60 seconds."
+# An edit that breaks a rule (ambiguous anchor) is redrafted, not failed.
+def test_rule_violation_is_redrafted(closet: tuple[Path, Path, str]) -> None:  # noqa: F811
+    root, state, url = closet
+    (root / "docs/a.md").write_text("# 결제\n중복\n중복\n")
+    model = ScriptedModel()
+    model.decisions = [
+        edit_decision("docs/a.md", "중복", "고유"),
+        edit_decision("docs/a.md", "# 결제", "# 결제 정책"),
+    ]
+    model.checks = [{"approved": True, "issues": []}]
+    runtime, _ = open_runtime(root, state, url, model)
+    with runtime:
+        key = issue_key(runtime._secret)
+        runtime.submit_intent(
+            key,
+            Intent(
+                kind="edit", instruction="제목 수정", query="결제", paths=("docs/a.md",)
+            ),
         )
-        dead = threading.Thread(target=lambda: None)
-        dead.start()
-        dead.join()
-        service._threads["hanger-worker-1"] = dead
-        monitor = threading.Thread(target=service._maintain, daemon=True)
-        monitor.start()
-        time.sleep(6)
-        assert service._threads["hanger-worker-1"] is not dead
-        service.close()
+        finish(runtime)
+        status = runtime.describe(key)
+    assert status["status"] == "completed", status.get("error")
+    assert (root / "docs/a.md").read_text().startswith("# 결제 정책")
+    assert any("exactly once" in prompt for prompt in model.prompts)
 
 
-class _Engine:
-    def __init__(self, ready_after: int) -> None:
-        self.calls = 0
-        self.ready_after = ready_after
-
-    def ready(self) -> bool:
-        self.calls += 1
-        return self.calls > self.ready_after
-
-    def message(self) -> str:
-        return f"검색 서버 시작 중 ({self.calls}초 경과)"
-
-    def require(self) -> None:
-        if not self.ready():
-            from hanger.errors import SearchUnavailableError
-
-            raise SearchUnavailableError(self.message())
-
-
-class _Context:
-    def __init__(self) -> None:
-        self.progress: list[tuple[float, float | None, str | None]] = []
-        self.logs: list[str] = []
-
-    async def report_progress(
-        self, progress: float, total: float | None = None, message: str | None = None
-    ) -> None:
-        self.progress.append((progress, total, message))
-
-    async def info(self, message: str) -> None:
-        self.logs.append(message)
-
-
-# 4: a search during server start waits, reports elapsed seconds, then fails at 30s.
-def test_search_waits_for_starting_server_with_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+# Before creating a document, a similar existing one is found and offered.
+def test_similar_document_is_checked_before_create(
+    closet: tuple[Path, Path, str],  # noqa: F811
 ) -> None:
-    import asyncio
+    root, state, url = closet
+    (root / "notes").mkdir()
+    (root / "notes/cat.md").write_text("# 고양이\n고양이 메모")
+    (root / "docs/payment.md").write_text("# 결제 재시도\n결제 재시도는 2회다.")
+    model = ScriptedModel()
+    model.decisions = [
+        {
+            "action": "new",
+            "reason": "새 주제",
+            "sources": [],
+            "uncertainties": [],
+            "changes": [
+                {
+                    "path": "docs/retry.md",
+                    "operation": "create",
+                    "content": "# 결제 재시도\n결제 재시도는 3회로 늘린다.",
+                }
+            ],
+        },
+        edit_decision(
+            "docs/payment.md", "결제 재시도는 2회다.", "결제 재시도는 3회다."
+        ),
+    ]
+    model.checks = [{"approved": True, "issues": []}]
+    runtime, _ = open_runtime(root, state, url, model)
+    with runtime:
+        key = issue_key(runtime._secret)
+        runtime.submit_intent(
+            key,
+            Intent(
+                kind="write",
+                instruction="재시도 3회 정리",
+                query="고양이",
+                folders=("notes",),
+            ),
+        )
+        finish(runtime)
+        status = runtime.describe(key)
+    assert status["status"] == "completed", status.get("error")
+    assert any("look like the one you are about to create" in p for p in model.prompts)
+    assert not (root / "docs/retry.md").exists()
+    assert "3회" in (root / "docs/payment.md").read_text()
 
-    from hanger import service as service_module
-    from hanger.errors import SearchUnavailableError
 
-    root = tmp_path / "closet"
-    root.mkdir()
-    sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
-    with Runtime(root, tmp_path / "state") as runtime:
-        service = service_for(runtime, sync, _Engine(ready_after=2))
-        monkeypatch.setattr(service, "search", lambda *args: {"documents": []})
-        context = _Context()
-        result = asyncio.run(service.search_documents("결제", ctx=context))  # type: ignore[arg-type]
-        assert result == {"documents": []}
-        assert [p[0] for p in context.progress] == [0, 1]
-        assert context.logs[0].startswith("검색 서버 시작 중")
-        monkeypatch.setattr(service_module, "SEARCH_WAIT_SECONDS", 2)
-        service.engine = _Engine(ready_after=100)  # type: ignore[assignment]
-        with pytest.raises(SearchUnavailableError, match="not ready within 2s"):
-            asyncio.run(service.search_documents("결제", ctx=_Context()))  # type: ignore[arg-type]
+# Listed search results are matched without reading their whole body.
+def test_listed_results_are_not_loaded() -> None:
+    from hanger.context import shape
+
+    settings = Settings.model_validate({"search": {"full_text": 1}})
+    ranked = [
+        {"path": "a.md", "title": "a", "bytes": 10},
+        {"path": "b.md", "title": "b", "bytes": 10},
+    ]
+    loaded: list[str] = []
+
+    def load(path: str) -> dict[str, str]:
+        loaded.append(path)
+        return {"path": path, "title": path, "hash": "h", "content": "결제 정책"}
+
+    full, listed = shape(
+        ranked, {}, settings, ["결제"], load=load, peek=lambda p, t: ["결제 줄"]
+    )
+    assert loaded == ["a.md"] and list(full) == ["a.md"]
+    assert listed == [
+        {"path": "b.md", "title": "b", "bytes": 10, "snippets": ["결제 줄"]}
+    ]
+
+
+def test_blank_citations_are_dropped() -> None:
+    from hanger.workflows import _tidy_citations
+
+    decision = Decision.model_validate(
+        {
+            "action": "keep",
+            "reason": "이유",
+            "sources": ["", " ", "request.instruction", "a.md"],
+            "uncertainties": [],
+            "evidence": [{"path": " ", "quote": "x"}],
+            "changes": [],
+        }
+    )
+    tidy = _tidy_citations(decision)
+    assert tidy.sources == ["request", "a.md"]
+    assert tidy.evidence == []

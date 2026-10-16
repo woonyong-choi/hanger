@@ -1,3 +1,5 @@
+"""Measure the cost of tracing per measured step."""
+
 import json
 import statistics
 import time
@@ -7,7 +9,7 @@ from hanger.trace import Trace
 
 
 def main() -> None:
-    root = Path(__file__).parent / ".runtime/trace-measurement"
+    root = Path(__file__).parent / ".runtime/trace"
     root.mkdir(parents=True, exist_ok=True)
     results: dict[str, object] = {}
     for enabled in (False, True):
