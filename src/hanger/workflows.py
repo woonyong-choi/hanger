@@ -62,6 +62,8 @@ class _State(TypedDict):
     rules: list[dict[str, str]]
     # Given notes the model may read but not change.
     read_only: list[str]
+    # Keyword tree facts of the notes in play, by path.
+    keywords: dict[str, Any]
     applied: list[str]
     signatures: dict[str, str]
     decision: dict[str, Any]
@@ -148,6 +150,7 @@ _EMPTY: dict[str, Any] = {
     "feedback": [],
     "rules": [],
     "read_only": [],
+    "keywords": {},
     "applied": [],
     "signatures": {},
     "decision": {},

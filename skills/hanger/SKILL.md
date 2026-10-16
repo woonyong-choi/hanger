@@ -50,6 +50,10 @@ usually because `.hangerignore` was edited or deleted.
   `read_document` for a listed path you need.
 - If a note the user mentions is missing, search again with
   `fallback_reason: "user_reported_missing"`.
+- Each result carries `keywords`: the note's concept name, its place in the
+  keyword tree and its definition. `keyword_tree` with a note path or name
+  shows the concept's broader, narrower, related and prerequisite concepts;
+  without one it shows the top of each tree and how far building has come.
 
 ## Changing notes
 

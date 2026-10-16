@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/docs/assets/logo.png" alt="Hanger 로고" height="120">
+  <img src="docs/assets/logo.png" alt="Hanger 로고" height="120">
 </p>
 
 <h1 align="center">Hanger</h1>
 
 <p align="center">
   Local Markdown document automation with durable workflows<br>
-  한국어 | <a href="https://github.com/woonyong-choi/hanger/blob/main/README.en.md">English</a><br>
+  한국어 | <a href="README.en.md">English</a><br>
   <a href="#빠른-시작">빠른 시작</a> · <a href="#작동-방식">작동 방식</a> · <a href="#ai-도구에서-쓰기">AI 도구에서 쓰기</a>
 </p>
 
@@ -42,11 +42,19 @@ Markdown 노트가 쌓이면 같은 주제의 노트가 여러 곳에 생기고,
 
 1. **closet 등록**: Hanger가 관리하는 노트 폴더를 closet(옷장)이라고 부릅니다. 여러 개를 등록할 수 있고, 등록된 closet 안이나 바깥을 감싸는 폴더는 중복이라 거절합니다. 등록하면 루트에 `.hangerignore`와 `HANGER.md`가 없을 때만 기본 파일을 만듭니다.
 2. **색인**: 백그라운드 서비스가 파일 변경을 감시해 검색 색인을 최신으로 유지합니다. `.hangerignore`(`.gitignore` 문법)에 맞는 파일과 `HANGER.md`는 색인하지 않습니다. 기본 파일은 패턴 없이 문법 안내만 담고 있어 처음에는 모든 Markdown 노트를 색인합니다.
-3. **요청**: AI 도구가 검색하거나 작성·수정·정리를 요청합니다. 변경 요청은 대기열에 들어가고 서비스가 처리합니다.
-4. **초안과 검토**: 관련 노트와 그 폴더들에 적용되는 `HANGER.md` 규칙을 모델에 함께 주고 수정안을 만든 뒤, 다른 호출로 검토합니다. 검토에서 거절되면 이유를 반영해 다시 씁니다.
-5. **반영**: 원문이 그대로인지 확인한 뒤에만 파일을 바꿉니다. `write: false`인 폴더와 무시된 파일은 바꾸지 않습니다.
+3. **키워드 트리**: 색인과 함께 노트마다 개념 이름·다른 이름·정의·상위·연관·선행 개념을 정리해 closet별 트리를 만듭니다. 아래 "키워드 트리"에서 자세히 설명합니다.
+4. **요청**: AI 도구가 검색하거나 작성·수정·정리를 요청합니다. 변경 요청은 대기열에 들어가고 서비스가 처리합니다.
+5. **초안과 검토**: 관련 노트와 그 폴더들에 적용되는 `HANGER.md` 규칙을 모델에 함께 주고 수정안을 만든 뒤, 다른 호출로 검토합니다. 검토에서 거절되면 이유를 반영해 다시 씁니다.
+6. **반영**: 원문이 그대로인지 확인한 뒤에만 파일을 바꿉니다. `write: false`인 폴더와 무시된 파일은 바꾸지 않습니다.
 
 **규칙 파일 `HANGER.md`**: 폴더마다 둘 수 있고 그 폴더와 하위 폴더에 적용됩니다. 맨 위 `---` 사이의 설정은 가장 가까운 파일의 값이 이기고, 본문 규칙은 루트부터 가까운 폴더 순서로 모두 모델에 전달됩니다. 다른 AI 도구의 규칙 파일(`AGENTS.md`, `CLAUDE.md` 등)과 섞이지 않도록 이름을 따로 씁니다.
+
+| 설정 | 기본값 | 뜻 |
+|---|---|---|
+| `write` | `true` | `false`면 이 폴더의 노트를 만들거나 바꾸거나 지우지 않음 |
+| `tree` | 빈 값(closet 전체가 트리 하나) | 키워드 트리 이름. 이름이 다른 폴더끼리는 개념을 잇지 않음 |
+| `keywords` | `true` | `false`면 이 폴더의 노트를 키워드 트리에 넣지 않음(색인과 검색은 그대로) |
+| `merge` | 빈 값 | `auto`면 같은 중심 질문에 답하는 두 노트를 자동으로 병합 작업에 넣음 |
 
 ```md
 ---
@@ -55,6 +63,17 @@ write: false
 
 이 폴더의 노트는 확정본입니다. 인용만 하고 고치지 마세요.
 ```
+
+**키워드 트리**: 노트 하나가 개념 하나입니다. 상위 개념은 사용자가 쓴 것이 먼저입니다. 머리말의 `parent`(slug, 파일 이름, 링크 모두 가능)와, 목록 줄을 링크로 시작하는 색인 노트(그 노트가 링크한 노트들의 상위)가 그렇습니다. 사용자가 정하지 않은 자리는 모델이 노트와 비슷한 노트 20개를 보고 개념 이름, 다른 이름, 정의, 상위·연관·선행 개념을 제안하고, 프로그램이 검사해 저장합니다.
+
+- 상위 개념은 같은 트리에 있어야 하고 순환을 만들 수 없습니다.
+- 후보에 없는 새 상위 이름은 같은 이름의 노트나 개념에 합쳐지고, 없으면 두 번째 노트가 같은 이름을 제안할 때 개념으로 만들어집니다. 자식이 하나 이하로 줄면 다시 대기로 돌아갑니다.
+- 직계 자식이 15개를 넘는 개념은 모델이 중간 묶음으로 나눕니다.
+- 노트를 지우면 그 자식은 한 단계 위로 올라가고 다시 판단합니다.
+- 같은 중심 질문에 답하는 노트는 결과에 표시하고, 두 폴더 모두 `merge: auto`면 병합 작업을 대기열에 넣습니다. 병합도 다른 변경처럼 검토를 거칩니다.
+- 개념 이름과 다른 이름은 검색에 약하게 더해져, 본문에 없는 다른 이름으로도 노트를 찾습니다. 검색 결과와 초안 작성에는 노트의 트리 위치가 함께 들어갑니다.
+
+트리는 사용자 요청이 없을 때 백그라운드에서 한 노트씩 만듭니다. 진행은 `hanger keywords`나 `list_closets`로 봅니다.
 
 **무시 규칙 변경은 사용자가 승인합니다**: `.hangerignore`의 패턴을 고치거나 파일을 지우면 바로 적용하지 않고 결정(decision)으로 기록합니다. 주석만 바꾼 수정은 색인에 영향이 없어 바로 적용합니다. 결정이 남아 있는 동안 Hanger는 검색과 변경 요청을 모두 거절하고 먼저 답을 요구합니다. closet 폴더가 없거나 비어 있으면(드라이브 연결 해제 등) 그 closet의 결정은 철회하고, 폴더가 돌아오면 다시 묻습니다. 파일 감시와 색인 갱신은 계속 돌아갑니다. 색인에서 빠진 노트는 다시 넣어도 같은 키워드와 링크를 보장할 수 없어서 이렇게 확인합니다. 지운 경우 승인하면 기본 파일을 다시 만들고, 거절하면 이전 파일을 되돌립니다.
 
@@ -68,11 +87,12 @@ MCP 서버로 연결하면 아래 도구를 씁니다. 안내 문구와 질문�
 | `register_closet` | 절대 경로로 closet 등록 |
 | `remove_closet` | 항상 거절하고 사용자가 실행할 터미널 명령을 안내 |
 | `list_decisions`, `decide` | 대기 중인 결정을 보여 주고 사용자의 답을 적용 |
-| `search_documents`, `read_document` | 검색과 읽기 |
+| `search_documents`, `read_document` | 검색과 읽기. 결과마다 키워드 트리 위치 포함 |
+| `keyword_tree` | 트리 꼭대기, 또는 한 개념의 이름·정의·위치·상위·하위·연관·선행 개념 |
 | `issue_key`, `request_change`, `collect` | 작성·수정·정리 요청, 파일이나 글을 그대로 `inbox/`에 보관 |
 | `job_status`, `cancel_job`, `resolve_conflict` | 진행 확인, 취소, 원문 변경으로 멈춘 작업 재검토 |
 
-closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경로를 넘깁니다. AI 도구에 줄 사용 지침은 [skills/hanger/SKILL.md](https://github.com/woonyong-choi/hanger/blob/main/skills/hanger/SKILL.md)에 있습니다.
+closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경로를 넘깁니다. AI 도구에 줄 사용 지침은 [skills/hanger/SKILL.md](skills/hanger/SKILL.md)에 있습니다.
 
 ## 터미널 명령
 
@@ -85,6 +105,7 @@ closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경�
 | `hanger decisions` / `hanger decide <id> approve\|decline` | 대기 중인 결정 확인과 답 |
 | `hanger config list` / `get <키>` / `set <키> <값>` / `unset <키>` | 설정 확인, 변경, 기본값 복원 |
 | `hanger search <질의> [--closet] [--folder]` | 터미널에서 검색 |
+| `hanger keywords [개념] [--closet]` | 키워드 트리 진행 상황과 꼭대기, 또는 한 개념(노트 경로나 이름) |
 | `hanger stop` | 백그라운드 서비스 중지. 다음 요청 때 다시 시작합니다 |
 
 주요 설정:
@@ -94,7 +115,7 @@ closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경�
 | `model.provider` | 자동 | `claude` 또는 `codex`. 비우면 설치된 것 중 Claude Code 우선 |
 | `model.name` | 자동 | 비우면 Claude Code는 `haiku`, Codex는 `gpt-6-luna` |
 | `model.effort` | CLI 기본값 | `low`, `medium`, `high` |
-| `models.draft.*`, `models.review.*` | `model.*` | 초안·검토 역할별로 따로 지정. 빈 값은 `model.*`을 따릅니다 |
+| `models.draft.*`, `models.review.*`, `models.keywords.*` | `model.*` | 초안·검토·키워드 트리 역할별로 따로 지정. 빈 값은 `model.*`을 따릅니다 |
 | `search.candidates` | 20 | 검색 후보 수 |
 | `service.idle_minutes` | 30 | 요청이 없을 때 서비스가 스스로 끝나기까지의 시간 |
 | `elasticsearch.port` | 19200 | 관리하는 검색 엔진의 포트 |
@@ -103,11 +124,7 @@ closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경�
 
 ## 상태
 
-| 있는 것 | 아직 없는 것 |
-|---|---|
-| 여러 closet 관리, 무시 규칙과 승인 흐름, 폴더별 규칙 파일, 검색, 작성·수정·정리 요청과 검토, 구독 CLI(Claude Code, Codex) 실행 | 키워드·개념 트리 기반 검색 |
-
-1.0 전에는 형식과 명령이 예고 없이 바뀔 수 있습니다.
+여러 closet 관리, 무시 규칙과 승인 흐름, 폴더별 규칙 파일, 검색, 키워드 트리, 작성·수정·정리 요청과 검토, 구독 CLI(Claude Code, Codex) 실행을 지원합니다. 1.0 전에는 형식과 명령이 예고 없이 바뀔 수 있습니다.
 
 ## 개발
 

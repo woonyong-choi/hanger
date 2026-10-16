@@ -59,7 +59,16 @@ logger = logging.getLogger(__name__)
 # A shutting-down daemon may hold the state lock briefly.
 _DAEMON_LOCK_SECONDS = 90
 # Note requests answered by the background service when it runs (or must run).
-_CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
+_CLIENT = {
+    "key",
+    "search",
+    "keywords",
+    "status",
+    "cancel",
+    "automate",
+    "collect",
+    "resolve",
+}
 _MANAGEMENT = {"setup", "provider", "closet", "ignore", "decisions", "decide", "config"}
 # What to run next, for refusals whose message speaks to an AI client.
 _TERMINAL_HINTS = {
@@ -163,6 +172,13 @@ def _parser() -> argparse.ArgumentParser:
     search.add_argument(
         "--fallback-reason", choices=("insufficient_evidence", "user_reported_missing")
     )
+    keywords = commands.add_parser(
+        "keywords", help="show the keyword tree, or one concept in it"
+    )
+    keywords.add_argument(
+        "concept", nargs="?", help="note path, concept name or generated id"
+    )
+    _closet_option(keywords)
     automate = commands.add_parser("automate", help="queue a change request")
     automate.add_argument("key")
     automate.add_argument(
@@ -373,6 +389,9 @@ def _client_call(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
             return "issue_key", {}
         case "search":
             return "search_documents", {**_search_arguments(arguments), **closet}
+        case "keywords":
+            values = {"concept": arguments.concept} if arguments.concept else {}
+            return "keyword_tree", {**values, **closet}
         case "status":
             return "job_status", {"key": arguments.key}
         case "cancel":

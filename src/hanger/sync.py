@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from itertools import batched
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
@@ -19,9 +19,13 @@ from hanger.config import Settings
 from hanger.context import snippets
 from hanger.documents import Documents
 from hanger.errors import ConflictError, RequestError, SearchUnavailableError
+from hanger.keywords import note_title
 from hanger.requests import digest
 from hanger.scope import SearchScope
 from hanger.search import SearchIndex
+
+if TYPE_CHECKING:
+    from hanger.keywords import KeywordGraph
 
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 
@@ -44,6 +48,8 @@ class Synchronizer:
         self._retry_paths: set[str] = set()
         # Until one full reconcile finishes, the index may miss files.
         self.reconciled = False
+        # The closet's keyword tree, kept in step with what is indexed.
+        self.keywords: KeywordGraph | None = None
 
     # cost: time O(f+n), heap O(b), stack O(d), io O(f+n/b)
     # vars: f = file count, n = changed bytes, b = batch bytes, d = directory depth
@@ -61,11 +67,13 @@ class Synchronizer:
             self.diagnostics.clear()
             reads = self.read_count
         checked = 0
+        present: list[str] = []
         for paths in batched(self.paths(), 256):
             if is_cancelled():
                 raise InterruptedError("reconciliation interrupted")
             self.sync_paths(list(paths))
             checked += len(paths)
+            present += paths
         for entries in batched(self.index.entries(), 256):
             if is_cancelled():
                 raise InterruptedError("reconciliation interrupted")
@@ -80,6 +88,14 @@ class Synchronizer:
                     if not self._included(path) or not exists:
                         removed.append({"path": path})
                 self.index.write(removed)
+                if self.keywords is not None:
+                    touched: set[str] = set()
+                    for entry in removed:
+                        touched |= self.keywords.forget(entry["path"])
+                    self._reindex(touched)
+        if self.keywords is not None:
+            with self._writer:
+                self._reindex(self.keywords.reconcile(present, self.text))
         with self._writer:
             self.index.refresh()
             self.reconciled = True
@@ -96,9 +112,49 @@ class Synchronizer:
         with self._writer:
             selected = [p for p in paths if self._included(p)]
             # Paths now ignored leave the index.
-            self.index.write({"path": p} for p in paths if not self._included(p))
+            leaving = [p for p in paths if not self._included(p)]
+            self.index.write({"path": p} for p in leaving)
+            touched: set[str] = set()
+            if self.keywords is not None:
+                for path in leaving:
+                    touched |= self.keywords.forget(path)
             previous = self.index.metadata(selected)
-            self.index.write(self._updates(selected, previous, force=force))
+            self.index.write(
+                self._with_keywords(
+                    self._updates(selected, previous, force=force), touched
+                )
+            )
+            self._reindex(touched - set(selected))
+
+    def _with_keywords(
+        self, entries: Iterator[dict[str, Any]], touched: set[str]
+    ) -> Iterator[dict[str, Any]]:
+        """Pass each change to the keyword tree and add the note's names."""
+        for entry in entries:
+            if self.keywords is not None:
+                if "hash" in entry:
+                    touched |= self.keywords.observe(
+                        entry["path"], entry["content"], entry["hash"]
+                    )
+                    entry["names"] = " | ".join(self.keywords.names(entry["path"]))
+                else:
+                    touched |= self.keywords.forget(entry["path"])
+            yield entry
+
+    def _reindex(self, paths: set[str]) -> None:
+        """Index notes again because the names other notes give them changed."""
+        selected = sorted(p for p in paths if self._included(p))
+        for batch in batched(selected, 256):
+            self.sync_paths(list(batch), force=True)
+
+    def reindex(self, paths: set[str]) -> None:
+        with self._writer:
+            self._reindex(paths)
+            self.index.refresh()
+
+    def text(self, path: str) -> tuple[str, str]:
+        entry = self.read(path)
+        return entry["content"], entry["hash"]
 
     def _included(self, path: str) -> bool:
         return path.lower().endswith(".md") and not self.policy.excluded(path)
@@ -245,14 +301,7 @@ class Synchronizer:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise RequestError(f"The note is not UTF-8 text: {path}") from error
-        title = next(
-            (
-                line.lstrip("# ")
-                for line in content.splitlines()
-                if line.startswith("# ")
-            ),
-            target.stem,
-        )
+        title = note_title(content, target.stem)
         return {
             "kind": "document",
             "path": path,

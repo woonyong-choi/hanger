@@ -60,6 +60,7 @@ class _Models(BaseModel):
     # Empty fields here fall back to [model].
     draft: _Model = _Model()
     review: _Model = _Model()
+    keywords: _Model = _Model()
 
 
 class Settings(BaseModel):
@@ -77,7 +78,7 @@ class Settings(BaseModel):
     def context_bytes(self) -> int:
         return self.search.context_kib * 1024
 
-    def role(self, name: Literal["draft", "review"]) -> _Model:
+    def role(self, name: Literal["draft", "review", "keywords"]) -> _Model:
         """Model settings for one role, with empty fields taken from [model]."""
         own = getattr(self.models, name)
         return _Model(

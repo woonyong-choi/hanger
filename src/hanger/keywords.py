@@ -1,0 +1,1319 @@
+"""Keyword tree: each note is a concept with names, a definition and relations.
+
+A note's place comes first from what the user wrote: a ``parent`` in its
+front matter, or a list line in another note that starts with a link to it
+(that note is an index of its children). Where the user wrote nothing, the
+model reads the note with its nearest search matches and proposes a name,
+other names, a definition, broader concepts, related concepts and concepts to
+read first. The program checks and stores the proposal:
+
+* broader concepts must exist, sit in the same tree and not form a cycle;
+* a new broader name joins a note or generated concept of the same name, or
+  waits until a second note proposes it, so one guess never makes a node;
+* a concept left with one child or none goes back to waiting;
+* a concept with too many children is split into narrower groups;
+* two notes that answer the same central question are reported, and merged
+  when the folder's HANGER.md sets ``merge: auto``.
+
+The graph lives in SQLite next to the closet's job store. It is derived from
+the notes and the model's answers, so deleting it only costs re-extraction.
+"""
+
+from __future__ import annotations
+
+__all__ = [
+    "PROMPT_VERSION",
+    "Extraction",
+    "KeywordBuilder",
+    "KeywordGraph",
+    "Split",
+    "norm",
+]
+
+import json
+import logging
+import re
+import sqlite3
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import closing
+from pathlib import Path, PurePosixPath
+from typing import Any, Protocol
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from hanger.closets import ClosetPolicy
+from hanger.errors import HangerError, RequestError
+from hanger.prompts import extract_prompt, split_prompt
+from hanger.rules import rules_for
+
+logger = logging.getLogger(__name__)
+
+# Raise when the extraction prompt or its meaning changes: every note is then
+# extracted again, after the notes that changed.
+PROMPT_VERSION = 1
+# A concept with more direct children than this is split into groups.
+SPLIT_LIMIT = 15
+# Attempts per note before it is reported as failed.
+MAX_ATTEMPTS = 3
+# Search candidates shown to the model.
+CANDIDATES = 20
+# Prefix of generated concepts (those that are not notes).
+NODE = "node:"
+MULTIPLE = "[multiple topics]"
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS notes(
+    path TEXT PRIMARY KEY, hash TEXT NOT NULL, title TEXT NOT NULL,
+    slug TEXT NOT NULL, stem TEXT NOT NULL, tree TEXT NOT NULL,
+    enabled INTEGER NOT NULL, merge INTEGER NOT NULL,
+    extracted TEXT, version INTEGER, name TEXT, aliases TEXT,
+    question TEXT, definition TEXT, differentia TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, failure TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS notes_slug ON notes(slug);
+CREATE INDEX IF NOT EXISTS notes_stem ON notes(stem);
+-- Links the user wrote. kind: parent (front matter), list (list line that
+-- starts with the link: owner is the parent), prose (related).
+CREATE TABLE IF NOT EXISTS links(
+    owner TEXT NOT NULL, raw TEXT NOT NULL, key TEXT NOT NULL, kind TEXT NOT NULL,
+    anchor TEXT NOT NULL, target TEXT, PRIMARY KEY(owner, raw, kind));
+CREATE INDEX IF NOT EXISTS links_target ON links(target);
+CREATE INDEX IF NOT EXISTS links_key ON links(key);
+-- Relations the model proposed. kind: broader, related, requires, same.
+CREATE TABLE IF NOT EXISTS edges(
+    owner TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL,
+    PRIMARY KEY(owner, target, kind));
+CREATE INDEX IF NOT EXISTS edges_target ON edges(target, kind);
+CREATE TABLE IF NOT EXISTS nodes(id TEXT PRIMARY KEY, name TEXT NOT NULL,
+    tree TEXT NOT NULL, definition TEXT NOT NULL DEFAULT '');
+CREATE TABLE IF NOT EXISTS pending(key TEXT NOT NULL, name TEXT NOT NULL,
+    tree TEXT NOT NULL, supporter TEXT NOT NULL, PRIMARY KEY(key, supporter));
+CREATE TABLE IF NOT EXISTS pending_under(key TEXT NOT NULL, under TEXT NOT NULL,
+    supporter TEXT NOT NULL, PRIMARY KEY(key, supporter));
+CREATE TABLE IF NOT EXISTS tombstones(key TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS splits(id TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS merges(pair TEXT PRIMARY KEY);
+"""
+
+
+def norm(text: str) -> str:
+    """Compare names without spacing, punctuation or case."""
+    return re.sub(r"[\s_\-·/()\[\]`'\".,:]+", "", text).casefold()
+
+
+class _Broader(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str = Field(default="", description="Candidate id, or empty")
+    new: str = Field(default="", description="New broader name, or empty")
+    under: str = Field(
+        default="", description="Candidate id the new name sits under, or empty"
+    )
+
+
+class Extraction(BaseModel):
+    """What the model says one note is about."""
+
+    model_config = ConfigDict(extra="forbid")
+    central_question: str = Field(min_length=1)
+    name: str = Field(min_length=1, max_length=200)
+    aliases: list[str] = Field(default_factory=list, max_length=8)
+    definition: str
+    differentia: str
+    broader: list[_Broader] = Field(default_factory=list, max_length=3)
+    same_as: str = Field(default="", description="Candidate id, or empty")
+    related: list[str] = Field(default_factory=list, max_length=6)
+    requires: list[str] = Field(default_factory=list, max_length=4)
+
+    def problems(self) -> list[str]:
+        found = []
+        for item in self.broader:
+            if bool(item.id) == bool(item.new):
+                found.append("each broader item needs exactly one of id or new")
+            if item.under and not item.new:
+                found.append("under goes only with new")
+        if self.central_question.startswith(MULTIPLE) and (
+            self.broader or self.same_as
+        ):
+            found.append("a note with multiple topics leaves broader and same_as empty")
+        return found
+
+
+class _Group(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    definition: str
+    children: list[str]
+
+
+class Split(BaseModel):
+    """Narrower groups for a concept with too many children."""
+
+    model_config = ConfigDict(extra="forbid")
+    groups: list[_Group] = Field(default_factory=list, max_length=20)
+    unassigned: list[str] = Field(default_factory=list)
+
+
+class Asker(Protocol):
+    def ask(
+        self,
+        prompt: str,
+        schema: type[BaseModel],
+        is_cancelled: Callable[[], bool],
+        role: str = ...,
+    ) -> dict[str, Any]: ...
+
+
+# ---------- note text ----------
+
+
+def _front_matter(text: str) -> tuple[dict[str, str], str]:
+    """Top-level ``key: value`` pairs of the front matter, and the body."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, text
+    values: dict[str, str] = {}
+    for index, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return values, "\n".join(lines[index + 1 :])
+        if line[:1].isspace():
+            continue
+        key, colon, value = line.partition(":")
+        if colon and key.strip():
+            values[key.strip()] = value.strip().strip("\"'")
+    return {}, text
+
+
+_WIKI_LINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]*))?\]\]")
+_MD_LINK = re.compile(r"(?<!!)\[([^\]]+)\]\(([^)\s]+)\)")
+_LIST_LINK = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(?:\[\[|\[[^\]]+\]\()")
+_SITE_LINK = re.compile(r"^/(?:wiki|docs)/([^/#?]+)/?(?:[#?].*)?$")
+
+
+def _links(text: str) -> Iterator[tuple[str, str]]:
+    """(target, anchor) for each link to another note."""
+    for match in _WIKI_LINK.finditer(text):
+        yield match.group(1).strip(), (match.group(2) or "").strip()
+    for match in _MD_LINK.finditer(text):
+        target = match.group(2).strip()
+        if re.match(r"^[a-z][a-z0-9+.-]*:", target):
+            continue  # http:, mailto: and the like
+        if target.split("#")[0].endswith(".md") or _SITE_LINK.match(target):
+            yield target, match.group(1).strip()
+
+
+def _link_key(raw: str) -> str:
+    """The name a link refers to: a slug or a file name without .md."""
+    raw = raw.split("#")[0].strip()
+    site = _SITE_LINK.match(raw)
+    if site:
+        return norm(site.group(1))
+    stem = PurePosixPath(raw).name
+    return norm(stem[:-3] if stem.endswith(".md") else stem)
+
+
+def note_title(text: str, fallback: str) -> str:
+    """The front matter title, else the first heading, else the file name."""
+    meta, body = _front_matter(text)
+    heading = re.search(r"^#\s+(.+)$", body, re.M)
+    return meta.get("title") or (heading.group(1).strip() if heading else fallback)
+
+
+def parse_note(text: str, fallback: str) -> dict[str, Any]:
+    """Title, slug and user-written links of a note."""
+    meta, body = _front_matter(text)
+    title = note_title(text, fallback)
+    links: list[tuple[str, str, str]] = []
+    if meta.get("parent"):
+        found = list(_links(meta["parent"]))
+        if found:
+            links += [(raw, "parent", anchor) for raw, anchor in found]
+        else:
+            links.append((meta["parent"], "parent", ""))
+    for line in body.splitlines():
+        kind = "list" if _LIST_LINK.match(line) else "prose"
+        for raw, anchor in _links(line):
+            links.append((raw, kind, anchor))
+            kind = "prose"  # only the link that starts a list line is a child
+    return {"title": title, "slug": meta.get("slug", ""), "links": links}
+
+
+def plain_text(text: str) -> str:
+    """Note body with link syntax reduced to the words a reader sees."""
+    _, body = _front_matter(text)
+    body = re.sub(r"\[\[[^\]|]+\|([^\]]+)\]\]", r"\1", body)
+    body = re.sub(r"\[\[([^\]]+)\]\]", lambda m: m.group(1).split("/")[-1], body)
+    return re.sub(r"(?<!!)\[([^\]]+)\]\([^)]+\)", r"\1", body)
+
+
+# ---------- the graph ----------
+
+
+class KeywordGraph:
+    """Concepts and relations of one closet, kept in step with its notes."""
+
+    def __init__(self, root: Path, database: Path, policy: ClosetPolicy) -> None:
+        self.root = root
+        self.policy = policy
+        self._lock = threading.RLock()
+        database.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(database)) as setup:
+            setup.execute("PRAGMA journal_mode=WAL")
+            setup.executescript(_SCHEMA)
+        self._db = sqlite3.connect(
+            database, check_same_thread=False, isolation_level=None, timeout=30
+        )
+        # Called with (note, same note, concept name) when two notes answer
+        # the same question and both folders allow merging.
+        self.on_same: Callable[[str, str, str], None] | None = None
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+    def _rows(self, query: str, *args: Any) -> list[tuple[Any, ...]]:
+        return self._db.execute(query, args).fetchall()
+
+    def _one(self, query: str, *args: Any) -> tuple[Any, ...] | None:
+        row: tuple[Any, ...] | None = self._db.execute(query, args).fetchone()
+        return row
+
+    def _transaction(self) -> Any:
+        return _Transaction(self._db, self._lock)
+
+    # ---------- keeping in step with the notes ----------
+
+    def _folder_rules(self, path: str) -> tuple[str, bool, bool]:
+        settings = rules_for(self.root, path).settings
+        enabled = settings.get("keywords", "true").lower() not in {"false", "no", "0"}
+        return settings.get("tree", ""), enabled, settings.get("merge", "") == "auto"
+
+    # cost: time O(l+k), heap O(n), stack O(1), io O(d)
+    # vars: n = note bytes, l = links in the note, k = links naming it, d = depth
+    # basis: estimate
+    def observe(self, path: str, text: str, digest: str) -> set[str]:
+        """Record a note's text. Returns notes whose link names changed."""
+        with self._transaction():
+            row = self._one("SELECT hash FROM notes WHERE path=?", path)
+            if row and row[0] == digest:
+                return set()
+            parsed = parse_note(text, PurePosixPath(path).stem)
+            tree, enabled, merge = self._folder_rules(path)
+            old_tree = self._one("SELECT tree FROM notes WHERE path=?", path)
+            if row:
+                self._db.execute(
+                    "UPDATE notes SET hash=?, title=?, slug=?, stem=?, tree=?, "
+                    "enabled=?, merge=?, attempts=0, failure='' WHERE path=?",
+                    (
+                        digest,
+                        parsed["title"],
+                        norm(parsed["slug"]),
+                        norm(PurePosixPath(path).stem),
+                        tree,
+                        int(enabled),
+                        int(merge),
+                        path,
+                    ),
+                )
+            else:
+                self._db.execute(
+                    "INSERT INTO notes(path, hash, title, slug, stem, tree, enabled, "
+                    "merge) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        path,
+                        digest,
+                        parsed["title"],
+                        norm(parsed["slug"]),
+                        norm(PurePosixPath(path).stem),
+                        tree,
+                        int(enabled),
+                        int(merge),
+                    ),
+                )
+            touched = {
+                t for (t,) in self._rows("SELECT target FROM links WHERE owner=?", path)
+            }
+            self._db.execute("DELETE FROM links WHERE owner=?", (path,))
+            for raw, kind, anchor in parsed["links"]:
+                self._db.execute(
+                    "INSERT OR REPLACE INTO links VALUES(?,?,?,?,?,?)",
+                    (path, raw, _link_key(raw), kind, anchor, self._resolve(raw, path)),
+                )
+            touched |= {
+                t for (t,) in self._rows("SELECT target FROM links WHERE owner=?", path)
+            }
+            if not row:
+                # Links that name this note by file name or slug may now resolve.
+                touched |= self._relink(
+                    {norm(PurePosixPath(path).stem), norm(parsed["slug"])}
+                )
+            if old_tree and old_tree[0] != tree:
+                self._leave_tree(path)
+        return {t for t in touched if t and t != path}
+
+    def _leave_tree(self, path: str) -> None:
+        """A note moved to another tree: its model relations no longer hold."""
+        for (owner,) in self._rows(
+            "SELECT owner FROM edges WHERE target=? AND owner!=?", path, path
+        ):
+            self._recheck(owner)
+        self._db.execute("DELETE FROM edges WHERE owner=? OR target=?", (path, path))
+        self._db.execute("DELETE FROM pending WHERE supporter=?", (path,))
+        self._db.execute("DELETE FROM pending_under WHERE supporter=?", (path,))
+        self._recheck(path)
+        self._demote_small_nodes()
+
+    def _recheck(self, path: str) -> None:
+        self._db.execute(
+            "UPDATE notes SET extracted=NULL, attempts=0, failure='' WHERE path=?",
+            (path,),
+        )
+
+    # cost: time O(k+c), heap O(c), stack O(1), io O(1)
+    # vars: k = links naming the note, c = children
+    # basis: estimate
+    def forget(self, path: str) -> set[str]:
+        """A note is gone: its children move up a level and are checked again."""
+        with self._transaction():
+            row = self._one("SELECT tree FROM notes WHERE path=?", path)
+            if not row:
+                return set()
+            parents = [
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM edges WHERE owner=? AND kind='broader'", path
+                )
+            ]
+            children = [
+                o
+                for (o,) in self._rows(
+                    "SELECT owner FROM edges WHERE target=? AND kind='broader'", path
+                )
+            ]
+            name = self.display_name(path)
+            for child in children:
+                self._db.execute(
+                    "DELETE FROM edges WHERE owner=? AND target=? AND kind='broader'",
+                    (child, path),
+                )
+                for parent in parents:
+                    if parent != child and not self._reaches(parent, child):
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                            (child, parent),
+                        )
+                self._recheck(child)
+            if children:
+                # Its name is not made again as a generated concept.
+                self._db.execute(
+                    "INSERT OR IGNORE INTO tombstones VALUES(?)",
+                    (f"{row[0]}::{norm(name)}",),
+                )
+            for (owner,) in self._rows(
+                "SELECT owner FROM edges WHERE target=? AND kind='same'", path
+            ):
+                self._recheck(owner)
+            touched = {
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM links WHERE owner=? AND target IS NOT NULL",
+                    path,
+                )
+            }
+            self._db.execute("DELETE FROM notes WHERE path=?", (path,))
+            self._db.execute("DELETE FROM links WHERE owner=?", (path,))
+            self._db.execute("UPDATE links SET target=NULL WHERE target=?", (path,))
+            self._db.execute(
+                "DELETE FROM edges WHERE owner=? OR target=?", (path, path)
+            )
+            self._db.execute("DELETE FROM pending WHERE supporter=?", (path,))
+            self._db.execute(
+                "DELETE FROM pending_under WHERE supporter=? OR under=?", (path, path)
+            )
+            self._db.execute("DELETE FROM splits WHERE id=?", (path,))
+            touched |= self._relink({norm(PurePosixPath(path).stem)})
+            self._demote_small_nodes()
+        return {t for t in touched if t and t != path}
+
+    # cost: time O(g+f), heap O(g), stack O(1), io O(f*d)
+    # vars: g = notes in the graph, f = notes on disk, d = folder depth
+    # basis: estimate
+    def reconcile(
+        self, paths: Iterable[str], read: Callable[[str], tuple[str, str]]
+    ) -> set[str]:
+        """Bring the graph in line with the notes on disk.
+
+        ``read`` returns a note's text and hash. Notes the graph lacks are
+        read; notes it has are re-read only when their folder rules moved
+        them to another tree or turned keywords on or off.
+        """
+        present = set(paths)
+        touched: set[str] = set()
+        with self._lock:
+            known = {
+                p: (tree, bool(enabled), bool(merge))
+                for p, tree, enabled, merge in self._rows(
+                    "SELECT path, tree, enabled, merge FROM notes"
+                )
+            }
+        for path in sorted(set(known) - present):
+            touched |= self.forget(path)
+        for path in sorted(present):
+            if path not in known:
+                try:
+                    text, digest = read(path)
+                except (OSError, HangerError) as error:
+                    logger.info("keywords: cannot read %s: %s", path, error)
+                    continue
+                touched |= self.observe(path, text, digest)
+                continue
+            rules = self._folder_rules(path)
+            if rules != known[path]:
+                with self._transaction():
+                    self._db.execute(
+                        "UPDATE notes SET tree=?, enabled=?, merge=? WHERE path=?",
+                        (rules[0], int(rules[1]), int(rules[2]), path),
+                    )
+                    if rules[0] != known[path][0]:
+                        self._leave_tree(path)
+        return touched - {""}
+
+    # ---------- links ----------
+
+    def _resolve(self, raw: str, owner: str) -> str | None:
+        """The note a user-written link names, when there is exactly one."""
+        raw = raw.split("#")[0].strip()
+        if not raw:
+            return None
+        site = _SITE_LINK.match(raw)
+        if site:
+            return self._unique("slug", norm(site.group(1)))
+        candidate = raw.lstrip("/")
+        if not candidate.endswith(".md"):
+            candidate += ".md"
+        base = PurePosixPath(owner).parent
+        for option in (candidate, (base / candidate).as_posix()):
+            normal = _normalize(option)
+            if normal and self._one("SELECT 1 FROM notes WHERE path=?", normal):
+                return normal
+        if "/" in raw.strip("/"):
+            return None  # a path that names no note does not fall back to a name
+        key = _link_key(raw)
+        return self._unique("slug", key) or self._unique("stem", key)
+
+    def _unique(self, column: str, key: str) -> str | None:
+        if not key:
+            return None
+        rows = self._rows(f"SELECT path FROM notes WHERE {column}=? LIMIT 2", key)  # noqa: S608
+        return str(rows[0][0]) if len(rows) == 1 else None
+
+    def _relink(self, keys: set[str]) -> set[str]:
+        """Resolve again the links that name one of these keys."""
+        changed: set[str] = set()
+        for key in keys - {""}:
+            for owner, raw, kind, target in self._rows(
+                "SELECT owner, raw, kind, target FROM links WHERE key=?", key
+            ):
+                resolved = self._resolve(raw, owner)
+                if resolved != target:
+                    self._db.execute(
+                        "UPDATE links SET target=? WHERE owner=? AND raw=? AND kind=?",
+                        (resolved, owner, raw, kind),
+                    )
+                    changed |= {t for t in (target, resolved) if t}
+        return changed
+
+    # ---------- names and places ----------
+
+    def names(self, path: str) -> list[str]:
+        """Every name a note is known by: title, link texts, model names."""
+        with self._lock:
+            found: list[str] = []
+            row = self._one("SELECT title, name, aliases FROM notes WHERE path=?", path)
+            if not row:
+                return []
+            found.append(row[0])
+            found += [
+                a
+                for (a,) in self._rows(
+                    "SELECT DISTINCT anchor FROM links WHERE target=? AND anchor!=''",
+                    path,
+                )
+            ]
+            if row[1]:
+                found.append(row[1])
+                found += json.loads(row[2] or "[]")
+            seen: set[str] = set()
+            unique = []
+            for name in found:
+                if norm(name) and norm(name) not in seen:
+                    seen.add(norm(name))
+                    unique.append(name)
+            return unique
+
+    def display_name(self, node: str) -> str:
+        with self._lock:
+            if node.startswith(NODE):
+                row = self._one("SELECT name FROM nodes WHERE id=?", node)
+                return str(row[0]) if row else node[len(NODE) :]
+            row = self._one("SELECT title FROM notes WHERE path=?", node)
+            return str(row[0]) if row and row[0] else PurePosixPath(node).stem
+
+    def _tree_of(self, node: str) -> str | None:
+        row = self._one(
+            "SELECT tree FROM nodes WHERE id=?"
+            if node.startswith(NODE)
+            else "SELECT tree FROM notes WHERE path=?",
+            node,
+        )
+        return None if row is None else str(row[0])
+
+    def parents(self, node: str) -> tuple[list[str], str]:
+        """Broader concepts and who set them: user links win over the model."""
+        with self._lock:
+            if not node.startswith(NODE):
+                tree = self._tree_of(node)
+                human = [
+                    t
+                    for (t,) in self._rows(
+                        "SELECT target FROM links WHERE owner=? AND kind='parent' "
+                        "AND target IS NOT NULL",
+                        node,
+                    )
+                ]
+                human += [
+                    o
+                    for (o,) in self._rows(
+                        "SELECT owner FROM links WHERE target=? AND kind='list'", node
+                    )
+                ]
+                human = [h for h in dict.fromkeys(human) if self._tree_of(h) == tree]
+                if human:
+                    return sorted(human), "user"
+            model = [
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM edges WHERE owner=? AND kind='broader' "
+                    "ORDER BY target",
+                    node,
+                )
+            ]
+            return model, ("model" if model else "")
+
+    def children(self, node: str) -> list[str]:
+        with self._lock:
+            found = {
+                o
+                for (o,) in self._rows(
+                    "SELECT owner FROM links WHERE target=? AND kind='parent'", node
+                )
+            }
+            found |= {
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM links WHERE owner=? AND kind='list' "
+                    "AND target IS NOT NULL",
+                    node,
+                )
+            }
+            found |= {
+                o
+                for (o,) in self._rows(
+                    "SELECT owner FROM edges WHERE target=? AND kind='broader'", node
+                )
+            }
+            return sorted(c for c in found if c != node and node in self.parents(c)[0])
+
+    def position(self, node: str, depth: int = 8) -> list[str]:
+        """Names from the root down to the concept just above this one."""
+        with self._lock:
+            chain: list[str] = []
+            seen = {node}
+            current = node
+            while depth:
+                parents = self.parents(current)[0]
+                if not parents or parents[0] in seen:
+                    break
+                current = parents[0]
+                seen.add(current)
+                chain.append(self.display_name(current))
+                depth -= 1
+            return list(reversed(chain))
+
+    def _reaches(self, start: str, goal: str) -> bool:
+        """Whether goal is start or above it."""
+        stack, seen = [start], {start}
+        while stack:
+            current = stack.pop()
+            if current == goal:
+                return True
+            for parent in self.parents(current)[0]:
+                if parent not in seen:
+                    seen.add(parent)
+                    stack.append(parent)
+        return False
+
+    # ---------- the queue ----------
+
+    def next_note(self) -> str | None:
+        """The next note to extract: changed notes before version updates."""
+        with self._lock:
+            row = self._one(
+                "SELECT path FROM notes WHERE enabled=1 AND attempts<? AND "
+                "(extracted IS NULL OR extracted!=hash OR version!=?) "
+                "ORDER BY version IS NOT NULL AND extracted=hash, attempts, path "
+                "LIMIT 1",
+                MAX_ATTEMPTS,
+                PROMPT_VERSION,
+            )
+            return None if row is None else str(row[0])
+
+    def next_split(self) -> str | None:
+        with self._lock:
+            row = self._one("SELECT id FROM splits ORDER BY id LIMIT 1")
+            return None if row is None else str(row[0])
+
+    def failed(self, path: str, reason: str) -> None:
+        with self._transaction():
+            self._db.execute(
+                "UPDATE notes SET attempts=attempts+1, failure=? WHERE path=?",
+                (reason, path),
+            )
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            (total,) = self._one("SELECT COUNT(*) FROM notes WHERE enabled=1") or (0,)
+            (done,) = self._one(
+                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND extracted=hash "
+                "AND version=?",
+                PROMPT_VERSION,
+            ) or (0,)
+            failures = [
+                {"path": p, "reason": r}
+                for p, r in self._rows(
+                    "SELECT path, failure FROM notes WHERE enabled=1 AND attempts>=? "
+                    "ORDER BY path LIMIT 20",
+                    MAX_ATTEMPTS,
+                )
+            ]
+            (nodes,) = self._one("SELECT COUNT(*) FROM nodes") or (0,)
+            (waiting,) = self._one("SELECT COUNT(DISTINCT key) FROM pending") or (0,)
+            return {
+                "notes": total,
+                "extracted": done,
+                "queued": total - done - len(failures),
+                "failed": failures,
+                "generated_concepts": nodes,
+                "waiting_names": waiting,
+            }
+
+    def busy(self) -> bool:
+        return self.next_note() is not None or self.next_split() is not None
+
+    # ---------- the model's input ----------
+
+    def note(self, path: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._one(
+                "SELECT hash, tree, name, definition, differentia, question, merge "
+                "FROM notes WHERE path=?",
+                path,
+            )
+            if row is None:
+                return None
+            return {
+                "hash": row[0],
+                "tree": row[1],
+                "name": row[2] or "",
+                "definition": row[3] or "",
+                "differentia": row[4] or "",
+                "question": row[5] or "",
+                "merge": bool(row[6]),
+            }
+
+    def candidates(
+        self, path: str, hits: Iterable[str], query: str
+    ) -> list[dict[str, Any]]:
+        """Search matches in the same tree, plus generated and waiting concepts."""
+        with self._lock:
+            tree = self._tree_of(path)
+            found: list[dict[str, Any]] = []
+            for hit in hits:
+                if hit == path or self._tree_of(hit) != tree:
+                    continue
+                info = self.note(hit) or {}
+                found.append(
+                    {
+                        "id": hit,
+                        "name": self.display_name(hit),
+                        "other_names": self.names(hit)[1:5],
+                        "position": " > ".join(self.position(hit, 4)),
+                        "children": len(self.children(hit)),
+                        "definition": info.get("definition", "")[:160],
+                    }
+                )
+                if len(found) >= CANDIDATES:
+                    break
+            words = set(re.findall(r"\w{2,}", query.casefold()))
+            for node, name, definition in self._rows(
+                "SELECT id, name, definition FROM nodes WHERE tree=?", tree
+            ):
+                if words & set(re.findall(r"\w{2,}", name.casefold())):
+                    found.append(
+                        {
+                            "id": node,
+                            "name": name,
+                            "other_names": [],
+                            "position": " > ".join(self.position(node, 4)),
+                            "children": len(self.children(node)),
+                            "definition": definition[:160],
+                        }
+                    )
+            waiting = [
+                {"waiting_name": name, "supporters": count}
+                for name, count in self._rows(
+                    "SELECT name, COUNT(*) FROM pending WHERE tree=? GROUP BY key",
+                    tree,
+                )
+                if words & set(re.findall(r"\w{2,}", name.casefold()))
+            ]
+            return found + waiting
+
+    # ---------- the model's answer ----------
+
+    # cost: time O(c*h), heap O(c), stack O(1), io O(1)
+    # vars: c = relations in the answer, h = tree height
+    # basis: estimate
+    def apply(
+        self, path: str, expected: str, answer: Extraction, ids: dict[str, str]
+    ) -> dict[str, Any]:
+        """Store an extraction. ``ids`` maps the short ids in the prompt."""
+        report: dict[str, Any] = {"created": [], "ignored": [], "same_as": None}
+        with self._transaction():
+            row = self._one("SELECT hash, tree, name FROM notes WHERE path=?", path)
+            if row is None or row[0] != expected:
+                return {"stale": True}
+            tree, old_name = row[1], row[2]
+            self._db.execute(
+                "UPDATE notes SET extracted=hash, version=?, name=?, aliases=?, "
+                "question=?, definition=?, differentia=?, attempts=0, failure='' "
+                "WHERE path=?",
+                (
+                    PROMPT_VERSION,
+                    answer.name.strip(),
+                    json.dumps(
+                        [a.strip() for a in answer.aliases if a.strip()],
+                        ensure_ascii=False,
+                    ),
+                    answer.central_question,
+                    answer.definition,
+                    answer.differentia,
+                    path,
+                ),
+            )
+            if (
+                old_name
+                and norm(old_name) != norm(answer.name)
+                and norm(old_name) not in {norm(a) for a in answer.aliases}
+            ):
+                # Notes placed under the old name are checked against the new.
+                for (owner,) in self._rows(
+                    "SELECT owner FROM edges WHERE target=? AND kind!='same'", path
+                ):
+                    self._recheck(owner)
+            self._db.execute("DELETE FROM edges WHERE owner=?", (path,))
+            self._db.execute("DELETE FROM pending WHERE supporter=?", (path,))
+            self._db.execute("DELETE FROM pending_under WHERE supporter=?", (path,))
+
+            def target(short: str) -> str | None:
+                node = ids.get(short.strip(), "")
+                if not node or node == path or self._tree_of(node) != tree:
+                    report["ignored"].append(short)
+                    return None
+                return node
+
+            multiple = answer.central_question.startswith(MULTIPLE)
+            for item in [] if multiple else answer.broader:
+                if item.id:
+                    node = target(item.id)
+                    if node and not self._reaches(node, path):
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                            (path, node),
+                        )
+                    elif node:
+                        report["ignored"].append(item.id)
+                elif item.new.strip():
+                    under = target(item.under) if item.under else None
+                    self._propose(path, tree, item.new.strip(), under, report)
+            broader = {
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM edges WHERE owner=? AND kind='broader'", path
+                )
+            }
+            requires = {t for t in map(target, answer.requires) if t}
+            for node in requires - broader:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO edges VALUES(?,?,'requires')", (path, node)
+                )
+            for node in {t for t in map(target, answer.related) if t}:
+                if node not in broader | requires:
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO edges VALUES(?,?,'related')",
+                        (path, node),
+                    )
+            if answer.same_as and not multiple:
+                same = target(answer.same_as)
+                if same and not same.startswith(NODE):
+                    report["same_as"] = self._same(path, same, answer.name)
+            for node in broader:
+                if len(self.children(node)) > SPLIT_LIMIT:
+                    self._db.execute("INSERT OR IGNORE INTO splits VALUES(?)", (node,))
+            self._demote_small_nodes()
+        return report
+
+    def _same(self, path: str, other: str, name: str) -> str:
+        """Two notes answer the same question: record it, and merge if allowed."""
+        info = self.note(other)
+        if not info or not info["definition"]:
+            # The other note was not extracted yet; look again after it is.
+            self._recheck(path)
+            return "waiting"
+        self._db.execute(
+            "INSERT OR IGNORE INTO edges VALUES(?,?,'same')", (path, other)
+        )
+        pair = "\n".join(sorted((path, other)))
+        mine = self.note(path)
+        allowed = (
+            bool(mine and mine["merge"] and info["merge"])
+            and self.policy.writable(path)
+            and self.policy.writable(other)
+        )
+        if not allowed:
+            return "reported"
+        if self._one("SELECT 1 FROM merges WHERE pair=?", pair):
+            return "merge_queued"
+        self._db.execute("INSERT INTO merges VALUES(?)", (pair,))
+        if self.on_same is not None:
+            self.on_same(path, other, name)
+        return "merge_queued"
+
+    def _propose(
+        self, path: str, tree: str, name: str, under: str | None, report: dict[str, Any]
+    ) -> None:
+        """A broader name that is not a candidate: join it or let it wait."""
+        key = f"{tree}::{norm(name)}"
+        if not norm(name) or self._one("SELECT 1 FROM tombstones WHERE key=?", key):
+            report["ignored"].append(name)
+            return
+        existing = [
+            node
+            for (node,) in self._rows("SELECT id FROM nodes WHERE tree=?", tree)
+            if norm(self.display_name(node)) == norm(name)
+        ] + [
+            p
+            for (p,) in self._rows("SELECT path FROM notes WHERE tree=?", tree)
+            if p != path and norm(name) in {norm(n) for n in self.names(p)[:2]}
+        ]
+        if existing:
+            if not self._reaches(existing[0], path):
+                self._db.execute(
+                    "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                    (path, existing[0]),
+                )
+            return
+        node = NODE + key
+        if under and not self._reaches(under, path):
+            self._db.execute(
+                "INSERT OR REPLACE INTO pending_under VALUES(?,?,?)", (key, under, path)
+            )
+        self._db.execute(
+            "INSERT OR IGNORE INTO pending VALUES(?,?,?,?)", (key, name, tree, path)
+        )
+        supporters = [
+            s for (s,) in self._rows("SELECT supporter FROM pending WHERE key=?", key)
+        ]
+        if len(supporters) < 2:
+            return
+        self._db.execute(
+            "INSERT OR IGNORE INTO nodes(id, name, tree) VALUES(?,?,?)",
+            (node, name, tree),
+        )
+        for supporter in supporters:
+            if not self._reaches(node, supporter):
+                self._db.execute(
+                    "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                    (supporter, node),
+                )
+        self._db.execute("DELETE FROM pending WHERE key=?", (key,))
+        # The concept sits under the broader candidate two supporters named.
+        for (parent,) in self._rows(
+            "SELECT under FROM pending_under WHERE key=? GROUP BY under "
+            "HAVING COUNT(*)>=2 ORDER BY MIN(rowid) LIMIT 1",
+            key,
+        ):
+            if not self._reaches(parent, node):
+                self._db.execute(
+                    "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')", (node, parent)
+                )
+        self._db.execute("DELETE FROM pending_under WHERE key=?", (key,))
+        report["created"].append(name)
+
+    def _demote_small_nodes(self) -> None:
+        """A generated concept with one child or none goes back to waiting."""
+        for node, name, tree in self._rows("SELECT id, name, tree FROM nodes"):
+            kids = [
+                o
+                for (o,) in self._rows(
+                    "SELECT owner FROM edges WHERE target=? AND kind='broader'", node
+                )
+            ]
+            if len(kids) > 1:
+                continue
+            self._db.execute("DELETE FROM nodes WHERE id=?", (node,))
+            self._db.execute(
+                "DELETE FROM edges WHERE owner=? OR target=?", (node, node)
+            )
+            self._db.execute("DELETE FROM splits WHERE id=?", (node,))
+            for kid in kids:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO pending VALUES(?,?,?,?)",
+                    (node[len(NODE) :], name, tree, kid),
+                )
+
+    # ---------- splitting large concepts ----------
+
+    def split_input(self, node: str) -> list[dict[str, str]]:
+        """Children the model placed here, without their bodies."""
+        with self._lock:
+            found = []
+            for child in self.children(node):
+                if self.parents(child)[1] != "model":
+                    continue
+                info = self.note(child) or {}
+                found.append(
+                    {
+                        "id": child,
+                        "name": self.display_name(child),
+                        "definition": info.get("definition", ""),
+                        "differentia": info.get("differentia", ""),
+                    }
+                )
+            return found
+
+    def apply_split(self, node: str, answer: Split, ids: dict[str, str]) -> list[str]:
+        """Put children under the narrower groups the model proposed."""
+        created: list[str] = []
+        with self._transaction():
+            self._db.execute("DELETE FROM splits WHERE id=?", (node,))
+            tree = self._tree_of(node)
+            if tree is None:
+                return created
+            used: set[str] = set()
+            for group in answer.groups:
+                members = [
+                    ids[c]
+                    for c in dict.fromkeys(group.children)
+                    if c in ids and ids[c] not in used
+                ]
+                key = f"{tree}::{norm(group.name)}"
+                if len(members) < 2 or not norm(group.name):
+                    continue
+                if self._one("SELECT 1 FROM tombstones WHERE key=?", key):
+                    continue
+                group_id = NODE + key
+                if group_id == node or self._reaches(node, group_id):
+                    continue
+                self._db.execute(
+                    "INSERT OR IGNORE INTO nodes VALUES(?,?,?,?)",
+                    (group_id, group.name, tree, group.definition),
+                )
+                self._db.execute(
+                    "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                    (group_id, node),
+                )
+                for member in members:
+                    self._db.execute(
+                        "DELETE FROM edges WHERE owner=? AND target=? "
+                        "AND kind='broader'",
+                        (member, node),
+                    )
+                    self._db.execute(
+                        "INSERT OR IGNORE INTO edges VALUES(?,?,'broader')",
+                        (member, group_id),
+                    )
+                    used.add(member)
+                created.append(group.name)
+            self._demote_small_nodes()
+        return created
+
+    # ---------- reading the tree ----------
+
+    def describe(self, node: str) -> dict[str, Any] | None:
+        """A concept with its names, place and relations."""
+        with self._lock:
+            if node.startswith(NODE):
+                row = self._one("SELECT name, definition FROM nodes WHERE id=?", node)
+                if row is None:
+                    return None
+                info: dict[str, Any] = {
+                    "id": node,
+                    "name": row[0],
+                    "kind": "generated",
+                    "definition": row[1],
+                }
+            else:
+                note = self.note(node)
+                if note is None:
+                    return None
+                info = {
+                    "id": node,
+                    "name": self.display_name(node),
+                    "kind": "note",
+                    "other_names": self.names(node)[1:],
+                    "definition": note["definition"],
+                    "central_question": note["question"],
+                }
+            parents, source = self.parents(node)
+
+            def named(nodes: Iterable[str]) -> list[dict[str, str]]:
+                return [{"id": n, "name": self.display_name(n)} for n in nodes]
+
+            def related(kind: str) -> list[dict[str, str]]:
+                return named(
+                    t
+                    for (t,) in self._rows(
+                        "SELECT target FROM edges WHERE owner=? AND kind=? "
+                        "ORDER BY target",
+                        node,
+                        kind,
+                    )
+                )
+
+            info.update(
+                {
+                    "position": self.position(node),
+                    "broader": named(parents),
+                    "broader_set_by": source,
+                    "narrower": named(self.children(node)),
+                    "related": related("related"),
+                    "requires": related("requires"),
+                    "same_question": related("same"),
+                }
+            )
+            return info
+
+    def roots(self) -> list[dict[str, Any]]:
+        """Top concepts of each tree with their child counts."""
+        with self._lock:
+            found = []
+            for tree in [t for (t,) in self._rows("SELECT DISTINCT tree FROM notes")]:
+                top = [
+                    n
+                    for (n,) in self._rows(
+                        "SELECT path FROM notes WHERE tree=? AND enabled=1", tree
+                    )
+                ] + [
+                    n for (n,) in self._rows("SELECT id FROM nodes WHERE tree=?", tree)
+                ]
+                tops = [n for n in top if not self.parents(n)[0]]
+                ranked = sorted(
+                    ((len(self.children(n)), n) for n in tops),
+                    key=lambda x: (-x[0], x[1]),
+                )
+                found.append(
+                    {
+                        "tree": tree,
+                        "top": [
+                            {"id": n, "name": self.display_name(n), "narrower": count}
+                            for count, n in ranked
+                            if count
+                        ],
+                        "unplaced": sum(1 for count, _ in ranked if not count),
+                    }
+                )
+            return found
+
+    def find(self, text: str) -> str | None:
+        """A concept by path, generated id or name."""
+        with self._lock:
+            if self._tree_of(text) is not None:
+                return text
+            key = norm(text)
+            for (node,) in self._rows("SELECT id FROM nodes"):
+                if norm(self.display_name(node)) == key:
+                    return str(node)
+            for (path,) in self._rows("SELECT path FROM notes ORDER BY path"):
+                if key in {norm(n) for n in self.names(path)}:
+                    return str(path)
+            return None
+
+    def summary(self, path: str) -> dict[str, Any] | None:
+        """Short tree facts for a search result or a draft."""
+        with self._lock:
+            note = self.note(path)
+            if note is None:
+                return None
+            return {
+                "name": note["name"] or self.display_name(path),
+                "position": " > ".join(self.position(path)),
+                "definition": note["definition"],
+            }
+
+
+class _Transaction:
+    def __init__(self, db: sqlite3.Connection, lock: threading.RLock) -> None:
+        self._db = db
+        self._lock = lock
+        self._outer = False
+
+    def __enter__(self) -> None:
+        self._lock.acquire()
+        self._outer = not self._db.in_transaction
+        if self._outer:
+            self._db.execute("BEGIN IMMEDIATE")
+
+    def __exit__(self, kind: object, *_: object) -> None:
+        try:
+            if self._outer:
+                self._db.execute("ROLLBACK" if kind else "COMMIT")
+        finally:
+            self._lock.release()
+
+
+def _normalize(path: str) -> str | None:
+    parts: list[str] = []
+    for part in PurePosixPath(path).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts) or None
+
+
+# ---------- running the model ----------
+
+
+class KeywordBuilder:
+    """Feeds queued notes and oversized concepts to the model, one at a time."""
+
+    def __init__(
+        self,
+        graph: KeywordGraph,
+        model: Asker,
+        read: Callable[[str], tuple[str, str]],
+        search: Callable[[str, int], list[str]],
+        reindex: Callable[[set[str]], None],
+    ) -> None:
+        self.graph = graph
+        self.model = model
+        self.read = read
+        self.search = search
+        self.reindex = reindex
+
+    # cost: time O(t+n), heap O(n), stack O(1), io O(1), tokens O(n)
+    # vars: t = model latency, n = note and candidate bytes
+    # basis: estimate
+    def step(self, is_cancelled: Callable[[], bool]) -> bool:
+        """Do one piece of work. Returns False when nothing is queued."""
+        path = self.graph.next_note()
+        if path is not None:
+            self._extract(path, is_cancelled)
+            return True
+        node = self.graph.next_split()
+        if node is not None:
+            self._split(node, is_cancelled)
+            return True
+        return False
+
+    def _extract(self, path: str, is_cancelled: Callable[[], bool]) -> None:
+        try:
+            text, digest = self.read(path)
+        except FileNotFoundError:
+            self.reindex(self.graph.forget(path))
+            return
+        except (OSError, HangerError) as error:
+            self.graph.failed(path, f"cannot read the note: {error}")
+            return
+        note = self.graph.note(path)
+        if note is None:
+            return
+        if note["hash"] != digest:
+            self.reindex(self.graph.observe(path, text, digest) | {path})
+            note = self.graph.note(path)
+            if note is None:
+                return
+        body = plain_text(text)
+        title = self.graph.display_name(path)
+        query = f"{title} {body[:400]}"
+        candidates = self.graph.candidates(
+            path, self.search(query, CANDIDATES + 1), query
+        )
+        ids: dict[str, str] = {}
+        for number, candidate in enumerate(c for c in candidates if "id" in c):
+            short = f"c{number + 1}"
+            ids[short] = candidate["id"]
+            candidate["id"] = short
+        prompt = extract_prompt(
+            path=path,
+            title=title,
+            body=body[:6000],
+            rules=self.graph.policy.rules([path]),
+            candidates=candidates,
+        )
+        try:
+            answer = Extraction.model_validate(
+                self.model.ask(prompt, Extraction, is_cancelled, "keywords")
+            )
+        except (ValidationError, HangerError) as error:
+            if is_cancelled():
+                return
+            self.graph.failed(path, _reason(error))
+            return
+        problems = answer.problems()
+        if problems:
+            self.graph.failed(path, "; ".join(problems))
+            return
+        report = self.graph.apply(path, note["hash"], answer, ids)
+        if not report.get("stale"):
+            self.reindex({path})
+            logger.info(
+                "keywords: %s -> %s (new concepts: %s)",
+                path,
+                answer.name,
+                ", ".join(report["created"]) or "none",
+            )
+
+    def _split(self, node: str, is_cancelled: Callable[[], bool]) -> None:
+        children = self.graph.split_input(node)
+        ids = {f"c{n + 1}": child["id"] for n, child in enumerate(children)}
+        for short, child in zip(ids, children, strict=True):
+            child["id"] = short
+        prompt = split_prompt(
+            name=self.graph.display_name(node),
+            definition=(self.graph.describe(node) or {}).get("definition", ""),
+            children=children,
+        )
+        try:
+            answer = Split.model_validate(
+                self.model.ask(prompt, Split, is_cancelled, "keywords")
+            )
+        except (ValidationError, HangerError) as error:
+            if is_cancelled():
+                return
+            logger.info("keywords: could not split %s: %s", node, _reason(error))
+            self.graph.apply_split(node, Split(), {})
+            return
+        self.graph.apply_split(node, answer, ids)
+
+
+def _reason(error: Exception) -> str:
+    if isinstance(error, ValidationError):
+        return "the model answer did not match the format"
+    if isinstance(error, RequestError | HangerError):
+        return str(error)
+    return type(error).__name__
