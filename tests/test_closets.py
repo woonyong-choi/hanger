@@ -213,7 +213,7 @@ def test_pending_decision_blocks_requests(tmp_path: Path) -> None:
         with pytest.raises(RequestError) as caught:
             call()
         assert caught.value.code == "decision_required"
-        assert "translated into their language" in str(caught.value)
+        assert str(caught.value).startswith("Tell the user: Hanger is waiting")
     (pending,) = service.list_decisions()["decisions"]
     service.decide(pending["id"], "approve")
     assert service.read_document("notes/a.md")["path"] == "notes/a.md"

@@ -26,7 +26,7 @@ from elasticsearch import ApiError, Elasticsearch
 from hanger.closets import ClosetPolicy, check_ignore, closet_present
 from hanger.config import Settings
 from hanger.documents import Documents
-from hanger.errors import HangerError, RequestError
+from hanger.errors import HangerError, RequestError, guidance
 from hanger.model import CliModel, Planner
 from hanger.requests import load_secret
 from hanger.runtime import Runtime
@@ -263,17 +263,26 @@ class ClosetHub:
         closets = self.store.closets()
         if not closets:
             raise RequestError(
-                "No closet is registered yet. Ask the user which folder holds "
-                "their notes, then call register_closet with its absolute path "
-                "(terminal: hanger closet add <folder>).",
+                guidance(
+                    "No closet is set up yet. A closet is a folder of Markdown "
+                    "notes that Hanger keeps. Which folder should be the closet? "
+                    "Send its absolute path.",
+                    "Call register_closet with the path the user gives. Never "
+                    "guess a folder.",
+                ),
                 code="closet_required",
             )
+        listed = ", ".join(f"#{c.id} {c.path}" for c in closets)
         if reference is None:
             if len(closets) > 1:
-                listed = ", ".join(f"#{c.id} {c.path}" for c in closets)
                 raise RequestError(
-                    "More than one closet is registered; pass closet as an id or "
-                    f"a path inside one: {listed}",
+                    guidance(
+                        f"There are {len(closets)} closets: {listed}. Which "
+                        "closet should Hanger use?",
+                        "If your working folder is inside one of them, pass it "
+                        "as closet without asking. Otherwise ask, then pass the "
+                        "closet's id.",
+                    ),
                     code="closet_ambiguous",
                 )
             closet = closets[0]
@@ -281,25 +290,28 @@ class ClosetHub:
             found = self.store.closet(reference)
             if found is None:
                 raise RequestError(
-                    f"No registered closet matches {reference}. Registered: "
-                    + ", ".join(f"#{c.id} {c.path}" for c in closets),
+                    guidance(
+                        f"No closet matches {reference}. The closets are: {listed}.",
+                        "Ask which closet to use, or register the folder with "
+                        "register_closet if the user wants it as a new closet.",
+                    ),
                     code="closet_unknown",
                 )
             closet = found
         with self._lock:
             opened = self._open.get(closet.id)
             if opened is None:
-                reason = self._broken.get(closet.id, "it is not open yet")
-                hint = (
-                    ""
-                    if closet_present(closet.path)
-                    else " If the folder moved, remove the closet (hanger closet "
-                    f"remove {closet.id}) and add the new location."
+                reason = self._broken.get(closet.id, "it is still opening")
+                tell = (
+                    f"Closet #{closet.id} ({closet.path}) is not available: {reason}."
                 )
-                raise RequestError(
-                    f"Closet {closet.path} is not available: {reason}.{hint}",
-                    code="closet_unavailable",
-                )
+                if not closet_present(closet.path):
+                    tell += (
+                        " If the folder moved, remove the closet in a terminal "
+                        f"with `hanger closet remove {closet.id}` and add the "
+                        "new location with `hanger closet add <folder>`."
+                    )
+                raise RequestError(guidance(tell), code="closet_unavailable")
             return opened
 
     def holding(self, key: str) -> OpenCloset | None:

@@ -1,5 +1,6 @@
 __all__ = [
     "ConflictError",
+    "guidance",
     "HangerError",
     "ModelError",
     "RequestError",
@@ -56,3 +57,12 @@ class ModelError(HangerError):
 
     code = "model_error"
     retryable = True
+
+
+def guidance(tell: str, then: str = "") -> str:
+    """A message for an AI client: what to tell the user, then what to do.
+
+    The client relays the "Tell the user" part as it is, translated, so the
+    user hears the same words from every client.
+    """
+    return f"Tell the user: {tell}" + (f"\nThen: {then}" if then else "")
