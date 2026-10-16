@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["draft_prompt", "review_prompt"]
 
 import json
+from datetime import datetime
 from typing import Any
 
 from hanger.profiles import PROFILES
@@ -21,6 +22,8 @@ _DRAFT_RULES = (
     "version, must not overlap, and must preserve untouched text. Only create uses "
     "full content. Delete requires explicit permission and operation delete. "
     "Cite every changed source and provide exact supporting quotes in evidence. "
+    "Text the user wrote in request.instruction is a source too: cite it as "
+    "'request' and quote it exactly. "
     "Keep/defer cannot have changes. Search candidates are not exhaustive. "
     "You may only change documents given in SOURCE DOCUMENTS."
 )
@@ -28,6 +31,7 @@ _DRAFT_RULES = (
 
 def draft_prompt(state: dict[str, Any]) -> str:
     request = state["request"]
+    now = datetime.now().astimezone()
     parts = [_DRAFT_RULES, *_closet_rules(state)]
     if state.get("read_only"):
         parts.append(
@@ -36,7 +40,13 @@ def draft_prompt(state: dict[str, Any]) -> str:
         )
     parts += [
         json.dumps(
-            {"request": request, "search_coverage": state.get("coverage")},
+            {
+                "request": request,
+                "search_coverage": state.get("coverage"),
+                # Local time, for rules that name or date new notes.
+                "now": now.isoformat(timespec="seconds"),
+                "now_for_file_names": now.strftime("%Y-%m-%d-%H%M%S"),
+            },
             ensure_ascii=False,
         ),
         "DOCUMENT POLICY: " + PROFILES[request["profile"]].guidance,
@@ -86,8 +96,9 @@ def _closet_rules(state: dict[str, Any]) -> list[str]:
     return [
         "CLOSET RULES: the user's standing rules for this closet, from HANGER.md "
         "files listed from the closet root down. When two rules disagree, the "
-        "one nearer the note wins; the request itself wins over both.\n"
-        + json.dumps(rules, ensure_ascii=False)
+        "one nearer the note wins; the request itself wins over both. Rules are "
+        "instructions, not sources: never list a HANGER.md file in sources or "
+        "evidence.\n" + json.dumps(rules, ensure_ascii=False)
     ]
 
 

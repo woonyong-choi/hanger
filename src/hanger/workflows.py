@@ -19,7 +19,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -42,6 +42,7 @@ from hanger.errors import (
 from hanger.profiles import PROFILES, ProfilePolicy
 from hanger.prompts import draft_prompt, review_prompt
 from hanger.requests import Change, Proposal
+from hanger.rules import RULES_FILE
 from hanger.sync import Synchronizer
 from hanger.trace import Trace
 
@@ -75,6 +76,8 @@ class _State(TypedDict):
 
 
 _INBOX = "inbox"
+# Source name for the text of the request itself.
+REQUEST_SOURCE = "request"
 _TITLE_CHARS = 40
 _HASH_CHARS = 8
 # Characters that are unsafe or awkward in file names on macOS and Windows.
@@ -361,13 +364,18 @@ class _Workflow:
     # basis: estimate
     def assemble(self, state: _State, policy: ProfilePolicy) -> dict[str, Any]:
         self.guard(state)
-        decision = Decision.model_validate(state["decision"])
+        decision = _tidy_citations(Decision.model_validate(state["decision"]))
         if decision.read_more and not decision.changes and decision.action != "defer":
             decision = decision.model_copy(update={"action": "defer"})
         request = state["request"]
+        # The user's own words in the request are a source the model may quote.
+        given = {
+            **state["documents"],
+            REQUEST_SOURCE: {"content": request["instruction"], "hash": ""},
+        }
         proposal = materialize(
             decision,
-            state["documents"],
+            given,
             self.synchronizer.documents,
             EditPolicy(
                 closet=self.synchronizer.policy,
@@ -469,6 +477,28 @@ class _Workflow:
             "review": result.model_dump(),
             "usage": {**state["usage"], "review": response.get("usage")},
         }
+
+
+def _tidy_citations(decision: Decision) -> Decision:
+    """Normalize how the model names its sources.
+
+    Rule files are instructions rather than notes, so their citations are
+    dropped; any spelling of the request (such as ``request.instruction``)
+    becomes the one request source.
+    """
+
+    def name(path: str) -> str | None:
+        if PurePosixPath(path).name == RULES_FILE:
+            return None
+        return REQUEST_SOURCE if path.split()[0].startswith("request") else path
+
+    sources = list(dict.fromkeys(n for p in decision.sources if (n := name(p))))
+    evidence = [
+        item.model_copy(update={"path": n})
+        for item in decision.evidence
+        if (n := name(item.path))
+    ]
+    return decision.model_copy(update={"sources": sources, "evidence": evidence})
 
 
 def _created(proposal: dict[str, Any]) -> dict[str, str]:

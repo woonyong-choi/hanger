@@ -288,3 +288,36 @@ def test_missing_folder_withdraws_its_decision(
         service.read_document("notes/a.md")
     assert waiting.value.code == "decision_required"
     hub.close()
+
+
+# Rule files are not citable; any spelling of the request becomes "request",
+# whose text can back a change; prompts carry the time for file names.
+def test_request_text_is_a_source_and_rules_are_not(tmp_path: Path) -> None:
+    from hanger.documents import Documents
+    from hanger.editing import Decision, materialize
+    from hanger.prompts import draft_prompt
+    from hanger.workflows import REQUEST_SOURCE, _tidy_citations
+
+    decision = _tidy_citations(
+        Decision.model_validate(
+            {
+                "action": "new",
+                "reason": "memo",
+                "sources": ["request.instruction", "HANGER.md", "docs/HANGER.md"],
+                "uncertainties": [],
+                "evidence": [{"path": "request.instruction", "quote": "keep-alive"}],
+                "changes": [
+                    {"path": "a.md", "operation": "create", "content": "# keep-alive"}
+                ],
+            }
+        )
+    )
+    assert decision.sources == [REQUEST_SOURCE]
+    given = {REQUEST_SOURCE: {"content": "memo about keep-alive", "hash": ""}}
+    proposal = materialize(decision, given, Documents(tmp_path))
+    assert proposal["changes"][0]["path"] == "a.md"
+    prompt = draft_prompt(
+        {"request": {"profile": "note", "instruction": "x"}, "documents": {}}
+    )
+    assert '"now_for_file_names": "' in prompt
+    assert "never list a HANGER.md file" not in prompt  # no rules given here
