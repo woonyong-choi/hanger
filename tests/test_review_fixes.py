@@ -13,7 +13,7 @@ from markchain.context import shape
 from markchain.documents import Documents
 from markchain.editing import Decision, EditPolicy, materialize
 from markchain.errors import RequestError
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.requests import digest
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
@@ -37,7 +37,7 @@ def _edit(path: str, old: str, new: str) -> dict[str, Any]:
     }
 
 
-class Model(ClaudeModel):
+class Model(CliModel):
     def __init__(self) -> None:
         super().__init__()
         self.decisions: list[dict[str, Any]] = []

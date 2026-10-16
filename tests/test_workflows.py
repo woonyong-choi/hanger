@@ -15,7 +15,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from markchain.documents import Documents
 from markchain.errors import RequestError
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.profiles import Profile
 from markchain.requests import digest
 from markchain.runtime import Runtime
@@ -24,7 +24,7 @@ from markchain.service import Service
 from markchain.sync import Synchronizer
 
 
-class Model(ClaudeModel):
+class Model(CliModel):
     def __init__(self) -> None:
         super().__init__()
         self.prompts: list[str] = []
@@ -329,12 +329,12 @@ def test_killed_workflow_resumes_saved_draft(
 import os, sys
 from pathlib import Path
 from markchain.documents import Documents
-from markchain.model import ClaudeModel, Planner
+from markchain.model import CliModel, Planner
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
 from markchain.sync import Synchronizer
 root, state = Path(sys.argv[1]), Path(sys.argv[2])
-class Model(ClaudeModel):
+class Model(CliModel):
     def generate(self, prompt, cancelled):
         with (state / "calls").open("a") as stream:
             stream.write("draft\\n")

@@ -46,7 +46,7 @@ from markchain.sync import Synchronizer
 from markchain.trace import Trace
 
 if TYPE_CHECKING:
-    from markchain.model import ClaudeModel
+    from markchain.model import CliModel
 
 
 class _State(TypedDict):
@@ -234,7 +234,7 @@ def _profile_graph(policy: ProfilePolicy, workflow: _Workflow) -> Any:
 # basis: estimate
 def run_workflow(
     context: dict[str, Any],
-    model: ClaudeModel,
+    model: CliModel,
     synchronizer: Synchronizer,
     trace: Trace,
     is_cancelled: Callable[[], bool],
@@ -269,7 +269,7 @@ def run_workflow(
 class _Workflow:
     def __init__(
         self,
-        model: ClaudeModel,
+        model: CliModel,
         synchronizer: Synchronizer,
         trace: Trace,
         is_cancelled: Callable[[], bool],
