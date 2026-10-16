@@ -314,10 +314,3 @@ class StateStore:
             self._bump(connection)
         return stored
 
-    def import_settings(self, values: dict[str, Any]) -> None:
-        """Store settings from an older settings file, skipping invalid ones."""
-        for key, value in flatten(values).items():
-            try:
-                self.set_setting(key, value)
-            except RequestError:
-                continue

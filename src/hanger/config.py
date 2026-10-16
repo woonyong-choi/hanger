@@ -6,10 +6,8 @@ Keys are dotted section names such as ``search.candidates`` or
 
 from __future__ import annotations
 
-__all__ = ["Settings", "flatten", "read_legacy_config", "unflatten"]
+__all__ = ["Settings", "flatten", "unflatten"]
 
-import tomllib
-from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -111,23 +109,3 @@ def unflatten(values: dict[str, Any]) -> dict[str, Any]:
         node[leaf] = value
     return nested
 
-
-# Sections that moved out of the settings file in later versions.
-_RETIRED_SECTIONS = ("vault",)
-_RETIRED_KEYS = (("jobs", "max_change_ratio"),)
-
-
-def read_legacy_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Read an old config.toml: (settings to keep, the retired [vault] section)."""
-    with path.open("rb") as source:
-        values = tomllib.load(source)
-    closet = values.get("vault", {})
-    for section in _RETIRED_SECTIONS:
-        values.pop(section, None)
-    for section, key in _RETIRED_KEYS:
-        values.get(section, {}).pop(key, None)
-    models = values.get("models", {})
-    for role in models.values():
-        if isinstance(role, dict) and "model" in role:
-            role["name"] = role.pop("model")
-    return values, closet
