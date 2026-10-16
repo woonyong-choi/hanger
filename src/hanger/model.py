@@ -21,7 +21,7 @@ from pydantic import (
 from hanger.config import Settings
 from hanger.context import shape
 from hanger.editing import Decision, Review
-from hanger.errors import ConflictError, ModelError, RequestError
+from hanger.errors import ConflictError, ModelError, ModelOutputError, RequestError
 from hanger.profiles import Profile
 from hanger.providers import Choice, resolve_choice
 from hanger.scope import SearchScope
@@ -295,7 +295,9 @@ class CliModel:
         try:
             value, usage = self._parse(choice.provider, output, folder, schema)
         except (ValueError, ValidationError, AttributeError, OSError) as error:
-            raise ModelError("The model output does not match its format.") from error
+            raise ModelOutputError(
+                "The model output does not match its format."
+            ) from error
         return {"value": value.model_dump(), "usage": usage}
 
 

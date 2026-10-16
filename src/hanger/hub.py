@@ -26,7 +26,7 @@ from elasticsearch import ApiError, Elasticsearch
 from hanger.closets import ClosetPolicy, check_ignore, closet_present
 from hanger.config import Settings
 from hanger.documents import Documents
-from hanger.errors import HangerError, RequestError, guidance
+from hanger.errors import HangerError, RequestError, SearchUnavailableError, guidance
 from hanger.keywords import KeywordBuilder, KeywordGraph
 from hanger.model import CliModel, Intent, Planner
 from hanger.requests import issue_key, load_secret
@@ -219,9 +219,7 @@ class ClosetHub:
             graph,
             model,
             read=synchronizer.text,
-            search=lambda query, limit: [
-                hit["path"] for hit in index.find(query, limit)
-            ],
+            search=lambda query, limit: _find(index, query, limit),
             reindex=synchronizer.reindex,
         )
         return OpenCloset(
@@ -429,3 +427,10 @@ def _queue_merge(
         logger.warning(
             "keywords: could not queue a merge of %s and %s: %s", first, second, error
         )
+
+
+def _find(index: SearchIndex, query: str, limit: int) -> list[str]:
+    try:
+        return [hit["path"] for hit in index.find(query, limit)]
+    except (TransportError, ApiError) as error:
+        raise SearchUnavailableError("The search server is not responding.") from error

@@ -35,6 +35,7 @@ import logging
 import re
 import sqlite3
 import threading
+import time
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing
 from pathlib import Path, PurePosixPath
@@ -43,7 +44,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hanger.closets import ClosetPolicy
-from hanger.errors import HangerError, RequestError
+from hanger.errors import HangerError, ModelError, ModelOutputError, RequestError
 from hanger.prompts import extract_prompt, split_prompt
 from hanger.rules import rules_for
 
@@ -56,12 +57,19 @@ PROMPT_VERSION = 1
 SPLIT_LIMIT = 15
 # Attempts per note before it is reported as failed.
 MAX_ATTEMPTS = 3
+# Times a note is placed again because a neighbour changed, until it changes.
+MAX_RECHECKS = 3
 # Search candidates shown to the model.
 CANDIDATES = 20
+# Wait after a model call fails for a reason outside the note (CLI missing,
+# time out, usage limit) before trying again.
+PAUSE_SECONDS = 60
 # Prefix of generated concepts (those that are not notes).
 NODE = "node:"
 MULTIPLE = "[multiple topics]"
 
+# Raise when the tables below change.
+_SCHEMA_VERSION = 1
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes(
     path TEXT PRIMARY KEY, hash TEXT NOT NULL, title TEXT NOT NULL,
@@ -69,8 +77,12 @@ CREATE TABLE IF NOT EXISTS notes(
     enabled INTEGER NOT NULL, merge INTEGER NOT NULL,
     extracted TEXT, version INTEGER, name TEXT, aliases TEXT,
     question TEXT, definition TEXT, differentia TEXT,
-    attempts INTEGER NOT NULL DEFAULT 0, failure TEXT NOT NULL DEFAULT '');
+    title_key TEXT NOT NULL DEFAULT '', name_key TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0, failure TEXT NOT NULL DEFAULT '',
+    rechecks INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS notes_slug ON notes(slug);
+CREATE INDEX IF NOT EXISTS notes_title_key ON notes(tree, title_key);
+CREATE INDEX IF NOT EXISTS notes_name_key ON notes(tree, name_key);
 CREATE INDEX IF NOT EXISTS notes_stem ON notes(stem);
 -- Links the user wrote. kind: parent (front matter), list (list line that
 -- starts with the link: owner is the parent), prose (related).
@@ -93,6 +105,9 @@ CREATE TABLE IF NOT EXISTS pending_under(key TEXT NOT NULL, under TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS tombstones(key TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS splits(id TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS merges(pair TEXT PRIMARY KEY);
+-- A note said it answers the same question as one not extracted yet.
+CREATE TABLE IF NOT EXISTS same_wait(path TEXT NOT NULL, other TEXT NOT NULL,
+    name TEXT NOT NULL, PRIMARY KEY(path, other));
 """
 
 
@@ -258,7 +273,15 @@ class KeywordGraph:
         database.parent.mkdir(parents=True, exist_ok=True)
         with closing(sqlite3.connect(database)) as setup:
             setup.execute("PRAGMA journal_mode=WAL")
+            (version,) = setup.execute("PRAGMA user_version").fetchone()
+            if version != _SCHEMA_VERSION:
+                # The graph is derived from the notes: a new layout starts over.
+                for (table,) in setup.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall():
+                    setup.execute(f'DROP TABLE IF EXISTS "{table}"')
             setup.executescript(_SCHEMA)
+            setup.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         self._db = sqlite3.connect(
             database, check_same_thread=False, isolation_level=None, timeout=30
         )
@@ -293,60 +316,61 @@ class KeywordGraph:
     def observe(self, path: str, text: str, digest: str) -> set[str]:
         """Record a note's text. Returns notes whose link names changed."""
         with self._transaction():
-            row = self._one("SELECT hash FROM notes WHERE path=?", path)
+            row = self._one("SELECT hash, slug, tree FROM notes WHERE path=?", path)
             if row and row[0] == digest:
                 return set()
             parsed = parse_note(text, PurePosixPath(path).stem)
             tree, enabled, merge = self._folder_rules(path)
-            old_tree = self._one("SELECT tree FROM notes WHERE path=?", path)
+            slug = norm(parsed["slug"])
+            values = (
+                digest,
+                parsed["title"],
+                slug,
+                norm(PurePosixPath(path).stem),
+                tree,
+                int(enabled),
+                int(merge),
+                norm(parsed["title"]),
+                path,
+            )
             if row:
                 self._db.execute(
                     "UPDATE notes SET hash=?, title=?, slug=?, stem=?, tree=?, "
-                    "enabled=?, merge=?, attempts=0, failure='' WHERE path=?",
-                    (
-                        digest,
-                        parsed["title"],
-                        norm(parsed["slug"]),
-                        norm(PurePosixPath(path).stem),
-                        tree,
-                        int(enabled),
-                        int(merge),
-                        path,
-                    ),
+                    "enabled=?, merge=?, title_key=?, attempts=0, failure='', "
+                    "rechecks=0 WHERE path=?",
+                    values,
                 )
             else:
                 self._db.execute(
-                    "INSERT INTO notes(path, hash, title, slug, stem, tree, enabled, "
-                    "merge) VALUES(?,?,?,?,?,?,?,?)",
-                    (
-                        path,
-                        digest,
-                        parsed["title"],
-                        norm(parsed["slug"]),
-                        norm(PurePosixPath(path).stem),
-                        tree,
-                        int(enabled),
-                        int(merge),
-                    ),
+                    "INSERT INTO notes(hash, title, slug, stem, tree, enabled, "
+                    "merge, title_key, path) VALUES(?,?,?,?,?,?,?,?,?)",
+                    values,
                 )
-            touched = {
-                t for (t,) in self._rows("SELECT target FROM links WHERE owner=?", path)
-            }
+            # A note of this name is back: its name may be used again.
+            self._db.execute(
+                "DELETE FROM tombstones WHERE key=?",
+                (f"{tree}::{norm(parsed['title'])}",),
+            )
+            before = set(
+                self._rows("SELECT target, anchor FROM links WHERE owner=?", path)
+            )
             self._db.execute("DELETE FROM links WHERE owner=?", (path,))
             for raw, kind, anchor in parsed["links"]:
                 self._db.execute(
                     "INSERT OR REPLACE INTO links VALUES(?,?,?,?,?,?)",
                     (path, raw, _link_key(raw), kind, anchor, self._resolve(raw, path)),
                 )
-            touched |= {
-                t for (t,) in self._rows("SELECT target FROM links WHERE owner=?", path)
-            }
+            after = set(
+                self._rows("SELECT target, anchor FROM links WHERE owner=?", path)
+            )
+            # Only notes whose incoming link text changed are indexed again.
+            touched = {target for target, _ in before ^ after}
             if not row:
                 # Links that name this note by file name or slug may now resolve.
-                touched |= self._relink(
-                    {norm(PurePosixPath(path).stem), norm(parsed["slug"])}
-                )
-            if old_tree and old_tree[0] != tree:
+                touched |= self._relink({norm(PurePosixPath(path).stem), slug})
+            elif row[1] != slug:
+                touched |= self._relink({row[1], slug})
+            if row and row[2] != tree:
                 self._leave_tree(path)
         return {t for t in touched if t and t != path}
 
@@ -363,9 +387,11 @@ class KeywordGraph:
         self._demote_small_nodes()
 
     def _recheck(self, path: str) -> None:
+        """Place a note again; bounded so two notes cannot bounce forever."""
         self._db.execute(
-            "UPDATE notes SET extracted=NULL, attempts=0, failure='' WHERE path=?",
-            (path,),
+            "UPDATE notes SET extracted=NULL, rechecks=rechecks+1 "
+            "WHERE path=? AND rechecks<?",
+            (path, MAX_RECHECKS),
         )
 
     # cost: time O(k+c), heap O(c), stack O(1), io O(1)
@@ -377,12 +403,7 @@ class KeywordGraph:
             row = self._one("SELECT tree FROM notes WHERE path=?", path)
             if not row:
                 return set()
-            parents = [
-                t
-                for (t,) in self._rows(
-                    "SELECT target FROM edges WHERE owner=? AND kind='broader'", path
-                )
-            ]
+            parents = [p for p in self.parents(path)[0] if p != path]
             children = [
                 o
                 for (o,) in self._rows(
@@ -430,6 +451,9 @@ class KeywordGraph:
                 "DELETE FROM pending_under WHERE supporter=? OR under=?", (path, path)
             )
             self._db.execute("DELETE FROM splits WHERE id=?", (path,))
+            self._db.execute(
+                "DELETE FROM same_wait WHERE path=? OR other=?", (path, path)
+            )
             touched |= self._relink({norm(PurePosixPath(path).stem)})
             self._demote_small_nodes()
         return {t for t in touched if t and t != path}
@@ -473,8 +497,10 @@ class KeywordGraph:
                         "UPDATE notes SET tree=?, enabled=?, merge=? WHERE path=?",
                         (rules[0], int(rules[1]), int(rules[2]), path),
                     )
-                    if rules[0] != known[path][0]:
+                    if rules[0] != known[path][0] or not rules[1]:
                         self._leave_tree(path)
+                    elif not known[path][1]:
+                        self._recheck(path)
         return touched - {""}
 
     # ---------- links ----------
@@ -491,7 +517,9 @@ class KeywordGraph:
         if not candidate.endswith(".md"):
             candidate += ".md"
         base = PurePosixPath(owner).parent
-        for option in (candidate, (base / candidate).as_posix()):
+        relative = (base / candidate).as_posix()
+        options = (candidate,) if raw.startswith("/") else (relative, candidate)
+        for option in options:
             normal = _normalize(option)
             if normal and self._one("SELECT 1 FROM notes WHERE path=?", normal):
                 return normal
@@ -562,7 +590,7 @@ class KeywordGraph:
         row = self._one(
             "SELECT tree FROM nodes WHERE id=?"
             if node.startswith(NODE)
-            else "SELECT tree FROM notes WHERE path=?",
+            else "SELECT tree FROM notes WHERE path=? AND enabled=1",
             node,
         )
         return None if row is None else str(row[0])
@@ -639,6 +667,31 @@ class KeywordGraph:
                 depth -= 1
             return list(reversed(chain))
 
+    def _all_parents(self, node: str) -> list[str]:
+        """User and model parents together, so no hidden edge closes a cycle."""
+        found = [
+            t
+            for (t,) in self._rows(
+                "SELECT target FROM edges WHERE owner=? AND kind='broader'", node
+            )
+        ]
+        if not node.startswith(NODE):
+            found += [
+                t
+                for (t,) in self._rows(
+                    "SELECT target FROM links WHERE owner=? AND kind='parent' "
+                    "AND target IS NOT NULL",
+                    node,
+                )
+            ]
+            found += [
+                o
+                for (o,) in self._rows(
+                    "SELECT owner FROM links WHERE target=? AND kind='list'", node
+                )
+            ]
+        return found
+
     def _reaches(self, start: str, goal: str) -> bool:
         """Whether goal is start or above it."""
         stack, seen = [start], {start}
@@ -646,7 +699,7 @@ class KeywordGraph:
             current = stack.pop()
             if current == goal:
                 return True
-            for parent in self.parents(current)[0]:
+            for parent in self._all_parents(current):
                 if parent not in seen:
                     seen.add(parent)
                     stack.append(parent)
@@ -660,8 +713,8 @@ class KeywordGraph:
             row = self._one(
                 "SELECT path FROM notes WHERE enabled=1 AND attempts<? AND "
                 "(extracted IS NULL OR extracted!=hash OR version!=?) "
-                "ORDER BY version IS NOT NULL AND extracted=hash, attempts, path "
-                "LIMIT 1",
+                "ORDER BY COALESCE(version IS NOT NULL AND extracted=hash, 0), "
+                "attempts, path LIMIT 1",
                 MAX_ATTEMPTS,
                 PROMPT_VERSION,
             )
@@ -695,12 +748,19 @@ class KeywordGraph:
                     MAX_ATTEMPTS,
                 )
             ]
+            (failed,) = self._one(
+                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND attempts>=? "
+                "AND NOT (extracted=hash AND version=?)",
+                MAX_ATTEMPTS,
+                PROMPT_VERSION,
+            ) or (0,)
             (nodes,) = self._one("SELECT COUNT(*) FROM nodes") or (0,)
             (waiting,) = self._one("SELECT COUNT(DISTINCT key) FROM pending") or (0,)
             return {
                 "notes": total,
                 "extracted": done,
-                "queued": total - done - len(failures),
+                "queued": total - done - failed,
+                "failed_count": failed,
                 "failed": failures,
                 "generated_concepts": nodes,
                 "waiting_names": waiting,
@@ -788,6 +848,7 @@ class KeywordGraph:
     ) -> dict[str, Any]:
         """Store an extraction. ``ids`` maps the short ids in the prompt."""
         report: dict[str, Any] = {"created": [], "ignored": [], "same_as": None}
+        merges: list[tuple[str, str, str]] = []
         with self._transaction():
             row = self._one("SELECT hash, tree, name FROM notes WHERE path=?", path)
             if row is None or row[0] != expected:
@@ -795,8 +856,8 @@ class KeywordGraph:
             tree, old_name = row[1], row[2]
             self._db.execute(
                 "UPDATE notes SET extracted=hash, version=?, name=?, aliases=?, "
-                "question=?, definition=?, differentia=?, attempts=0, failure='' "
-                "WHERE path=?",
+                "question=?, definition=?, differentia=?, attempts=0, failure='', "
+                "name_key=? WHERE path=?",
                 (
                     PROMPT_VERSION,
                     answer.name.strip(),
@@ -807,6 +868,7 @@ class KeywordGraph:
                     answer.central_question,
                     answer.definition,
                     answer.differentia,
+                    norm(answer.name),
                     path,
                 ),
             )
@@ -817,7 +879,7 @@ class KeywordGraph:
             ):
                 # Notes placed under the old name are checked against the new.
                 for (owner,) in self._rows(
-                    "SELECT owner FROM edges WHERE target=? AND kind!='same'", path
+                    "SELECT owner FROM edges WHERE target=? AND kind='broader'", path
                 ):
                     self._recheck(owner)
             self._db.execute("DELETE FROM edges WHERE owner=?", (path,))
@@ -862,22 +924,37 @@ class KeywordGraph:
                         "INSERT OR IGNORE INTO edges VALUES(?,?,'related')",
                         (path, node),
                     )
+            self._db.execute("DELETE FROM same_wait WHERE path=?", (path,))
             if answer.same_as and not multiple:
                 same = target(answer.same_as)
                 if same and not same.startswith(NODE):
-                    report["same_as"] = self._same(path, same, answer.name)
+                    report["same_as"] = self._same(path, same, answer.name, merges)
+            # Notes that waited for this one to be placed are judged now.
+            for waiting, name in self._rows(
+                "SELECT path, name FROM same_wait WHERE other=?", path
+            ):
+                self._db.execute("DELETE FROM same_wait WHERE path=?", (waiting,))
+                self._same(waiting, path, name, merges)
             for node in broader:
-                if len(self.children(node)) > SPLIT_LIMIT:
+                if len(self.split_input(node)) > SPLIT_LIMIT:
                     self._db.execute("INSERT OR IGNORE INTO splits VALUES(?)", (node,))
             self._demote_small_nodes()
+        # Queued only after the graph is saved, so a merge is never asked twice.
+        for merge in merges:
+            if self.on_same is not None:
+                self.on_same(*merge)
         return report
 
-    def _same(self, path: str, other: str, name: str) -> str:
+    def _same(
+        self, path: str, other: str, name: str, merges: list[tuple[str, str, str]]
+    ) -> str:
         """Two notes answer the same question: record it, and merge if allowed."""
         info = self.note(other)
         if not info or not info["definition"]:
-            # The other note was not extracted yet; look again after it is.
-            self._recheck(path)
+            # The other note is judged when it is placed.
+            self._db.execute(
+                "INSERT OR REPLACE INTO same_wait VALUES(?,?,?)", (path, other, name)
+            )
             return "waiting"
         self._db.execute(
             "INSERT OR IGNORE INTO edges VALUES(?,?,'same')", (path, other)
@@ -894,8 +971,7 @@ class KeywordGraph:
         if self._one("SELECT 1 FROM merges WHERE pair=?", pair):
             return "merge_queued"
         self._db.execute("INSERT INTO merges VALUES(?)", (pair,))
-        if self.on_same is not None:
-            self.on_same(path, other, name)
+        merges.append((path, other, name))
         return "merge_queued"
 
     def _propose(
@@ -903,18 +979,26 @@ class KeywordGraph:
     ) -> None:
         """A broader name that is not a candidate: join it or let it wait."""
         key = f"{tree}::{norm(name)}"
-        if not norm(name) or self._one("SELECT 1 FROM tombstones WHERE key=?", key):
+        if not norm(name):
             report["ignored"].append(name)
             return
         existing = [
-            node
-            for (node,) in self._rows("SELECT id FROM nodes WHERE tree=?", tree)
-            if norm(self.display_name(node)) == norm(name)
+            n for (n,) in self._rows("SELECT id FROM nodes WHERE id=?", NODE + key)
         ] + [
             p
-            for (p,) in self._rows("SELECT path FROM notes WHERE tree=?", tree)
-            if p != path and norm(name) in {norm(n) for n in self.names(p)[:2]}
+            for (p,) in self._rows(
+                "SELECT path FROM notes WHERE tree=? AND enabled=1 AND path!=? "
+                "AND (title_key=? OR name_key=?) ORDER BY title_key!=?, path LIMIT 1",
+                tree,
+                path,
+                norm(name),
+                norm(name),
+                norm(name),
+            )
         ]
+        if not existing and self._one("SELECT 1 FROM tombstones WHERE key=?", key):
+            report["ignored"].append(name)
+            return
         if existing:
             if not self._reaches(existing[0], path):
                 self._db.execute(
@@ -975,7 +1059,13 @@ class KeywordGraph:
                 "DELETE FROM edges WHERE owner=? OR target=?", (node, node)
             )
             self._db.execute("DELETE FROM splits WHERE id=?", (node,))
+            self._db.execute("DELETE FROM pending WHERE supporter=?", (node,))
+            self._db.execute(
+                "DELETE FROM pending_under WHERE supporter=? OR under=?", (node, node)
+            )
             for kid in kids:
+                if kid.startswith(NODE):
+                    continue  # only notes wait for a broader name
                 self._db.execute(
                     "INSERT OR IGNORE INTO pending VALUES(?,?,?,?)",
                     (node[len(NODE) :], name, tree, kid),
@@ -1140,6 +1230,14 @@ class KeywordGraph:
             if self._tree_of(text) is not None:
                 return text
             key = norm(text)
+            for (found,) in self._rows(
+                "SELECT path FROM notes WHERE enabled=1 AND (title_key=? OR "
+                "name_key=?) ORDER BY title_key!=?, path LIMIT 1",
+                key,
+                key,
+                key,
+            ):
+                return str(found)
             for (node,) in self._rows("SELECT id FROM nodes"):
                 if norm(self.display_name(node)) == key:
                     return str(node)
@@ -1214,12 +1312,15 @@ class KeywordBuilder:
         self.read = read
         self.search = search
         self.reindex = reindex
+        self._resume_at = 0.0
 
     # cost: time O(t+n), heap O(n), stack O(1), io O(1), tokens O(n)
     # vars: t = model latency, n = note and candidate bytes
     # basis: estimate
     def step(self, is_cancelled: Callable[[], bool]) -> bool:
-        """Do one piece of work. Returns False when nothing is queued."""
+        """Do one piece of work. Returns False when nothing can be done now."""
+        if time.monotonic() < self._resume_at:
+            return False
         path = self.graph.next_note()
         if path is not None:
             self._extract(path, is_cancelled)
@@ -1270,7 +1371,7 @@ class KeywordBuilder:
                 self.model.ask(prompt, Extraction, is_cancelled, "keywords")
             )
         except (ValidationError, HangerError) as error:
-            if is_cancelled():
+            if is_cancelled() or self._pause(error):
                 return
             self.graph.failed(path, _reason(error))
             return
@@ -1288,6 +1389,13 @@ class KeywordBuilder:
                 ", ".join(report["created"]) or "none",
             )
 
+    def _pause(self, error: Exception) -> bool:
+        if not _transient(error):
+            return False
+        logger.warning("keywords: model unavailable, pausing: %s", error)
+        self._resume_at = time.monotonic() + PAUSE_SECONDS
+        return True
+
     def _split(self, node: str, is_cancelled: Callable[[], bool]) -> None:
         children = self.graph.split_input(node)
         ids = {f"c{n + 1}": child["id"] for n, child in enumerate(children)}
@@ -1303,12 +1411,21 @@ class KeywordBuilder:
                 self.model.ask(prompt, Split, is_cancelled, "keywords")
             )
         except (ValidationError, HangerError) as error:
-            if is_cancelled():
+            if is_cancelled() or self._pause(error):
                 return
             logger.info("keywords: could not split %s: %s", node, _reason(error))
             self.graph.apply_split(node, Split(), {})
             return
         self.graph.apply_split(node, answer, ids)
+
+
+def _transient(error: Exception) -> bool:
+    """A failure that says nothing about the note itself."""
+    if isinstance(error, ModelOutputError):
+        return False
+    if isinstance(error, ModelError):
+        return True
+    return isinstance(error, RequestError) and error.code == "model_missing"
 
 
 def _reason(error: Exception) -> str:

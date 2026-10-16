@@ -370,3 +370,108 @@ def test_names_are_searchable_and_follow_link_text(
     (root / "index.md").unlink()
     sync.reconcile()
     assert graph.parents("idem.md") == ([], "")
+
+
+def test_same_question_waits_without_looping(graph: KeywordGraph) -> None:
+    root = graph.root
+    _write(root, RULES_FILE, "---\nmerge: auto\n---\n")
+    merges: list[tuple[str, str, str]] = []
+    graph.on_same = lambda a, b, name: merges.append((a, b, name))
+    _observe(graph, root, "a.md", "# A\n")
+    _observe(graph, root, "b.md", "# B\n")
+    report = _extract(graph, "a.md", same_as="b.md", ids=["b.md"])
+    assert report["same_as"] == "waiting"
+    # a is placed; b comes next instead of a again.
+    assert graph.next_note() == "b.md"
+    _extract(graph, "b.md")
+    assert merges == [("a.md", "b.md", "a.md")]
+    assert graph.next_note() is None
+
+
+def test_moved_note_keeps_its_name_usable(graph: KeywordGraph) -> None:
+    root = graph.root
+    _observe(graph, root, "docker.md", "# Docker\n")
+    _observe(graph, root, "image.md", "# Image\n")
+    _extract(graph, "image.md", broader=[{"id": "docker.md"}], ids=["docker.md"])
+    (root / "docker.md").unlink()
+    graph.forget("docker.md")
+    _observe(graph, root, "tools/docker.md", "# Docker\n")
+    _extract(graph, "image.md", broader=[{"new": "Docker"}])
+    assert graph.parents("image.md")[0] == ["tools/docker.md"]
+
+
+def test_forget_uses_the_user_parent(graph: KeywordGraph) -> None:
+    root = graph.root
+    _observe(graph, root, "top.md", "# Top\n")
+    _observe(graph, root, "mid.md", "---\nparent: top\n---\n# Mid\n")
+    _observe(graph, root, "leaf.md", "# Leaf\n")
+    _extract(graph, "leaf.md", broader=[{"id": "mid.md"}], ids=["mid.md"])
+    (root / "mid.md").unlink()
+    graph.forget("mid.md")
+    assert graph.parents("leaf.md")[0] == ["top.md"]
+
+
+def test_hidden_model_edge_cannot_close_a_cycle(graph: KeywordGraph) -> None:
+    root = graph.root
+    _observe(graph, root, "top.md", "# Top\n")
+    _observe(graph, root, "m1.md", "# M1\n")
+    _observe(graph, root, "m2.md", "---\nparent: top\n---\n# M2\n")
+    _extract(graph, "m2.md", broader=[{"id": "m1.md"}], ids=["m1.md"])
+    report = _extract(graph, "m1.md", broader=[{"id": "m2.md"}], ids=["m2.md"])
+    assert "m2.md" in report["ignored"]
+
+
+def test_demoted_concept_leaves_no_ghost_supporters(graph: KeywordGraph) -> None:
+    root = graph.root
+    for name in ("a", "b", "c"):
+        _observe(graph, root, f"{name}.md", f"# {name}\n")
+    _extract(graph, "a.md", broader=[{"new": "Beta"}])
+    _extract(graph, "b.md", broader=[{"new": "Beta"}])
+    _extract(graph, "b.md", broader=[{"new": "Gamma"}])
+    # Beta is gone; one more note proposing it does not bring it back alone.
+    assert graph.describe(NODE + "::beta") is None
+    report = _extract(graph, "c.md", broader=[{"new": "Gamma"}])
+    assert report["created"] == ["Gamma"]
+    assert graph.status()["waiting_names"] == 1
+
+
+def test_user_children_do_not_trigger_splits(graph: KeywordGraph) -> None:
+    root = graph.root
+    listing = "".join(f"- [[k{n:02d}]]\n" for n in range(SPLIT_LIMIT + 5))
+    _observe(graph, root, "index.md", "# Index\n" + listing)
+    for n in range(SPLIT_LIMIT + 5):
+        _observe(graph, root, f"k{n:02d}.md", f"# k{n}\n")
+    _observe(graph, root, "extra.md", "# Extra\n")
+    _extract(graph, "extra.md", broader=[{"id": "index.md"}], ids=["index.md"])
+    assert len(graph.children("index.md")) == SPLIT_LIMIT + 6
+    assert graph.next_split() is None
+
+
+def test_relative_link_prefers_the_notes_folder(graph: KeywordGraph) -> None:
+    root = graph.root
+    _observe(graph, root, "foo.md", "# Root foo\n")
+    _observe(graph, root, "sub/foo.md", "# Sub foo\n")
+    _observe(graph, root, "sub/own.md", "# Own\n- [x](foo.md)\n")
+    assert graph.parents("sub/foo.md")[0] == ["sub/own.md"]
+    assert graph.parents("foo.md") == ([], "")
+
+
+def test_model_outage_pauses_without_failing_notes(graph: KeywordGraph) -> None:
+    from hanger.errors import ModelError
+
+    root = graph.root
+    _observe(graph, root, "a.md", "# A\n")
+
+    class Down:
+        def ask(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise ModelError("The model did not answer in time.")
+
+    def read(path: str) -> tuple[str, str]:
+        text = (root / path).read_text()
+        return text, digest(text.encode())
+
+    builder = KeywordBuilder(graph, Down(), read, lambda q, k: [], lambda p: None)
+    assert builder.step(lambda: False)
+    assert not builder.step(lambda: False)  # paused
+    assert graph.next_note() == "a.md"
+    assert graph.status()["failed_count"] == 0

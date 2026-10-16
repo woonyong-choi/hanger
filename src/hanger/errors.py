@@ -63,6 +63,10 @@ _TELL = "Tell the user: "
 _THEN = "\nThen: "
 
 
+class ModelOutputError(ModelError):
+    """The model answered, but not in the required format."""
+
+
 def guidance(tell: str, then: str = "") -> str:
     """A message for an AI client: what to tell the user, then what to do.
 
