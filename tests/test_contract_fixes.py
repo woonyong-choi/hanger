@@ -472,3 +472,29 @@ def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(RequestError) as caught:
         ClaudeModel().generate("prompt", lambda: False)
     assert caught.value.code == "model_missing"
+
+
+# A finished or stopped job keeps one record, not its step history.
+def test_finished_jobs_keep_one_record(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "b.md").write_text("old")
+    with Runtime(root, tmp_path / "state") as runtime:
+        done = runtime.issue_key()
+        runtime.submit(done, Proposal(changes=(Change(path="a.md", after="x"),)))
+        stopped = runtime.issue_key()
+        before = runtime.documents.read_hash("b.md")
+        runtime.submit(
+            stopped, Proposal(changes=(Change(path="b.md", before=before, after="y"),))
+        )
+        (root / "b.md").write_text("user")
+        _finish(runtime)
+        for key, status in ((done, "completed"), (stopped, "conflict")):
+            record = runtime.status(key)
+            assert record["status"] == status
+            assert (
+                len(list(runtime._saver.list({"configurable": {"thread_id": key}})))
+                == 1
+            )
+        assert "proposal" not in runtime.status(done)
+        assert "proposal" in runtime.status(stopped)  # still needed to reconsider

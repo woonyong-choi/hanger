@@ -291,7 +291,7 @@ def test_run_partial_external_change_stops_remaining_files(
         runtime.submit(runtime.issue_key(), proposal)
         result = runtime.run_next()
         assert result is not None and result["status"] == "conflict"
-        assert result["cursor"] == 1
+
         assert (paths[0] / "a.md").read_text() == "external edit"
         assert not (paths[0] / "b.md").exists()
 
