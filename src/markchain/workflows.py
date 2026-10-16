@@ -11,7 +11,7 @@ A router sends each request to one writing subgraph:
 
 from __future__ import annotations
 
-__all__ = ["collect_proposal", "inbox_path", "run_workflow"]
+__all__ = ["collect_file_target", "collect_proposal", "inbox_path", "run_workflow"]
 
 import hashlib
 import json
@@ -19,6 +19,7 @@ import re
 import unicodedata
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -65,6 +66,9 @@ class _State(TypedDict):
     usage: dict[str, Any]
     # "" before the duplicate check, then "checked" or "found".
     similar: str
+    # Collected files are copied as they are; the inbox only names them.
+    target: str
+    digest: str
 
 
 _INBOX = "inbox"
@@ -73,31 +77,52 @@ _HASH_CHARS = 8
 # Characters that are unsafe or awkward in file names on macOS and Windows.
 _UNSAFE = re.compile(r'[\\/:*?"<>|#\[\]{}^`%~\x00-\x1f]+')
 _SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
+_EXTENSION = re.compile(r"[A-Za-z0-9]{1,10}")
 
 
 def inbox_path(text: str, collected_at: float) -> str:
-    """Name collected input: collection time, title, short content hash.
+    """Name collected text: collection time, title, short content hash.
 
     The title is the first Markdown heading, or else the first non-empty line
-    (a link loses its scheme), cut to a fixed length. The same rule applies to
-    every kind of input, so names stay predictable.
+    (a link loses its scheme), cut to a fixed length.
     """
-    stamp = datetime.fromtimestamp(collected_at).strftime("%Y-%m-%d-%H%M%S")
-    digest = hashlib.sha256(text.encode()).hexdigest()[:_HASH_CHARS]
-    return f"{_INBOX}/{stamp}-{_title(text)}-{digest}.md"
-
-
-def _title(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     heading = next(
         (line.lstrip("#").strip() for line in lines if re.match(r"#{1,6}\s", line)),
         None,
     )
-    raw = heading or (lines[0] if lines else "")
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    return _inbox_name(heading or (lines[0] if lines else ""), digest, collected_at)
+
+
+def inbox_file_path(name: str, digest: str, collected_at: float) -> str:
+    """Name a collected file by the same rule; its own name is the title."""
+    stem, dot, extension = name.rpartition(".")
+    if not stem:  # no extension, or a name like ".env"
+        stem, dot, extension = name, "", ""
+    suffix = (dot + extension.lower()) if _EXTENSION.fullmatch(extension) else ""
+    return _inbox_name(stem, digest, collected_at, suffix)
+
+
+def _inbox_name(
+    title: str, digest: str, collected_at: float, suffix: str = ".md"
+) -> str:
+    stamp = datetime.fromtimestamp(collected_at).strftime("%Y-%m-%d-%H%M%S")
+    return f"{_INBOX}/{stamp}-{_title(title)}-{digest[:_HASH_CHARS]}{suffix}"
+
+
+def _title(raw: str) -> str:
     raw = _SCHEME.sub("", raw).removeprefix("www.")
     words = _UNSAFE.sub(" ", unicodedata.normalize("NFC", raw)).split()
     title = "-".join(words).lstrip("-.")[:_TITLE_CHARS].rstrip("-.")
     return title or "untitled"
+
+
+def collect_file_target(source: Path, collected_at: float) -> tuple[str, str]:
+    """Run the writing router for a collected file; return (path, sha256)."""
+    request = {"kind": "collect", "file": str(source), "collected_at": collected_at}
+    result = _writing_graph(None).invoke(cast(_State, {**_EMPTY, "request": request}))
+    return result["target"], result["digest"]
 
 
 def collect_proposal(text: str, collected_at: float) -> Proposal:
@@ -123,6 +148,8 @@ _EMPTY: dict[str, Any] = {
     "review": {},
     "usage": {},
     "similar": "",
+    "target": "",
+    "digest": "",
 }
 
 
@@ -157,6 +184,15 @@ def _inbox_graph() -> Any:
 
     def store_as_received(state: _State) -> dict[str, Any]:
         request = state["request"]
+        if "file" in request:
+            source = Path(request["file"])
+            hashed = hashlib.sha256()
+            with source.open("rb") as reader:
+                while chunk := reader.read(1024 * 1024):
+                    hashed.update(chunk)
+            digest = hashed.hexdigest()
+            target = inbox_file_path(source.name, digest, request["collected_at"])
+            return {"target": target, "digest": digest}
         path = inbox_path(request["text"], request["collected_at"])
         proposal = Proposal(changes=(Change(path=path, after=request["text"]),))
         return {"proposal": proposal.model_dump(mode="json")}

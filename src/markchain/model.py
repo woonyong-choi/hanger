@@ -121,13 +121,21 @@ class ClaudeModel:
             "--no-session-persistence",
         ]
         deadline = time.monotonic() + self.timeout_seconds
-        with subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        ) as process:
+        try:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as error:
+            raise RequestError(
+                "모델 실행 파일(claude)을 찾을 수 없습니다. Claude Code가 설치되어 "
+                "있고 PATH에 있는지 확인하십시오.",
+                code="model_missing",
+            ) from error
+        with process:
             pending: str | None = prompt
             try:
                 while True:

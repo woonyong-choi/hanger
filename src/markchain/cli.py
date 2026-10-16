@@ -114,9 +114,11 @@ def _parser() -> argparse.ArgumentParser:
     automate.add_argument(
         "intent", type=Path, help="JSON with kind, instruction and query"
     )
-    collect = commands.add_parser("collect", help="save text unchanged under inbox/")
+    collect = commands.add_parser(
+        "collect", help="save a file or stdin text unchanged under inbox/"
+    )
     collect.add_argument("key")
-    collect.add_argument("file", help="text file, or - for stdin")
+    collect.add_argument("file", help="any file, or - to read text from stdin")
     resolve = commands.add_parser(
         "resolve", help="re-plan a conflicted job from current sources"
     )
@@ -355,9 +357,7 @@ def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
                 {"key": arguments.key, "intent": intent.model_dump(mode="json")},
             )
         case "collect":
-            return call_tool(
-                launcher, "collect", {"key": arguments.key, "text": _text(arguments)}
-            )
+            return call_tool(launcher, "collect", _collect_arguments(arguments))
         case "resolve":
             return call_tool(
                 launcher,
@@ -383,10 +383,10 @@ def _search_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
     return values
 
 
-def _text(arguments: argparse.Namespace) -> str:
+def _collect_arguments(arguments: argparse.Namespace) -> dict[str, str]:
     if arguments.file == "-":
-        return sys.stdin.read()
-    return Path(arguments.file).read_text(encoding="utf-8")
+        return {"key": arguments.key, "text": sys.stdin.read()}
+    return {"key": arguments.key, "file": str(Path(arguments.file).resolve())}
 
 
 def _local(arguments: argparse.Namespace, settings: Settings) -> object:
@@ -466,7 +466,7 @@ def _execute(
             return {"status": runtime.submit_intent(arguments.key, intent)}
         case "collect":
             service = Service(runtime, synchronizer)
-            return service.collect(arguments.key, _text(arguments))
+            return service.collect(**_collect_arguments(arguments))
         case "resolve":
             service = Service(runtime, synchronizer)
             return service.resolve_conflict(
