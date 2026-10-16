@@ -7,12 +7,12 @@ from typing import Any
 
 import pytest
 
-from markchain.documents import Documents
-from markchain.model import CliModel, Intent, Planner
-from markchain.requests import Change
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
+from hanger.documents import Documents
+from hanger.model import CliModel, Intent, Planner
+from hanger.requests import Change
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
 
 
 # #4: cancellation invalidates an in-flight result, even if the model returns late.
@@ -20,7 +20,7 @@ from markchain.sync import Synchronizer
 def test_cancel_running_model_never_applies_late_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: str
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     started = threading.Event()
     released = threading.Event()
@@ -76,7 +76,7 @@ def test_cancel_running_model_never_applies_late_result(
 def test_parallel_proposals_recheck_shared_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     root.mkdir()
     (root / "a.md").write_text("original")
     barrier = threading.Barrier(2)
@@ -166,10 +166,10 @@ class EditingModel(CliModel):
 def test_model_conflict_uses_selected_mode(
     tmp_path: Path, mode: str, status: str, calls: int
 ) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     target = root / "docs/payment.md"
     target.write_text("# 결제\n최초 원문")
@@ -202,7 +202,7 @@ def test_model_conflict_uses_selected_mode(
 
 # #4: opt-in actual Claude contract, with no filesystem tools and synthetic input.
 def test_live_claude_returns_structured_change() -> None:
-    if not os.environ.get("MARKCHAIN_TEST_LIVE_MODEL"):
+    if not os.environ.get("HANGER_TEST_LIVE_MODEL"):
         pytest.skip("requires explicit model invocation")
     model = CliModel()
     result = model.generate(
@@ -220,10 +220,10 @@ def test_live_claude_returns_structured_change() -> None:
 def test_invalid_model_proposal_does_not_block_next_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     target = root / "docs/payment.md"
     target.write_text("# 결제\n원문")
@@ -260,10 +260,10 @@ def test_invalid_model_proposal_does_not_block_next_job(
 def test_partial_replan_preserves_applied_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, *, delete_first: bool
 ) -> None:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires Elasticsearch test endpoint")
-    root = tmp_path / "vault"
+    root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     for name in ("a", "b"):
         (root / f"docs/{name}.md").write_text("# 결제\n원문")

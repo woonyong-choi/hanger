@@ -13,13 +13,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from markchain.documents import Documents
-from markchain.model import CliModel, Intent, Planner
-from markchain.requests import digest
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
-from markchain.trace import Trace
+from hanger.documents import Documents
+from hanger.model import CliModel, Intent, Planner
+from hanger.requests import digest
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
+from hanger.trace import Trace
 
 
 class FullEdit(BaseModel):
@@ -136,11 +136,11 @@ def _profiles() -> list[dict[str, str]]:
 # basis: estimate
 def _run(case: dict[str, str], mode: str, output: Path) -> dict[str, Any]:
     folder = output / (case["id"] + "-" + mode)
-    root, state = folder / "vault", folder / "state"
+    root, state = folder / "closet", folder / "state"
     (root / "docs").mkdir(parents=True)
     target = root / "docs/a.md"
     target.write_text(case["source"], encoding="utf-8")
-    index = SearchIndex(os.environ["MARKCHAIN_TEST_SEARCH_URL"], str(root.resolve()))
+    index = SearchIndex(os.environ["HANGER_TEST_SEARCH_URL"], str(root.resolve()))
     trace = Trace(state / "trace.jsonl")
     model = FullModel(case["source"]) if mode == "full" else CliModel()
     sync = Synchronizer(Documents(root), index)
@@ -261,7 +261,7 @@ def main() -> None:
             ["git", "rev-parse", "HEAD"], text=True
         ).strip(),
         "source_hashes": {
-            str(p): digest(p.read_bytes()) for p in Path("src/markchain").glob("*.py")
+            str(p): digest(p.read_bytes()) for p in Path("src/hanger").glob("*.py")
         },
     }
     (output / "env.json").write_text(json.dumps(environment, indent=2) + "\n")

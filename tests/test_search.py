@@ -10,23 +10,26 @@ from pathlib import Path
 
 import pytest
 
-from markchain.documents import Documents
-from markchain.errors import RequestError, SearchUnavailableError
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
-from markchain.watcher import VaultWatcher
+from hanger.documents import Documents
+from hanger.errors import RequestError, SearchUnavailableError
+from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
+from hanger.watcher import ClosetWatcher
 
 
 @pytest.fixture
 def sync(tmp_path: Path) -> Iterator[Synchronizer]:
-    url = os.environ.get("MARKCHAIN_TEST_SEARCH_URL")
+    url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires an explicit local Elasticsearch test endpoint")
-    vault = tmp_path / "vault"
-    vault.mkdir()
-    index = SearchIndex(url, str(vault))
+    closet = tmp_path / "closet"
+    closet.mkdir()
+    # A registered closet always holds its ignore file.
+    (closet / IGNORE_FILE).write_text(DEFAULT_IGNORE)
+    index = SearchIndex(url, str(closet))
     index.ensure()
-    yield Synchronizer(Documents(vault), index)
+    yield Synchronizer(Documents(closet), index)
     index.client.indices.delete(index=index.name)
     index.close()
 
@@ -180,11 +183,11 @@ def test_watch_retries_unreadable_new_file(
         return read(path)
 
     monkeypatch.setattr(sync, "read", transient_read)
-    monkeypatch.setattr("markchain.watcher.time.monotonic", lambda: 0)
-    watcher = VaultWatcher(sync)
+    monkeypatch.setattr("hanger.watcher.time.monotonic", lambda: 0)
+    watcher = ClosetWatcher(sync)
     watcher.flush()
     assert not sync.index.metadata(["a.md"])
-    monkeypatch.setattr("markchain.watcher.time.monotonic", lambda: 11)
+    monkeypatch.setattr("hanger.watcher.time.monotonic", lambda: 11)
     watcher.flush()
     assert sync.index.metadata(["a.md"])
 
@@ -204,7 +207,7 @@ def test_repeated_signal_never_replays_old_content(sync: Synchronizer) -> None:
 
 # #3: native observer detects a file saved outside Obsidian.
 def test_native_watch_receives_external_file(sync: Synchronizer) -> None:
-    watcher = VaultWatcher(sync)
+    watcher = ClosetWatcher(sync)
     watcher.start()
     try:
         watcher.flush()
@@ -235,7 +238,7 @@ def test_invalid_file_does_not_block_sync(sync: Synchronizer, invalid: bytes) ->
 def test_search_outage_raises_without_local_scan(sync: Synchronizer) -> None:
     (sync.documents.root / "a.md").write_text("# 결제\n자료")
     sync.reconcile()
-    url = os.environ["MARKCHAIN_TEST_SEARCH_URL"]
+    url = os.environ["HANGER_TEST_SEARCH_URL"]
     sync.index.client.close()
     sync.index.client = SearchIndex(
         "http://127.0.0.1:9", str(sync.documents.root)
@@ -303,7 +306,7 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
     assert len(result["folders"]) == 1101
 
 
-# #9: invalid scopes fail rather than silently reverting to the full vault.
+# #9: invalid scopes fail rather than silently reverting to the full closet.
 @pytest.mark.parametrize(
     "folder",
     [
@@ -313,13 +316,18 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
         "docs/../private",
         "docs//api",
         "docs/./api",
-        ".hidden",
         "docs\\api",
     ],
 )
 def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> None:
-    with pytest.raises(RequestError, match="상대 폴더 경로"):
+    with pytest.raises(RequestError, match="relative to the closet root"):
         sync.search("retry", folders=(folder,))
+
+
+# Ignored folders cannot be searched; the default rules ignore hidden ones.
+def test_search_ignored_folder_is_rejected(sync: Synchronizer) -> None:
+    with pytest.raises(RequestError, match="ignored in .hangerignore"):
+        sync.search("retry", folders=(".hidden",))
 
 
 # #9: CLI folder flags are repeatable and errors in other folders stay out of scope.
@@ -331,17 +339,19 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
     (root / "docs/[api]/b.md").write_text("# retry\nkey")
     (root / "private/c.md").write_bytes(b"\xff")
     sync.reconcile()
+    base = [
+        sys.executable,
+        "-m",
+        "hanger.cli",
+        "--state",
+        str(root.parent / "cli-state"),
+        "--search-url",
+        os.environ["HANGER_TEST_SEARCH_URL"],
+    ]
+    subprocess.run([*base, "closet", "add", str(root)], check=True)
     result = subprocess.run(
         [
-            sys.executable,
-            "-m",
-            "markchain.cli",
-            "--vault",
-            str(root),
-            "--state",
-            str(root.parent / "cli-state"),
-            "--search-url",
-            os.environ["MARKCHAIN_TEST_SEARCH_URL"],
+            *base,
             "search",
             "retry",
             "--folder",
@@ -363,3 +373,15 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
         "absent", folders=("문서/개발",), fallback_reason="insufficient_evidence"
     )
     assert absent["documents"] == []
+
+
+# A closet folder that vanished or became an empty mount point keeps its index.
+def test_reconcile_refuses_a_missing_or_empty_folder(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    (root / "a.md").write_text("# kept")
+    sync.reconcile()
+    for name in (IGNORE_FILE, "a.md"):
+        (root / name).unlink()
+    with pytest.raises(RequestError, match="missing or empty"):
+        sync.reconcile()
+    assert [entry["path"] for entry in sync.index.entries()] == ["a.md"]

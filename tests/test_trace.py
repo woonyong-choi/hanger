@@ -5,12 +5,12 @@ from typing import Any
 
 import pytest
 
-from markchain.documents import Documents
-from markchain.model import CliModel, Intent, Planner
-from markchain.runtime import Runtime
-from markchain.search import SearchIndex
-from markchain.sync import Synchronizer
-from markchain.trace import Trace
+from hanger.documents import Documents
+from hanger.model import CliModel, Intent, Planner
+from hanger.runtime import Runtime
+from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
+from hanger.trace import Trace
 
 
 # #6: telemetry cannot alter the resulting document or introduce a model call.
@@ -64,7 +64,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
     )
     contents = []
     for enabled in (False, True):
-        root = tmp_path / str(enabled) / "vault"
+        root = tmp_path / str(enabled) / "closet"
         root.mkdir(parents=True)
         log = root.parent / "state/trace.jsonl"
         index = SearchIndex("http://127.0.0.1:19200", str(root))
