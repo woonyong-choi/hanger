@@ -198,32 +198,37 @@ def describe_decision(decision: Decision) -> dict[str, Any]:
     summary = detail["summary"]
     leaving = summary["files_leaving_index"]
     entering = summary["files_entering_index"]
+    where = f"closet #{decision.closet_id} ({detail['closet']})"
     effect = (
-        f"{_count(leaving, 'note')} would leave the search index and "
-        f"{_count(entering, 'note')} would be indexed."
+        f"{_notes_phrase(leaving, 'leave')} the search index; "
+        f"{_notes_phrase(entering, 'enter')} it."
     )
     if decision.kind == "ignore_deleted":
         question = (
-            f"The {IGNORE_FILE} file in {detail['closet']} was deleted. "
-            f"Recreate it with the default rules? {effect}"
+            f"{IGNORE_FILE} was deleted in {where}. Recreate it with the default "
+            f"rules? {effect}"
         )
-        approve = "Recreate the file with the default rules"
-        decline = "Restore the file as it was"
+        approve = f"Recreate {IGNORE_FILE} with the default rules"
+        decline = f"Put the deleted {IGNORE_FILE} back as it was"
     else:
         changes = []
         if summary["patterns_added"]:
-            changes.append("adds " + ", ".join(summary["patterns_added"]))
+            changes.append(
+                "adds " + ", ".join(f"`{p}`" for p in summary["patterns_added"])
+            )
         if summary["patterns_removed"]:
-            changes.append("removes " + ", ".join(summary["patterns_removed"]))
+            changes.append(
+                "removes " + ", ".join(f"`{p}`" for p in summary["patterns_removed"])
+            )
         question = (
-            f"The {IGNORE_FILE} file in {detail['closet']} was edited; the edit "
-            f"{' and '.join(changes)}. Apply it? {effect}"
+            f"{IGNORE_FILE} was edited in {where}; the edit {' and '.join(changes)}. "
+            f"Apply this edit? {effect}"
         )
         approve = "Apply the edit"
-        decline = "Keep the current rules and restore the file"
+        decline = f"Keep the current rules and restore {IGNORE_FILE}"
     if leaving:
         question += (
-            " Notes removed from the index may not get the same keywords and "
+            " Notes taken out of the index may not get the same keywords and "
             "links when they are indexed again."
         )
     return {
@@ -237,8 +242,10 @@ def describe_decision(decision: Decision) -> dict[str, Any]:
     }
 
 
-def _count(value: int, word: str) -> str:
-    return f"{value:,} {word}" + ("" if value == 1 else "s")
+def _notes_phrase(value: int, verb: str) -> str:
+    if value == 1:
+        return f"1 note {verb}s"
+    return f"{value:,} notes {verb}" if value else f"no notes {verb}"
 
 
 def resolve_decision(

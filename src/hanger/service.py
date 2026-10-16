@@ -24,7 +24,7 @@ from mcp.server.fastmcp import Context, FastMCP
 
 from hanger.closets import describe_decision, register_closet, resolve_decision
 from hanger.context import shape
-from hanger.errors import RequestError, SearchUnavailableError
+from hanger.errors import RequestError, SearchUnavailableError, guidance
 from hanger.hub import ClosetHub, OpenCloset
 from hanger.model import Intent
 from hanger.requests import issue_key as new_key
@@ -48,15 +48,16 @@ _WORKERS = ("hanger-worker-1", "hanger-worker-2")
 
 INSTRUCTIONS = """\
 Hanger keeps the user's Markdown notes in registered folders called closets.
-Start with list_closets. If no closet is registered, ask the user which folder
-holds their notes and call register_closet with its absolute path. With more
-than one closet, pass closet (an id, or a path inside it) to every call.
-When a call fails with decision_required, show the question and both choices
-to the user, wait for their answer, then call decide. Never answer for them.
-Every request_change or collect needs a fresh key from issue_key.
-Hanger writes its messages, questions and choices in English. Before showing
-any of them to the user, translate them into the language the user writes in
-or has set for you; keep commands, paths and ids as they are."""
+Start with list_closets. With more than one closet, pass closet (an id, or a
+path inside it) to every call. Every request_change or collect needs a fresh
+key from issue_key.
+Some results and errors carry "Tell the user:" and "Then:". Give the user the
+"Tell the user" text with nothing added or left out, translated into the
+language the user writes in or has set for you. Keep these words as they are in
+every language: closet, Hanger, .hangerignore, HANGER.md, and every command,
+path and id. "Then" is for you: do it.
+A decision_required error means Hanger waits for the user's own answer. Show
+the question and both choices, wait, then call decide. Never answer for them."""
 
 
 class Service:
@@ -146,20 +147,21 @@ class Service:
         pending = self.hub.store.decisions()
         if not pending:
             return
-        lines = ["Hanger needs the user's answer before it can do anything else."]
+        lines = ["Hanger is waiting for your answer before it continues."]
         for decision in pending:
             described = describe_decision(decision)
             lines += [
                 f"Decision #{described['id']}: {described['question']}",
-                f"  approve: {described['choices']['approve']}",
-                f"  decline: {described['choices']['decline']}",
+                f"- approve: {described['choices']['approve']}",
+                f"- decline: {described['choices']['decline']}",
             ]
-        lines.append(
-            "Show this question and both choices to the user, translated into "
-            "their language, and call decide with their answer. Do not choose "
-            "for them. In a terminal: hanger decide <id> approve|decline"
+        message = guidance(
+            "\n".join(lines),
+            "Wait for the user's choice, then call decide with it. Never choose "
+            "for them. In a terminal the user can also run: hanger decide <id> "
+            "approve|decline",
         )
-        raise RequestError("\n".join(lines), code="decision_required")
+        raise RequestError(message, code="decision_required")
 
     def _closet(self, closet: str | None, key: str | None = None) -> OpenCloset:
         """The closet a request names; a key already used elsewhere is refused."""
@@ -194,9 +196,14 @@ class Service:
             "decisions": [describe_decision(d) for d in self.hub.store.decisions()],
         }
         if not closets:
+            result["tell_user"] = (
+                "No closet is set up yet. A closet is a folder of Markdown notes "
+                "that Hanger keeps. Which folder should be the closet? Send its "
+                "absolute path."
+            )
             result["next"] = (
-                "Ask the user which folder holds their notes, then call "
-                "register_closet with its absolute path."
+                "Call register_closet with the path the user gives. Never guess "
+                "a folder."
             )
         return result
 
@@ -212,10 +219,14 @@ class Service:
             raise RequestError(f"Give an absolute folder path: {path}")
         result = register_closet(self.hub.store, folder)
         self.hub.refresh()
-        return {
-            **result,
-            "message": "Registered. Hanger is indexing the notes in the background.",
-        }
+        closet = result["closet"]
+        tell = (
+            f"Closet #{closet['id']} is set up: {closet['path']}. Hanger is "
+            "indexing its notes in the background."
+        )
+        if result["created"]:
+            tell += " Created at its root: " + ", ".join(result["created"]) + "."
+        return {**result, "tell_user": tell}
 
     def remove_closet(self, closet: str) -> dict[str, Any]:
         """Removing a closet is only possible from the user's terminal."""
@@ -223,9 +234,11 @@ class Service:
         found = self.hub.store.closet(closet)
         target = str(found.path) if found else closet
         raise RequestError(
-            "Closets can only be removed by the user in a terminal, so their "
-            f"search index is never deleted by accident. Ask the user to run: "
-            f'hanger closet remove "{target}"',
+            guidance(
+                "A closet can only be removed from a terminal, so its search "
+                "index is never deleted by accident. To remove it, run: "
+                f'hanger closet remove "{target}"'
+            ),
             code="terminal_only",
         )
 
