@@ -324,8 +324,9 @@ def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> N
         sync.search("retry", folders=(folder,))
 
 
-# Ignored folders cannot be searched; the default rules ignore hidden ones.
+# Ignored folders cannot be searched.
 def test_search_ignored_folder_is_rejected(sync: Synchronizer) -> None:
+    sync.policy.update(".hidden/\n")
     with pytest.raises(RequestError, match="ignored in .hangerignore"):
         sync.search("retry", folders=(".hidden",))
 

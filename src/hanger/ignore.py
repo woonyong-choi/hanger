@@ -18,17 +18,20 @@ IGNORE_FILE = ".hangerignore"
 DEFAULT_IGNORE = """\
 # Hanger ignore rules for this closet
 #
-# Anything matched here is left out of the search index and is never read or
-# changed by Hanger. The syntax is the same as .gitignore: one pattern per
-# line, a trailing slash matches folders only, and a leading ! brings a path
-# back in.
+# Files matched here are left out of the search index and are never read or
+# changed by Hanger. Nothing is ignored until you add a pattern.
+#
+# The syntax is the same as .gitignore: one pattern per line, a trailing
+# slash matches folders only, and a leading ! brings a path back in. For
+# example:
+#
+#   .obsidian/
+#   drafts/
+#   *.private.md
 #
 # Hanger asks before it applies an edit to this file. Ignoring a folder
-# removes its notes from the index, and indexing them again later may not give
-# the same keywords and links.
-
-# Hidden files and folders, such as .obsidian, .git and .trash
-.*
+# removes its notes from the index, and indexing them again later may not
+# give the same keywords and links.
 """
 
 

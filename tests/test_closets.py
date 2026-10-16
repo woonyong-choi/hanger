@@ -64,12 +64,13 @@ def test_nested_closets_are_refused(tmp_path: Path) -> None:
     assert len(store.closets()) == 1
 
 
-# The default rules leave hidden folders and rule files out; write: false
-# in a folder's rule file makes it read-only.
+# The default ignores nothing but rule files; ignore patterns and
+# write: false in a folder's rule file narrow what Hanger touches.
 def test_policy_follows_ignore_and_rule_files(tmp_path: Path) -> None:
     root = _closet(tmp_path / "closet")
     (root / "private" / RULES_FILE).write_text("---\nwrite: false\n---\nKeep.\n")
-    policy = ClosetPolicy(root)
+    assert not ClosetPolicy(root).excluded(".obsidian/c.md")
+    policy = ClosetPolicy(root, ".obsidian/\n")
     assert policy.excluded(".obsidian/c.md")
     assert policy.excluded(RULES_FILE)
     assert not policy.excluded("notes/a.md")
