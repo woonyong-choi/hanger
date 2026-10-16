@@ -43,7 +43,7 @@ from hanger.commands import (
 )
 from hanger.config import Settings
 from hanger.elastic import ElasticManager
-from hanger.errors import HangerError
+from hanger.errors import HangerError, for_terminal
 from hanger.hub import ClosetHub
 from hanger.logs import configure
 from hanger.model import Intent
@@ -61,6 +61,12 @@ _DAEMON_LOCK_SECONDS = 90
 # Note requests answered by the background service when it runs (or must run).
 _CLIENT = {"key", "search", "status", "cancel", "automate", "collect", "resolve"}
 _MANAGEMENT = {"setup", "provider", "closet", "ignore", "decisions", "decide", "config"}
+# What to run next, for refusals whose message speaks to an AI client.
+_TERMINAL_HINTS = {
+    "closet_ambiguous": "choose one with --closet <id>",
+    "closet_unknown": "see the closets with: hanger closet list",
+    "decision_required": "answer with: hanger decide <id> approve|decline",
+}
 
 
 def _closet_option(parser: argparse.ArgumentParser) -> None:
@@ -97,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
 
     closet = commands.add_parser("closet", help="add, list or remove closets")
     closet_actions = closet.add_subparsers(dest="action", required=True)
-    closet_actions.add_parser("add", help="register a notes folder").add_argument(
+    closet_actions.add_parser("add", help="register a folder as a closet").add_argument(
         "path"
     )
     closet_actions.add_parser("list", help="show registered closets")
@@ -139,11 +145,8 @@ def _parser() -> argparse.ArgumentParser:
         help="run everything in this process instead of the shared service",
     )
     commands.add_parser("stop", help="stop the background service")
+    # Internal: started by the relay. Without help it stays out of the list.
     commands.add_parser("daemon")
-    # Internal: started by the relay, so it stays out of the command list.
-    commands._choices_actions = [
-        action for action in commands._choices_actions if action.dest != "daemon"
-    ]
 
     commands.add_parser("key", help="issue a request key")
     search = commands.add_parser("search", help="search notes")
@@ -235,7 +238,15 @@ def main(argv: list[str] | None = None) -> int:
     except HangerError as error:
         # Expected and explained to the user; the log keeps it at info level.
         logger.info("request refused [%s]: %s", error.code, error)
-        print(f"hanger: {error}", file=sys.stderr)
+        if error.code == "closet_required":
+            message = (
+                "No closet is set up yet. Add one with: hanger closet add <folder>"
+            )
+        else:
+            message = for_terminal(str(error))
+        print(f"hanger: {message}", file=sys.stderr)
+        if hint := _TERMINAL_HINTS.get(error.code):
+            print(f"hanger: {hint}", file=sys.stderr)
         return 1
     except (OSError, sqlite3.Error, ApiError, TransportError) as error:
         logger.error("operation failed: %s", error)
@@ -354,45 +365,50 @@ def _daemon(
         time.sleep(1)
 
 
-def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
+def _client_call(arguments: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """The MCP tool and arguments a client command stands for."""
     closet = {"closet": arguments.closet} if getattr(arguments, "closet", None) else {}
     match arguments.command:
         case "key":
-            return {"key": call_tool(launcher, "issue_key", {})}
+            return "issue_key", {}
         case "search":
-            return call_tool(
-                launcher, "search_documents", {**_search_arguments(arguments), **closet}
-            )
+            return "search_documents", {**_search_arguments(arguments), **closet}
         case "status":
-            return call_tool(launcher, "job_status", {"key": arguments.key})
+            return "job_status", {"key": arguments.key}
         case "cancel":
-            return call_tool(launcher, "cancel_job", {"key": arguments.key})
+            return "cancel_job", {"key": arguments.key}
         case "automate":
             intent = Intent.model_validate_json(arguments.intent.read_bytes())
-            return call_tool(
-                launcher,
-                "request_change",
-                {
-                    "key": arguments.key,
-                    "intent": intent.model_dump(mode="json"),
-                    **closet,
-                },
-            )
+            return "request_change", {
+                "key": arguments.key,
+                "intent": intent.model_dump(mode="json"),
+                **closet,
+            }
         case "collect":
-            return call_tool(
-                launcher, "collect", {**_collect_arguments(arguments), **closet}
-            )
+            return "collect", {**_collect_arguments(arguments), **closet}
         case "resolve":
-            return call_tool(
-                launcher,
-                "resolve_conflict",
-                {
-                    "key": arguments.key,
-                    "new_key": arguments.new_key,
-                    "choice": arguments.choice,
-                },
-            )
+            return "resolve_conflict", {
+                "key": arguments.key,
+                "new_key": arguments.new_key,
+                "choice": arguments.choice,
+            }
     raise AssertionError("client command must be supported")
+
+
+def _remote(arguments: argparse.Namespace, launcher: Launcher) -> Any:
+    tool, values = _client_call(arguments)
+    result = call_tool(launcher, tool, values)
+    return {"key": result} if tool == "issue_key" else result
+
+
+def _call_local(service: Service, tool: str, values: dict[str, Any]) -> Any:
+    """Run a client command's tool in this process, as the daemon would."""
+    if tool == "search_documents":
+        return service.search(**{**values, "folders": tuple(values["folders"])})
+    if tool == "request_change":
+        values = {**values, "intent": Intent.model_validate(values["intent"])}
+    result = getattr(service, tool)(**values)
+    return {"key": result} if tool == "issue_key" else result
 
 
 def _search_arguments(arguments: argparse.Namespace) -> dict[str, Any]:
@@ -476,31 +492,9 @@ def _execute(arguments: argparse.Namespace, hub: ClosetHub) -> object:
     hub.refresh()
     service = Service(hub)
     command = arguments.command
+    if command in _CLIENT:
+        return _call_local(service, *_client_call(arguments))
     closet = getattr(arguments, "closet", None)
-    match command:
-        case "key":
-            return {"key": service.issue_key()}
-        case "search":
-            return service.search(
-                arguments.query,
-                closet,
-                arguments.limit,
-                arguments.fallback_reason,
-                tuple(arguments.folders),
-            )
-        case "status":
-            return service.job_status(arguments.key)
-        case "cancel":
-            return service.cancel_job(arguments.key)
-        case "automate":
-            intent = Intent.model_validate_json(arguments.intent.read_bytes())
-            return service.request_change(arguments.key, intent, closet)
-        case "collect":
-            return service.collect(**_collect_arguments(arguments), closet=closet)
-        case "resolve":
-            return service.resolve_conflict(
-                arguments.key, arguments.new_key, arguments.choice
-            )
     opened = hub.get(closet)
     runtime, synchronizer = opened.runtime, opened.synchronizer
     match command:

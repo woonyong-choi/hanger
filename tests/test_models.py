@@ -171,3 +171,15 @@ def test_no_provider_at_all_is_reported(
     with pytest.raises(ProviderMissingError) as caught:
         CliModel().generate("초안 요청", lambda: False)
     assert "No model provider found" in str(caught.value)
+
+
+# A missing model command fails at once with a clear message, without retries.
+def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hanger.model import CliModel
+    from hanger.providers import ProviderMissingError
+
+    monkeypatch.setenv("PATH", "/nonexistent")
+    with pytest.raises(ProviderMissingError) as caught:
+        CliModel().generate("prompt", lambda: False)
+    assert caught.value.code == "provider_missing"
+    assert not caught.value.retryable

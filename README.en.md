@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Hanger logo" height="120">
+  <img src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/docs/assets/logo.png" alt="Hanger logo" height="120">
 </p>
 
 <h1 align="center">Hanger</h1>
 
 <p align="center">
   Local Markdown document automation with durable workflows<br>
-  <a href="README.md">한국어</a> | English<br>
+  <a href="https://github.com/woonyong-choi/hanger/blob/main/README.md">한국어</a> | English<br>
   <a href="#quick-start">Quick start</a> · <a href="#how-it-works">How it works</a> · <a href="#using-it-from-ai-tools">Using it from AI tools</a>
 </p>
 
@@ -15,7 +15,7 @@
 You need macOS or Linux, Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a signed-in Claude Code (`claude`) or Codex (`codex`). Hanger uses no API keys; it runs models through the subscription you already have.
 
 ```sh
-uv tool install git+https://github.com/woonyong-choi/hanger
+uv tool install hanger
 hanger setup
 claude mcp add --scope user hanger -- hanger serve
 hanger closet add ~/notes
@@ -23,7 +23,7 @@ hanger closet add ~/notes
 
 `hanger setup` asks no questions. It finds a model provider (Claude Code if present, otherwise Codex) and downloads and installs the search engine (Elasticsearch with the Korean analyzer). When no provider is found, setup stops and says why. You can register your notes folder in the terminal, as on the last line, or let your AI tool ask you for it on first use.
 
-To connect Codex, use `codex mcp add hanger -- hanger serve`.
+To connect Codex, use `codex mcp add hanger -- hanger serve`. To install the latest unreleased code, use `uv tool install git+https://github.com/woonyong-choi/hanger`.
 
 To update:
 
@@ -72,7 +72,7 @@ Connected as an MCP server, Hanger offers these tools. Its messages and question
 | `issue_key`, `request_change`, `collect` | Write, edit and organize requests; keep a file or text unchanged in `inbox/` |
 | `job_status`, `cancel_job`, `resolve_conflict` | Check progress, cancel, reconsider a job stopped by a changed note |
 
-With more than one closet, each request passes `closet` as an id or a path inside the closet. Usage guidance for AI tools is in [skills/hanger/SKILL.md](skills/hanger/SKILL.md).
+With more than one closet, each request passes `closet` as an id or a path inside the closet. Usage guidance for AI tools is in [skills/hanger/SKILL.md](https://github.com/woonyong-choi/hanger/blob/main/skills/hanger/SKILL.md).
 
 ## Terminal commands
 

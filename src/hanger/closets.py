@@ -266,7 +266,11 @@ def resolve_decision(
             f"Decision #{decision_id} was already answered ({decision.status}).",
             code="decision_closed",
         )
-    closet = next(c for c in store.closets() if c.id == decision.closet_id)
+    closet = next((c for c in store.closets() if c.id == decision.closet_id), None)
+    if closet is None:
+        raise RequestError(
+            f"Closet #{decision.closet_id} was removed.", code="not_found"
+        )
     if not closet_present(closet.path):
         raise RequestError(
             f"The folder of closet #{closet.id} is missing or empty: {closet.path}. "

@@ -10,11 +10,11 @@ import pytest
 
 from hanger.documents import Documents
 from hanger.errors import RequestError
-from hanger.requests import Change, Proposal, digest
+from hanger.requests import Change, Proposal, digest, issue_key
 from hanger.runtime import Limits, Runtime
 
 
-# #5: daily cleanup removes expired work, not a still-valid completed identity.
+# daily cleanup removes expired work, not a still-valid completed identity.
 def test_cleanup_preserves_valid_keys_and_discards_expired_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -24,13 +24,13 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
     monkeypatch.setattr(time, "time", lambda: clock)
     proposal = Proposal(changes=(Change(path="a.md", after="saved"),))
     with Runtime(root, tmp_path / "state") as runtime:
-        complete = runtime.issue_key()
+        complete = issue_key(runtime._secret)
         runtime.submit(complete, proposal)
         runtime.run_next()
-        pending = runtime.issue_key()
+        pending = issue_key(runtime._secret)
         runtime.submit(pending, Proposal(changes=(Change(path="b.md", after="never"),)))
         clock += 23 * 3600
-        valid = runtime.issue_key()
+        valid = issue_key(runtime._secret)
         runtime.submit(valid, proposal)
         runtime.run_next()
         # The older pending request is consumed first; no active consumer remains.
@@ -45,14 +45,14 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
         assert runtime.cleanup()["status"] == "already_cleaned"
 
 
-# #5: missed midnight cleanup runs on restart without applying an expired request.
+# missed midnight cleanup runs on restart without applying an expired request.
 def test_restart_removes_expired_pending_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "closet"
     root.mkdir()
     with Runtime(root, tmp_path / "state") as runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit(key, Proposal(changes=(Change(path="a.md", after="never"),)))
     future = time.time() + 25 * 3600
     monkeypatch.setattr(time, "time", lambda: future)
@@ -62,7 +62,7 @@ def test_restart_removes_expired_pending_request(
         assert not (root / "a.md").exists()
 
 
-# #5: a replaced source symlink cannot block cleanup or expose its external target.
+# a replaced source symlink cannot block cleanup or expose its external target.
 def test_expired_symlink_target_does_not_block_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -71,7 +71,8 @@ def test_expired_symlink_target_does_not_block_startup(
     state = tmp_path / "state"
     with Runtime(root, state) as runtime:
         runtime.submit(
-            runtime.issue_key(), Proposal(changes=(Change(path="a.md", after="never"),))
+            issue_key(runtime._secret),
+            Proposal(changes=(Change(path="a.md", after="never"),)),
         )
     outside = tmp_path / "outside.md"
     outside.write_text("external original")
@@ -80,7 +81,8 @@ def test_expired_symlink_target_does_not_block_startup(
     monkeypatch.setattr(time, "time", lambda: future)
     with Runtime(root, state) as runtime:
         runtime.submit(
-            runtime.issue_key(), Proposal(changes=(Change(path="b.md", after="valid"),))
+            issue_key(runtime._secret),
+            Proposal(changes=(Change(path="b.md", after="valid"),)),
         )
         result = runtime.run_next()
         assert result is not None and result["status"] == "completed"
@@ -88,7 +90,7 @@ def test_expired_symlink_target_does_not_block_startup(
     assert (root / "b.md").read_text() == "valid"
 
 
-# #5: capacity rejection does not enqueue the refused operation.
+# capacity rejection does not enqueue the refused operation.
 @pytest.mark.parametrize("boundary", ["count", "request", "bytes", "state", "disk"])
 def test_admission_capacity_rejects_without_queueing(
     tmp_path: Path, boundary: str
@@ -106,14 +108,14 @@ def test_admission_capacity_rejects_without_queueing(
     with Runtime(root, tmp_path / "state", limits=limits) as runtime:
         with pytest.raises(RequestError):
             runtime.submit(
-                runtime.issue_key(),
+                issue_key(runtime._secret),
                 Proposal(changes=(Change(path="a.md", after="unaccepted"),)),
             )
         assert runtime.run_next() is None
         assert not (root / "a.md").exists()
 
 
-# #5: cleanup must not remove a proposal while its writer is inside replacement.
+# cleanup must not remove a proposal while its writer is inside replacement.
 def test_cleanup_busy_writer_keeps_recovery_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -131,7 +133,8 @@ def test_cleanup_busy_writer_keeps_recovery_state(
     monkeypatch.setattr(Documents, "apply", pause)
     with Runtime(root, tmp_path / "state") as runtime:
         runtime.submit(
-            runtime.issue_key(), Proposal(changes=(Change(path="a.md", after="saved"),))
+            issue_key(runtime._secret),
+            Proposal(changes=(Change(path="a.md", after="saved"),)),
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(runtime.run_next)
@@ -146,7 +149,7 @@ def test_cleanup_busy_writer_keeps_recovery_state(
         assert (root / "a.md").read_text() == "saved"
 
 
-# #5: a killed pre-replacement writer leaves only an owned candidate to expire.
+# a killed pre-replacement writer leaves only an owned candidate to expire.
 def test_expired_crash_candidate_deleted_without_touching_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -156,7 +159,7 @@ def test_expired_crash_candidate_deleted_without_touching_source(
     (root / "a.md").write_text("original")
     with Runtime(root, state) as runtime:
         runtime.submit(
-            runtime.issue_key(),
+            issue_key(runtime._secret),
             Proposal(
                 changes=(
                     Change(path="a.md", before=digest(b"original"), after="proposed"),
@@ -186,7 +189,7 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
     assert (root / "a.md").read_text() == "original"
 
 
-# #5: retry counters survive restarts; delayed work must not block another job.
+# retry counters survive restarts; delayed work must not block another job.
 def test_retry_limit_survives_restart_and_allows_other_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -204,10 +207,10 @@ def test_retry_limit_survives_restart_and_allows_other_work(
 
     monkeypatch.setattr(Documents, "apply", fail_one)
     with Runtime(root, state) as runtime:
-        key = runtime.issue_key()
+        key = issue_key(runtime._secret)
         runtime.submit(key, Proposal(changes=(Change(path="a.md", after="never"),)))
         runtime.submit(
-            runtime.issue_key(),
+            issue_key(runtime._secret),
             Proposal(changes=(Change(path="b.md", after="independent"),)),
         )
         with pytest.raises(OSError, match="synthetic"):

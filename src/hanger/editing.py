@@ -106,7 +106,12 @@ def materialize(
         )
     changes = []
     for edit in decision.changes:
-        target = documents.resolve(edit.path)
+        try:
+            target = documents.resolve(edit.path)
+        except RequestError as error:
+            # A bad path from the model is redrafted, not reported as the
+            # user's mistake.
+            raise RequestError(str(error), code="model_output") from error
         if policy.closet is not None and not policy.closet.writable(edit.path):
             raise RequestError(
                 f"This path may not be written (ignored, or write: false in its "

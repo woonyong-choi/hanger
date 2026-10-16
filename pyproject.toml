@@ -5,12 +5,31 @@ build-backend = "hatchling.build"
 [project]
 name = "hanger"
 version = "0.1.0"
-description = "Durable local Markdown document workflows"
+description = "Keeps a folder of Markdown notes searchable and lets AI tools edit it by your rules"
+readme = "README.en.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Woonyong Choi" }]
 requires-python = ">=3.12"
+keywords = ["markdown", "notes", "mcp", "ai", "elasticsearch", "obsidian"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Text Processing :: Markup :: Markdown",
+]
 dependencies = [
+  "anyio>=4.5,<5",
+  "elastic-transport>=9.1,<10",
   "elasticsearch>=9.1,<10",
   "filelock>=3.20,<5",
   "langgraph>=1.2,<2",
+  "langchain-core>=1.0,<2",
   "langgraph-checkpoint-sqlite>=3.1,<4",
   "mcp>=1.20,<2",
   "packaging>=24,<27",
@@ -20,11 +39,16 @@ dependencies = [
   "watchdog>=6,<8",
 ]
 
+[project.urls]
+Homepage = "https://github.com/woonyong-choi/hanger"
+Repository = "https://github.com/woonyong-choi/hanger"
+Issues = "https://github.com/woonyong-choi/hanger/issues"
+
 [project.scripts]
 hanger = "hanger.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=9", "ruff>=0.14", "mypy>=1.18", "build>=1.3"]
+dev = ["pytest>=9", "ruff>=0.14", "mypy>=1.18"]
 
 [tool.ruff]
 target-version = "py312"
@@ -42,6 +66,7 @@ convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "D"]
+"benchmarks/**" = ["S101", "D"]
 
 [tool.mypy]
 strict = true
@@ -57,3 +82,7 @@ addopts = "--basetemp=tests/.runtime"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hanger"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/hanger", "tests", "LICENSE", "README.md", "README.en.md"]
+exclude = ["tests/.runtime"]

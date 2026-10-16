@@ -11,10 +11,11 @@ from __future__ import annotations
 __all__ = ["Service"]
 
 import functools
+import inspect
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -60,6 +61,16 @@ A decision_required error means Hanger waits for the user's own answer. Show
 the question and both choices, wait, then call decide. Never answer for them."""
 
 
+def _threaded(function: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
+    """Run a blocking tool in a worker thread so other sessions stay responsive."""
+
+    @functools.wraps(function)
+    async def wrapper(**arguments: Any) -> Any:
+        return await anyio.to_thread.run_sync(functools.partial(function, **arguments))
+
+    return wrapper
+
+
 class Service:
     def __init__(self, hub: ClosetHub, engine: ElasticManager | None = None) -> None:
         self.hub = hub
@@ -87,7 +98,9 @@ class Service:
             self.cancel_job,
             self.resolve_conflict,
         ):
-            self.mcp.add_tool(tool)
+            self.mcp.add_tool(
+                tool if inspect.iscoroutinefunction(tool) else _threaded(tool)
+            )
 
     # ---------- lifecycle ----------
 

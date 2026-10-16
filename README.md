@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Hanger 로고" height="120">
+  <img src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/docs/assets/logo.png" alt="Hanger 로고" height="120">
 </p>
 
 <h1 align="center">Hanger</h1>
 
 <p align="center">
   Local Markdown document automation with durable workflows<br>
-  한국어 | <a href="README.en.md">English</a><br>
+  한국어 | <a href="https://github.com/woonyong-choi/hanger/blob/main/README.en.md">English</a><br>
   <a href="#빠른-시작">빠른 시작</a> · <a href="#작동-방식">작동 방식</a> · <a href="#ai-도구에서-쓰기">AI 도구에서 쓰기</a>
 </p>
 
@@ -15,7 +15,7 @@
 macOS나 Linux, Python 3.12 이상, [uv](https://docs.astral.sh/uv/), 로그인한 Claude Code(`claude`)나 Codex(`codex`)가 필요합니다. API 키는 쓰지 않고 이미 가입한 구독으로 모델을 실행합니다.
 
 ```sh
-uv tool install git+https://github.com/woonyong-choi/hanger
+uv tool install hanger
 hanger setup
 claude mcp add --scope user hanger -- hanger serve
 hanger closet add ~/notes
@@ -23,7 +23,7 @@ hanger closet add ~/notes
 
 `hanger setup`은 아무것도 묻지 않습니다. 모델 공급자를 찾고(Claude Code가 있으면 Claude Code, 없으면 Codex) 검색 엔진(Elasticsearch와 한국어 분석기)을 내려받아 설치합니다. 공급자가 하나도 없으면 설치를 멈추고 이유를 알려 줍니다. 노트 폴더는 마지막 줄처럼 터미널에서 등록해도 되고, AI 도구가 처음 쓸 때 사용자에게 물어 등록해도 됩니다.
 
-Codex에 연결할 때는 `codex mcp add hanger -- hanger serve`를 씁니다.
+Codex에 연결할 때는 `codex mcp add hanger -- hanger serve`를 씁니다. 아직 배포되지 않은 최신 코드는 `uv tool install git+https://github.com/woonyong-choi/hanger`로 설치합니다.
 
 업데이트:
 
@@ -72,7 +72,7 @@ MCP 서버로 연결하면 아래 도구를 씁니다. 안내 문구와 질문�
 | `issue_key`, `request_change`, `collect` | 작성·수정·정리 요청, 파일이나 글을 그대로 `inbox/`에 보관 |
 | `job_status`, `cancel_job`, `resolve_conflict` | 진행 확인, 취소, 원문 변경으로 멈춘 작업 재검토 |
 
-closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경로를 넘깁니다. AI 도구에 줄 사용 지침은 [skills/hanger/SKILL.md](skills/hanger/SKILL.md)에 있습니다.
+closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경로를 넘깁니다. AI 도구에 줄 사용 지침은 [skills/hanger/SKILL.md](https://github.com/woonyong-choi/hanger/blob/main/skills/hanger/SKILL.md)에 있습니다.
 
 ## 터미널 명령
 

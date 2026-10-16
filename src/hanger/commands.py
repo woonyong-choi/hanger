@@ -141,7 +141,7 @@ def setup_command(
             shutil.rmtree(store.state / "elasticsearch", ignore_errors=True)
         step.done("stopped" if stopped else "not running")
         if install:
-            engine.install(ui, reinstall=reinstall, title=None, first=2, total=total)
+            engine.install(ui, reinstall=reinstall, first=2, total=total)
         else:
             step = ui.step(2, total, "Check search engine")
             step.done(f"Elasticsearch {ES_VERSION} already installed")
@@ -152,7 +152,7 @@ def setup_command(
     ui.note(f"  claude mcp add --scope user hanger -- {command}")
     ui.note(f"  codex mcp add hanger -- {command}")
     if not store.closets():
-        ui.note("then add your notes folder, or let the AI client ask for it:")
+        ui.note("then add a closet, or let the AI client ask for one:")
         ui.note("  hanger closet add <folder>")
     ui.stream.write("\n")
 

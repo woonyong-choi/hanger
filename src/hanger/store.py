@@ -219,12 +219,13 @@ class StateStore:
 
     # ---------- decisions ----------
 
-    def decisions(self, *, pending_only: bool = True) -> list[Decision]:
-        query = "SELECT id, closet_id, kind, detail, status FROM decisions"
-        if pending_only:
-            query += " WHERE status = 'pending'"
+    def decisions(self) -> list[Decision]:
+        """Decisions still waiting for the user."""
         with self._connect() as connection:
-            rows = connection.execute(query + " ORDER BY id").fetchall()
+            rows = connection.execute(
+                "SELECT id, closet_id, kind, detail, status FROM decisions "
+                "WHERE status = 'pending' ORDER BY id"
+            ).fetchall()
         return [Decision(int(i), int(v), k, json.loads(d), s) for i, v, k, d, s in rows]
 
     def decision(self, decision_id: int) -> Decision | None:

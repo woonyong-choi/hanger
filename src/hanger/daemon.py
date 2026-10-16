@@ -10,7 +10,6 @@ from __future__ import annotations
 
 __all__ = ["Daemon", "DaemonInfo", "socket_path"]
 
-import functools
 import hashlib
 import json
 import logging
@@ -19,7 +18,6 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 # Large enough for a 2 MiB request or a full search response line.
 _MAX_LINE = 32 * 1024 * 1024
-_IDLE_CHECK_SECONDS = 15
 _SOCKET_LIMIT = 100  # macOS sun_path is 104 bytes including the terminator
 
 
@@ -74,16 +71,6 @@ class DaemonInfo:
         os.replace(temporary, state / "daemon.json")
 
 
-def _threaded(function: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
-    """Run a blocking tool in a worker thread so other sessions stay responsive."""
-
-    @functools.wraps(function)
-    async def wrapper(**arguments: Any) -> Any:
-        return await anyio.to_thread.run_sync(functools.partial(function, **arguments))
-
-    return wrapper
-
-
 class Daemon:
     def __init__(self, service: Service, state: Path, idle_minutes: float) -> None:
         self.service = service
@@ -92,17 +79,8 @@ class Daemon:
         self.idle_seconds = idle_minutes * 60
         self._connections = 0
         self._shutdown = threading.Event()
-        server = service.mcp._mcp_server
-        self._server = server
-        # Re-register tools as non-blocking coroutines for the shared event loop.
-        tools = service.mcp._tool_manager
-        for name, tool in list(tools._tools.items()):
-            if tool.is_async:
-                continue
-            tools._tools.pop(name)
-            service.mcp.add_tool(
-                _threaded(tool.fn), name=name, description=tool.description
-            )
+        # FastMCP runs stdio only; the daemon drives its server over sockets.
+        self._server = service.mcp._mcp_server
 
     def request_shutdown(self, *_: object) -> None:
         self._shutdown.set()

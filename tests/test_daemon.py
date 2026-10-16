@@ -73,7 +73,7 @@ def _wait_dead(pid: int, seconds: float = 30) -> None:
     assert not _alive(pid)
 
 
-# #3: clients started concurrently share exactly one daemon.
+# clients started concurrently share exactly one daemon.
 def test_concurrent_clients_share_one_daemon(env: tuple[Path, Path, Launcher]) -> None:
     _, state, launcher = env
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -86,7 +86,7 @@ def test_concurrent_clients_share_one_daemon(env: tuple[Path, Path, Launcher]) -
     assert int(daemons[0]) == _pid(state)
 
 
-# #3: a killed daemon is replaced on the next call and keeps queued work.
+# a killed daemon is replaced on the next call and keeps queued work.
 def test_killed_daemon_restarts_and_finishes_work(
     env: tuple[Path, Path, Launcher],
 ) -> None:
@@ -108,7 +108,7 @@ def test_killed_daemon_restarts_and_finishes_work(
     assert again["status"] == "duplicate"
 
 
-# #3: an idle daemon exits by itself and the next request starts a new one.
+# an idle daemon exits by itself and the next request starts a new one.
 def test_idle_daemon_exits_and_restarts(env: tuple[Path, Path, Launcher]) -> None:
     _, state, launcher = env
     call_tool(launcher, "issue_key", {})
@@ -119,7 +119,7 @@ def test_idle_daemon_exits_and_restarts(env: tuple[Path, Path, Launcher]) -> Non
     assert _pid(state) != first
 
 
-# #3: a daemon from another version is replaced instead of reused.
+# a daemon from another version is replaced instead of reused.
 def test_version_mismatch_replaces_daemon(env: tuple[Path, Path, Launcher]) -> None:
     _, state, launcher = env
     call_tool(launcher, "issue_key", {})
@@ -130,7 +130,7 @@ def test_version_mismatch_replaces_daemon(env: tuple[Path, Path, Launcher]) -> N
     assert _pid(state) != first
 
 
-# #3: a client from an older version never stops a newer daemon.
+# a client from an older version never stops a newer daemon.
 def test_newer_daemon_is_kept(env: tuple[Path, Path, Launcher]) -> None:
     _, state, launcher = env
     call_tool(launcher, "issue_key", {})
@@ -140,7 +140,7 @@ def test_newer_daemon_is_kept(env: tuple[Path, Path, Launcher]) -> None:
     assert _pid(state) == first and _alive(first)
 
 
-# #3: the stdio relay replays the handshake and pending request after a crash,
+# the stdio relay replays the handshake and pending request after a crash,
 # and replaces a daemon that stops answering.
 def test_relay_survives_crash_and_hang(
     env: tuple[Path, Path, Launcher], monkeypatch: pytest.MonkeyPatch
@@ -208,7 +208,7 @@ def test_relay_survives_crash_and_hang(
         stream.close()
 
 
-# #3: stop with a client attached is quick, and the daemon stays stopped
+# stop with a client attached is quick, and the daemon stays stopped
 # until that client sends another request.
 def test_stop_with_attached_relay_is_quick_and_lazy(
     env: tuple[Path, Path, Launcher],
@@ -255,7 +255,7 @@ def test_stop_with_attached_relay_is_quick_and_lazy(
         stream.close()
 
 
-# #3: a state path too long for a Unix socket falls back to a short temp path.
+# a state path too long for a Unix socket falls back to a short temp path.
 def test_long_state_path_uses_short_socket(tmp_path: Path) -> None:
     state = tmp_path / ("x" * 120)
     path = socket_path(state)

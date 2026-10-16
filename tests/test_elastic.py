@@ -64,7 +64,7 @@ def manager(install_root: Path, tmp_path: Path) -> Iterator[ElasticManager]:
         engine.stop()
 
 
-# #4: a killed search process is detected and restarted by the supervisor.
+# a killed search process is detected and restarted by the supervisor.
 def test_supervisor_restarts_killed_server(
     manager: ElasticManager, tmp_path: Path
 ) -> None:
@@ -78,7 +78,7 @@ def test_supervisor_restarts_killed_server(
     assert _es_pid(tmp_path / "state") != first
 
 
-# #4: a server left by a previous manager is reused instead of duplicated.
+# a server left by a previous manager is reused instead of duplicated.
 def test_new_manager_adopts_healthy_server(install_root: Path, tmp_path: Path) -> None:
     state = tmp_path / "state"
     first = ElasticManager(install_root, state, _settings())
@@ -96,7 +96,7 @@ def test_new_manager_adopts_healthy_server(install_root: Path, tmp_path: Path) -
         first.stop()
 
 
-# #4: when the owning process dies without cleanup the server is stopped too.
+# when the owning process dies without cleanup the server is stopped too.
 def test_server_stops_when_owner_is_killed(install_root: Path, tmp_path: Path) -> None:
     state = tmp_path / "state"
     script = (
@@ -138,7 +138,7 @@ class _Foreign(http.server.BaseHTTPRequestHandler):
         return
 
 
-# #4: a port held by another program is reported, never taken over.
+# a port held by another program is reported, never taken over.
 def test_foreign_server_on_port_is_reported(manager: ElasticManager) -> None:
     server = http.server.HTTPServer(("127.0.0.1", PORT), _Foreign)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -153,7 +153,7 @@ def test_foreign_server_on_port_is_reported(manager: ElasticManager) -> None:
         server.server_close()
 
 
-# #4: a corrupted download is rejected before anything is installed.
+# a corrupted download is rejected before anything is installed.
 def test_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
     def fake(url: str, target: Path, report: object = None) -> None:
         target.write_bytes(b"not elasticsearch")
@@ -166,7 +166,7 @@ def test_install_rejects_checksum_mismatch(tmp_path: Path) -> None:
     assert not (tmp_path / "install" / f"elasticsearch-{ES_VERSION}").exists()
 
 
-# #4: redirected setup output stays short: one line per 10 percent.
+# redirected setup output stays short: one line per 10 percent.
 def test_progress_without_terminal_prints_deciles() -> None:
     import io
 

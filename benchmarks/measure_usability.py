@@ -1,4 +1,4 @@
-"""Exercise issue #9 through an installed MCP process with synthetic files."""
+"""Run Hanger as an installed MCP server against synthetic notes and time each tool."""
 
 from __future__ import annotations
 

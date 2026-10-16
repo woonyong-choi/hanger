@@ -2,17 +2,26 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import offline_service, service_for
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from hanger.closets import ClosetPolicy
+from hanger.documents import Documents
+from hanger.errors import RequestError
+from hanger.requests import Change, Proposal, issue_key
+from hanger.runtime import Runtime
 from hanger.search import SearchIndex
+from hanger.sync import Synchronizer
 
 
-# #4: the installed protocol keeps watch, search, writes and status in one owner.
+# the installed protocol keeps watch, search, writes and status in one owner.
 def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
     url = os.environ.get("HANGER_TEST_SEARCH_URL")
     if not url:
@@ -150,3 +159,145 @@ async def _completed(session: ClientSession, key: str) -> dict[str, Any]:
             return data
         await asyncio.sleep(0.1)
     raise AssertionError("MCP job did not complete within the scenario deadline")
+
+
+# a failing job never kills a worker, and a dead worker is restarted.
+def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
+    root = tmp_path / "closet"
+    root.mkdir()
+    sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
+    with Runtime(root, tmp_path / "state") as runtime:
+        service = service_for(runtime, sync)
+        calls = 0
+
+        def explode() -> None:
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("unexpected")
+
+        runtime.run_next = explode  # type: ignore[method-assign]
+        service._targets = {"hanger-worker-1": lambda: service._work("hanger-worker-1")}
+        service._spawn("hanger-worker-1")
+        time.sleep(3)
+        assert calls >= 2
+        assert service._threads["hanger-worker-1"].is_alive()
+        assert service.health() is None
+        service._stop.set()
+        service._threads["hanger-worker-1"].join(5)
+        service._stop.clear()
+        service._beats["hanger-worker-1"] = time.monotonic() - 3600
+        assert service.health() == (
+            "A job worker has not responded for more than 60 seconds."
+        )
+        dead = threading.Thread(target=lambda: None)
+        dead.start()
+        dead.join()
+        service._threads["hanger-worker-1"] = dead
+        monitor = threading.Thread(target=service._maintain, daemon=True)
+        monitor.start()
+        time.sleep(6)
+        assert service._threads["hanger-worker-1"] is not dead
+        service.close()
+
+
+class _Engine:
+    def __init__(self, ready_after: int) -> None:
+        self.calls = 0
+        self.ready_after = ready_after
+
+    def ready(self) -> bool:
+        self.calls += 1
+        return self.calls > self.ready_after
+
+    def message(self) -> str:
+        return f"검색 서버 시작 중 ({self.calls}초 경과)"
+
+    def require(self) -> None:
+        if not self.ready():
+            from hanger.errors import SearchUnavailableError
+
+            raise SearchUnavailableError(self.message())
+
+
+class _Context:
+    def __init__(self) -> None:
+        self.progress: list[tuple[float, float | None, str | None]] = []
+        self.logs: list[str] = []
+
+    async def report_progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        self.progress.append((progress, total, message))
+
+    async def info(self, message: str) -> None:
+        self.logs.append(message)
+
+
+# a search during server start waits, reports elapsed seconds, then fails at 30s.
+def test_search_waits_for_starting_server_with_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from hanger import service as service_module
+    from hanger.errors import SearchUnavailableError
+
+    root = tmp_path / "closet"
+    root.mkdir()
+    sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
+    with Runtime(root, tmp_path / "state") as runtime:
+        service = service_for(runtime, sync, _Engine(ready_after=2))
+        monkeypatch.setattr(service, "search", lambda *args: {"documents": []})
+        context = _Context()
+        result = asyncio.run(service.search_documents("결제", ctx=context))  # type: ignore[arg-type]
+        assert result == {"documents": []}
+        assert [p[0] for p in context.progress] == [0, 1]
+        assert context.logs[0].startswith("검색 서버 시작 중")
+        monkeypatch.setattr(service_module, "SEARCH_WAIT_SECONDS", 2)
+        service.engine = _Engine(ready_after=100)  # type: ignore[assignment]
+        with pytest.raises(SearchUnavailableError, match="not ready within 2s"):
+            asyncio.run(service.search_documents("결제", ctx=_Context()))  # type: ignore[arg-type]
+
+
+# read_document honours the ignore rules.
+def test_read_document_rejects_ignored(
+    layout: tuple[Path, Path, ClosetPolicy],
+) -> None:
+    root, state, policy = layout
+    service, runtime = offline_service(root, state, policy)
+    with runtime:
+        assert service.read_document("notes/a.md")["content"] == "# a"
+        for path in ("other/c.md", "notes/private/s.md"):
+            with pytest.raises(RequestError) as caught:
+                service.read_document(path)
+            assert caught.value.code == "excluded"
+
+
+# A missing document is a clear not_found error without the absolute path.
+def test_read_document_missing_is_not_found(
+    layout: tuple[Path, Path, ClosetPolicy],
+) -> None:
+    root, state, policy = layout
+    service, runtime = offline_service(root, state, policy)
+    with runtime, pytest.raises(RequestError) as caught:
+        service.read_document("notes/missing.md")
+    assert caught.value.code == "not_found"
+    assert str(root) not in str(caught.value)
+
+
+# Proposals submitted directly obey the same write policy as model edits.
+def test_direct_proposal_outside_writable_is_rejected(
+    layout: tuple[Path, Path, ClosetPolicy],
+) -> None:
+    root, state, policy = layout
+    with (
+        Runtime(root, state) as runtime,
+        pytest.raises(RequestError) as caught,
+    ):
+        runtime.policy = policy
+        runtime.submit(
+            issue_key(runtime._secret),
+            Proposal(changes=(Change(path="other/x.md", after="x"),)),
+        )
+    assert caught.value.code == "write_denied"
+    assert not (root / "other/x.md").exists()
