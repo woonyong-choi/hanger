@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from markchain.documents import Documents
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
 from markchain.sync import Synchronizer
@@ -31,7 +31,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
         return {"documents": [], "coverage": "synthetic"}
 
     def generate(
-        model: ClaudeModel, prompt: str, cancelled: Callable[[], bool]
+        model: CliModel, prompt: str, cancelled: Callable[[], bool]
     ) -> dict[str, Any]:
         nonlocal calls
         calls += 1
@@ -53,9 +53,9 @@ def test_trace_records_metrics_without_source_or_extra_calls(
         }
 
     monkeypatch.setattr(Synchronizer, "search", search)
-    monkeypatch.setattr(ClaudeModel, "generate", generate)
+    monkeypatch.setattr(CliModel, "generate", generate)
     monkeypatch.setattr(
-        ClaudeModel,
+        CliModel,
         "review",
         lambda self, prompt, cancelled: {
             "review": {"approved": True, "issues": []},
@@ -68,7 +68,7 @@ def test_trace_records_metrics_without_source_or_extra_calls(
         root.mkdir(parents=True)
         log = root.parent / "state/trace.jsonl"
         index = SearchIndex("http://127.0.0.1:19200", str(root))
-        planner = Planner(Synchronizer(Documents(root), index), ClaudeModel())
+        planner = Planner(Synchronizer(Documents(root), index), CliModel())
         trace = Trace(log if enabled else None)
         try:
             with Runtime(root, log.parent, planner, trace=trace) as runtime:

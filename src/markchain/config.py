@@ -55,6 +55,24 @@ class _Elasticsearch(BaseModel):
     heap_mb: int = Field(default=512, ge=256, le=8192)
 
 
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Subscription CLI that runs the model: claude (Claude Code) or codex.
+    provider: Literal["claude", "codex"] = "claude"
+    # Model name passed to the CLI; empty means the CLI's own default.
+    model: str = "sonnet"
+    # Reasoning effort passed to the CLI; empty means the CLI's own default.
+    effort: Literal["", "low", "medium", "high"] = ""
+
+
+class _Models(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    # Drafting a document change.
+    draft: _Model = _Model()
+    # Reviewing a drafted change.
+    review: _Model = _Model()
+
+
 class Settings(BaseModel):
     """Optional operator settings; every value has a working default."""
 
@@ -64,6 +82,7 @@ class Settings(BaseModel):
     jobs: _Jobs = _Jobs()
     service: _Service = _Service()
     elasticsearch: _Elasticsearch = _Elasticsearch()
+    models: _Models = _Models()
 
     @property
     def context_bytes(self) -> int:
@@ -128,15 +147,27 @@ _HEADER = """# Markchain settings. Edit freely; changes apply when the service r
 """
 
 
+def _sections(name: str, section: dict[str, object]) -> list[str]:
+    lines = [f"[{name}]"]
+    lines += [
+        f"{key} = {_value(value)}"
+        for key, value in section.items()
+        if value is not None and not isinstance(value, dict)
+    ]
+    nested = [
+        text
+        for key, value in section.items()
+        if isinstance(value, dict)
+        for text in _sections(f"{name}.{key}", value)
+    ]
+    return ([] if len(lines) == 1 and nested else ["\n".join(lines)]) + nested
+
+
 def dump_settings(settings: Settings) -> str:
     """Render settings as TOML, omitting unset optional values."""
-    sections = []
-    for name, section in settings.model_dump(mode="json").items():
-        lines = [f"[{name}]"]
-        lines += [
-            f"{key} = {_value(value)}"
-            for key, value in section.items()
-            if value is not None
-        ]
-        sections.append("\n".join(lines))
+    sections = [
+        text
+        for name, section in settings.model_dump(mode="json").items()
+        for text in _sections(name, section)
+    ]
     return _HEADER + "\n" + "\n\n".join(sections) + "\n"

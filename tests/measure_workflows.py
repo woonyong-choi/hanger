@@ -14,7 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict
 
 from markchain.documents import Documents
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.requests import digest
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
@@ -37,7 +37,7 @@ class FullDecision(BaseModel):
     changes: list[FullEdit]
 
 
-class FullModel(ClaudeModel):
+class FullModel(CliModel):
     def __init__(self, source: str) -> None:
         super().__init__()
         self.source = source
@@ -142,7 +142,7 @@ def _run(case: dict[str, str], mode: str, output: Path) -> dict[str, Any]:
     target.write_text(case["source"], encoding="utf-8")
     index = SearchIndex(os.environ["MARKCHAIN_TEST_SEARCH_URL"], str(root.resolve()))
     trace = Trace(state / "trace.jsonl")
-    model = FullModel(case["source"]) if mode == "full" else ClaudeModel()
+    model = FullModel(case["source"]) if mode == "full" else CliModel()
     sync = Synchronizer(Documents(root), index)
     sync.reconcile()
     started = time.perf_counter()

@@ -466,11 +466,11 @@ def test_collect_file_respects_writable(layout: tuple[Path, Path, Settings]) -> 
 
 # A missing model command fails at once with a clear message, without retries.
 def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    from markchain.model import ClaudeModel
+    from markchain.model import CliModel
 
     monkeypatch.setenv("PATH", "/nonexistent")
     with pytest.raises(RequestError) as caught:
-        ClaudeModel().generate("prompt", lambda: False)
+        CliModel().generate("prompt", lambda: False)
     assert caught.value.code == "model_missing"
 
 

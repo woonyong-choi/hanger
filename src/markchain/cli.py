@@ -26,7 +26,7 @@ from markchain.documents import Documents
 from markchain.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
 from markchain.errors import MarkchainError
 from markchain.logs import configure
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.progress import Progress
 from markchain.proxy import Launcher, Relay, call_tool
 from markchain.requests import Proposal
@@ -69,7 +69,9 @@ def _parser() -> argparse.ArgumentParser:
         "--search-url",
         help="use an existing Elasticsearch instead of the managed one",
     )
-    parser.add_argument("--model", default="sonnet")
+    parser.add_argument(
+        "--model", help="model name for every role; overrides [models] in settings"
+    )
     parser.add_argument("--trace", action="store_true")
     commands = parser.add_subparsers(dest="command", required=True)
     serve = commands.add_parser(
@@ -152,7 +154,8 @@ def _global_arguments(arguments: argparse.Namespace) -> list[str]:
         values += ["--config", str(arguments.config.resolve())]
     if arguments.search_url:
         values += ["--search-url", arguments.search_url]
-    values += ["--model", arguments.model]
+    if arguments.model:
+        values += ["--model", arguments.model]
     if arguments.trace:
         values.append("--trace")
     return values
@@ -418,7 +421,7 @@ def _local(arguments: argparse.Namespace, settings: Settings) -> object:
             )
         )
         synchronizer = Synchronizer(Documents(arguments.vault), index, settings)
-        planner = Planner(synchronizer, ClaudeModel(arguments.model))
+        planner = Planner(synchronizer, CliModel(settings.models, arguments.model))
         trace = stack.enter_context(
             closing(Trace(state / "trace.jsonl" if arguments.trace else None))
         )

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-__all__ = ["ClaudeModel", "Decision", "Intent", "Planner"]
+__all__ = ["CliModel", "Decision", "Intent", "Planner"]
 
 import json
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
@@ -17,6 +19,7 @@ from pydantic import (
     model_validator,
 )
 
+from markchain.config import _Model, _Models
 from markchain.context import shape
 from markchain.editing import Decision, Review
 from markchain.errors import ConflictError, ModelError, RequestError
@@ -70,45 +73,98 @@ class Intent(BaseModel):
         return SearchScope(value).folders
 
 
-class ClaudeModel:
-    def __init__(self, model: str = "sonnet", timeout_seconds: float = 600) -> None:
-        self.model = model
+# Replaces the CLI's built-in coding-agent system prompt; the task rules travel
+# in the prompt itself. Keeps each call free of unrelated tool instructions.
+_SYSTEM = (
+    "You are a judgment step inside a Markdown document tool. "
+    "Follow the instructions in the user message and return only the required JSON."
+)
+_CLI_NAMES = {"claude": "Claude Code(claude)", "codex": "Codex CLI(codex)"}
+
+
+def _strict_schema(node: Any) -> Any:
+    """Make every object closed and fully required, as codex structured output needs."""
+    if isinstance(node, list):
+        return [_strict_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: _strict_schema(v) for k, v in node.items() if k != "default"}
+    if isinstance(out.get("properties"), dict):
+        out["additionalProperties"] = False
+        out["required"] = list(out["properties"])
+    return out
+
+
+class CliModel:
+    """Runs models only through subscription CLIs chosen per role in settings."""
+
+    def __init__(
+        self,
+        models: _Models | None = None,
+        override: str | None = None,
+        timeout_seconds: float = 600,
+    ) -> None:
+        self.models = models or _Models()
+        # --model on the command line replaces the model name for every role.
+        self.override = override
         self.timeout_seconds = timeout_seconds
 
     # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
     # vars: t = provider latency, n = bounded request and response bytes
     # basis: estimate
     def generate(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        response = self._invoke(prompt, is_cancelled, Decision)
+        response = self._invoke(prompt, is_cancelled, Decision, self.models.draft)
         return {"decision": response["value"], "usage": response["usage"]}
 
     # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
     # vars: t = provider latency, n = bounded request and response bytes
     # basis: estimate
     def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
-        response = self._invoke(prompt, is_cancelled, Review)
+        response = self._invoke(prompt, is_cancelled, Review, self.models.review)
         return {"review": response["value"], "usage": response["usage"]}
 
-    # cost: time O(t+n), heap O(n), stack O(1), io 1, tokens O(n)
-    # vars: t = provider latency, n = bounded request and response bytes
+    # cost: time O(1), heap O(s), stack O(d), io O(1), tokens 0
+    # vars: s = schema bytes, d = schema depth
     # basis: estimate
-    def _invoke(
-        self, prompt: str, is_cancelled: Callable[[], bool], schema: type[BaseModel]
-    ) -> dict[str, Any]:
-        if is_cancelled():
-            raise ConflictError(
-                "원문이 변경되었거나 작업이 취소되어 모델 호출을 중단했습니다."
+    def _command(
+        self, choice: _Model, schema: type[BaseModel], folder: Path
+    ) -> list[str]:
+        name = self.override or choice.model
+        if choice.provider == "codex":
+            schema_path = folder / "schema.json"
+            schema_path.write_text(
+                json.dumps(_strict_schema(schema.model_json_schema())),
+                encoding="utf-8",
             )
+            command = [
+                "codex",
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--ignore-user-config",
+                "--sandbox",
+                "read-only",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(folder / "answer.json"),
+            ]
+            if name:
+                command += ["--model", name]
+            if choice.effort:
+                command += ["-c", f'model_reasoning_effort="{choice.effort}"']
+            return [*command, "-"]
         command = [
             "claude",
             "--safe-mode",
             "-p",
-            "--model",
-            self.model,
             "--output-format",
             "json",
             "--json-schema",
             json.dumps(schema.model_json_schema()),
+            "--system-prompt",
+            _SYSTEM,
             "--tools",
             "",
             "--strict-mcp-config",
@@ -120,6 +176,73 @@ class ClaudeModel:
             "none",
             "--no-session-persistence",
         ]
+        if name:
+            command += ["--model", name]
+        if choice.effort:
+            command += ["--effort", choice.effort]
+        return command
+
+    # cost: time O(n), heap O(n), stack O(1), io O(1), tokens 0
+    # vars: n = CLI output bytes
+    # basis: estimate
+    @staticmethod
+    def _parse(
+        provider: str, output: str, folder: Path, schema: type[BaseModel]
+    ) -> tuple[BaseModel, Any]:
+        if provider == "codex":
+            usage = None
+            for line in output.splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event, dict) and event.get("type") == "turn.completed":
+                    usage = event.get("usage")
+                if isinstance(event, dict) and event.get("type") in {
+                    "turn.failed",
+                    "error",
+                }:
+                    raise ModelError("모델이 오류를 반환했습니다.")
+            answer = (folder / "answer.json").read_text(encoding="utf-8")
+            return schema.model_validate_json(answer), usage
+        envelope = json.loads(output)
+        if envelope.get("is_error"):
+            raise ModelError("모델이 오류를 반환했습니다.")
+        return schema.model_validate(envelope.get("structured_output")), envelope.get(
+            "usage"
+        )
+
+    # cost: time O(t+n), heap O(n), stack O(1), io O(1), tokens O(n)
+    # vars: t = provider latency, n = bounded request and response bytes
+    # basis: estimate
+    def _invoke(
+        self,
+        prompt: str,
+        is_cancelled: Callable[[], bool],
+        schema: type[BaseModel],
+        choice: _Model | None = None,
+    ) -> dict[str, Any]:
+        choice = choice or self.models.draft
+        if is_cancelled():
+            raise ConflictError(
+                "원문이 변경되었거나 작업이 취소되어 모델 호출을 중단했습니다."
+            )
+        with tempfile.TemporaryDirectory(prefix="markchain-model-") as temp:
+            folder = Path(temp)
+            return self._run(prompt, is_cancelled, schema, choice, folder)
+
+    # cost: time O(t+n), heap O(n), stack O(1), io O(1), tokens O(n)
+    # vars: t = provider latency, n = bounded request and response bytes
+    # basis: estimate
+    def _run(
+        self,
+        prompt: str,
+        is_cancelled: Callable[[], bool],
+        schema: type[BaseModel],
+        choice: _Model,
+        folder: Path,
+    ) -> dict[str, Any]:
+        command = self._command(choice, schema, folder)
         deadline = time.monotonic() + self.timeout_seconds
         try:
             process = subprocess.Popen(
@@ -128,11 +251,13 @@ class ClaudeModel:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                cwd=folder,
             )
         except FileNotFoundError as error:
+            name = _CLI_NAMES[choice.provider]
             raise RequestError(
-                "모델 실행 파일(claude)을 찾을 수 없습니다. Claude Code가 설치되어 "
-                "있고 PATH에 있는지 확인하십시오.",
+                f"모델 실행 파일 {name}을 찾을 수 없습니다. 설치되어 있고 로그인했으며 "
+                "PATH에 있는지 확인하십시오.",
                 code="model_missing",
             ) from error
         with process:
@@ -164,17 +289,14 @@ class ClaudeModel:
                 f"모델 실행에 실패했습니다(종료 코드 {process.returncode})."
             )
         try:
-            envelope = json.loads(output)
-            if envelope.get("is_error"):
-                raise ModelError("모델이 오류를 반환했습니다.")
-            value = schema.model_validate(envelope.get("structured_output"))
-        except (ValueError, ValidationError, AttributeError) as error:
+            value, usage = self._parse(choice.provider, output, folder, schema)
+        except (ValueError, ValidationError, AttributeError, OSError) as error:
             raise ModelError("모델 출력이 정해진 형식과 맞지 않습니다.") from error
-        return {"value": value.model_dump(), "usage": envelope.get("usage")}
+        return {"value": value.model_dump(), "usage": usage}
 
 
 class Planner:
-    def __init__(self, synchronizer: Synchronizer, model: ClaudeModel) -> None:
+    def __init__(self, synchronizer: Synchronizer, model: CliModel) -> None:
         self.synchronizer = synchronizer
         self.model = model
         self.trace = Trace()

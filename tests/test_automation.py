@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from markchain.documents import Documents
-from markchain.model import ClaudeModel, Intent, Planner
+from markchain.model import CliModel, Intent, Planner
 from markchain.requests import Change
 from markchain.runtime import Runtime
 from markchain.search import SearchIndex
@@ -38,7 +38,7 @@ def test_cancel_running_model_never_applies_late_result(
 
     monkeypatch.setattr(Planner, "prepare", prepare)
     index = SearchIndex("http://127.0.0.1:19200", str(root))
-    planner = Planner(Synchronizer(Documents(root), index), ClaudeModel())
+    planner = Planner(Synchronizer(Documents(root), index), CliModel())
     try:
         with Runtime(root, tmp_path / "state", planner) as runtime:
             key = runtime.issue_key()
@@ -101,7 +101,7 @@ def test_parallel_proposals_recheck_shared_source(
 
     monkeypatch.setattr(Planner, "prepare", prepare)
     index = SearchIndex("http://127.0.0.1:19200", str(root))
-    planner = Planner(Synchronizer(Documents(root), index), ClaudeModel())
+    planner = Planner(Synchronizer(Documents(root), index), CliModel())
     try:
         with Runtime(root, tmp_path / "state", planner) as runtime:
             for text in ("first", "second"):
@@ -121,7 +121,7 @@ def test_parallel_proposals_recheck_shared_source(
         index.close()
 
 
-class EditingModel(ClaudeModel):
+class EditingModel(CliModel):
     def __init__(self, target: Path, *, conflict: bool = False) -> None:
         super().__init__()
         self.target = target
@@ -204,7 +204,7 @@ def test_model_conflict_uses_selected_mode(
 def test_live_claude_returns_structured_change() -> None:
     if not os.environ.get("MARKCHAIN_TEST_LIVE_MODEL"):
         pytest.skip("requires explicit model invocation")
-    model = ClaudeModel()
+    model = CliModel()
     result = model.generate(
         'Return a Decision: action new, reason "test", sources [], uncertainties [], '
         'changes [{"path":"docs/example.md","operation":"create",'
@@ -270,7 +270,7 @@ def test_partial_replan_preserves_applied_context(
     index = SearchIndex(url, str(root))
     sync = Synchronizer(Documents(root), index)
     sync.reconcile()
-    model = ClaudeModel()
+    model = CliModel()
     calls = 0
 
     def generate(prompt: str, cancelled: Callable[[], bool]) -> dict[str, Any]:
