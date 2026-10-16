@@ -139,7 +139,7 @@ class Service:
 
     # ---------- gate ----------
 
-    def _ready(self) -> None:
+    def ready(self) -> None:
         """Refuse every request while a decision waits for the user."""
         self.touch()
         self.hub.refresh()
@@ -161,8 +161,18 @@ class Service:
         )
         raise RequestError("\n".join(lines), code="decision_required")
 
-    def _closet(self, closet: str | None) -> OpenCloset:
-        return self.hub.get(closet)
+    def _closet(self, closet: str | None, key: str | None = None) -> OpenCloset:
+        """The closet a request names; a key already used elsewhere is refused."""
+        opened = self.hub.get(closet)
+        if key is not None:
+            holder = self.hub.holding(key)
+            if holder is not None and holder.id != opened.id:
+                raise RequestError(
+                    f"This request key was already used in closet #{holder.id}. "
+                    "Get a new one with issue_key.",
+                    code="key_reused",
+                )
+        return opened
 
     # ---------- catalog and decisions ----------
 
@@ -238,7 +248,7 @@ class Service:
 
     def issue_key(self) -> str:
         """Issue a request key. Every mutating call needs its own fresh key."""
-        self._ready()
+        self.ready()
         return new_key(self.hub.secret)
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
@@ -257,8 +267,8 @@ class Service:
         Names are collection time, title (first heading, first line, or the
         file's own name), then a short content hash.
         """
-        self._ready()
-        opened = self._closet(closet)
+        self.ready()
+        opened = self._closet(closet, key)
         if (text is None) == (file is None):
             raise RequestError("Give exactly one of text or file.")
         if file is not None:
@@ -323,7 +333,7 @@ class Service:
         before searching when a note seems to be missing. While the search
         server starts, progress is reported for up to 30 seconds.
         """
-        await anyio.to_thread.run_sync(self._ready)
+        await anyio.to_thread.run_sync(self.ready)
         waited = 0
         while self.engine is not None and not self.engine.ready():
             message = self.engine.message()
@@ -356,7 +366,7 @@ class Service:
         folders: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         """Synchronous search used by the CLI and the MCP tool."""
-        self._ready()
+        self.ready()
         opened = self._closet(closet)
         if self.engine is not None:
             self.engine.require()
@@ -388,7 +398,7 @@ class Service:
     # basis: estimate
     def read_document(self, path: str, closet: str | None = None) -> dict[str, str]:
         """Read one Markdown note as it is now (path relative to the closet)."""
-        self._ready()
+        self.ready()
         opened = self._closet(closet)
         if opened.policy.excluded(path):
             raise RequestError(
@@ -406,8 +416,8 @@ class Service:
         self, key: str, intent: Intent, closet: str | None = None
     ) -> dict[str, str]:
         """Queue a write, edit or organize request. Accepted is not completed."""
-        self._ready()
-        opened = self._closet(closet)
+        self.ready()
+        opened = self._closet(closet, key)
         return {"key": key, "status": opened.runtime.submit_intent(key, intent)}
 
     # cost: time O(c*n), heap O(n), stack O(1), io O(c)
@@ -415,7 +425,7 @@ class Service:
     # basis: estimate
     def job_status(self, key: str) -> dict[str, Any]:
         """Read progress, result, reason and the next possible actions."""
-        self._ready()
+        self.ready()
         opened = self.hub.holding(key)
         if opened is None:
             validate_key(key, self.hub.secret)
@@ -429,7 +439,7 @@ class Service:
 
     def cancel_job(self, key: str) -> dict[str, bool]:
         """Cancel remaining work; files already written are not rolled back."""
-        self._ready()
+        self.ready()
         opened = self.hub.holding(key)
         return {"cancelled": opened is not None and opened.runtime.cancel(key)}
 
@@ -444,7 +454,7 @@ class Service:
         Use a fresh key from issue_key as new_key. Saved proposals are never
         forced over newer content.
         """
-        self._ready()
+        self.ready()
         opened = self.hub.holding(key)
         if opened is None or opened.runtime.status(key).get("status") != "conflict":
             raise RequestError(

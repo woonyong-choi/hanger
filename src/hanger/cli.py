@@ -26,6 +26,7 @@ from typing import Any
 
 from elastic_transport import TransportError
 from elasticsearch import ApiError
+from filelock import FileLock, Timeout
 from pydantic import ValidationError
 
 from hanger import __version__
@@ -328,14 +329,19 @@ def _daemon(
     settings: Settings,
     launcher: Launcher,
 ) -> object:
-    """Become the daemon, or step aside when another one already serves."""
+    """Become the daemon, or step aside when another one already serves.
+
+    The daemon lock is held for the daemon's whole life, so a new daemon
+    waits while an old one is still shutting down.
+    """
+    lock = FileLock(store.state / "daemon.lock", timeout=0)
     deadline = time.monotonic() + _DAEMON_LOCK_SECONDS
     while True:
         try:
-            return _local(arguments, store, settings)
-        except HangerError as error:
-            if error.code != "state_in_use":
-                raise
+            with lock:
+                return _local(arguments, store, settings)
+        except Timeout:
+            pass
         connection = launcher.connect()
         if connection is not None:
             connection.close()
@@ -499,9 +505,11 @@ def _execute(arguments: argparse.Namespace, hub: ClosetHub) -> object:
     runtime, synchronizer = opened.runtime, opened.synchronizer
     match command:
         case "submit":
+            service.ready()
             proposal = Proposal.model_validate_json(arguments.proposal.read_bytes())
             return {"status": runtime.submit(arguments.key, proposal)}
         case "run":
+            service.ready()
             return runtime.run_next()
         case "cleanup":
             return runtime.cleanup()

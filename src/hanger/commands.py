@@ -194,7 +194,8 @@ def closet_command(
     store.remove_closet(closet.id)
     connection = launcher.connect()
     if connection is None:
-        # Nothing runs: clean up now; the search index goes on the next start.
+        # Nothing runs: clean up now. The background service deletes the
+        # search index when it next runs Hanger's own search engine.
         if closet.path.is_dir():
             Documents(closet.path).release()
         shutil.rmtree(store.state / "closets" / str(closet.id), ignore_errors=True)

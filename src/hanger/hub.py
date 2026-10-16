@@ -14,6 +14,7 @@ __all__ = ["ClosetHub", "OpenCloset"]
 import logging
 import shutil
 import threading
+import time
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -22,14 +23,14 @@ from pathlib import Path
 from elastic_transport import TransportError
 from elasticsearch import ApiError, Elasticsearch
 
-from hanger.closets import ClosetPolicy, check_ignore
+from hanger.closets import ClosetPolicy, check_ignore, closet_present
 from hanger.config import Settings
 from hanger.documents import Documents
 from hanger.errors import HangerError, RequestError
 from hanger.model import CliModel, Planner
 from hanger.requests import load_secret
 from hanger.runtime import Runtime
-from hanger.search import INDEX_PREFIX, SearchIndex
+from hanger.search import INDEX_PREFIX, SearchIndex, index_name
 from hanger.store import Closet, StateStore
 from hanger.sync import Synchronizer
 from hanger.trace import Trace
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 # How long closing a removed closet waits for its running jobs to stop.
 _DRAIN_SECONDS = 60
+# How often a closet that could not be opened is tried again.
+_RETRY_SECONDS = 10
 
 
 @dataclass
@@ -87,6 +90,8 @@ class ClosetHub:
         # Closets that could not be opened, with the reason.
         self._broken: dict[int, str] = {}
         self._revision = -1
+        self._retry_at = 0.0
+        self._pruned = False
         self._watching = False
         # Set by the service: why queued jobs are not moving, if they are not.
         self.health: Callable[[], str | None] = lambda: None
@@ -104,39 +109,68 @@ class ClosetHub:
     # basis: estimate
     def refresh(self) -> None:
         """Bring the open closets in line with the catalog and ignore files."""
+        removed: list[OpenCloset] = []
         with self._lock:
-            for closet in self.store.closets():
-                if closet.path.is_dir():
-                    check_ignore(self.store, closet)
-            revision = self.store.revision()
-            if revision == self._revision:
-                return
-            self._revision = revision
             closets = {c.id: c for c in self.store.closets()}
-            for closet_id in list(self._open):
-                if closet_id not in closets:
-                    self._close(self._open.pop(closet_id), removed=True)
-            for closet_id in list(self._broken):
-                if closet_id not in closets:
-                    self._broken.pop(closet_id)
             for closet in closets.values():
-                current = self._open.get(closet.id)
-                if current is None:
-                    self._try_open(closet)
-                    continue
-                applied = self.store.applied_ignore(closet.id)
-                if applied != current.policy.ignore_text:
-                    current.policy.update(applied)
-                    if current.scan is not None:
-                        current.scan.request_rescan()
-            self._prune(set(closets))
+                self._check(closet)
+            revision = self.store.revision()
+            if revision != self._revision:
+                self._revision = revision
+                self._pruned = False
+                for closet_id in list(self._open):
+                    if closet_id not in closets:
+                        removed.append(self._open.pop(closet_id))
+                for closet_id in list(self._broken):
+                    if closet_id not in closets:
+                        self._broken.pop(closet_id)
+                for closet in closets.values():
+                    current = self._open.get(closet.id)
+                    if current is None:
+                        self._try_open(closet)
+                    else:
+                        self._apply_rules(current)
+                self._retry_at = time.monotonic() + _RETRY_SECONDS
+            elif self._broken and time.monotonic() >= self._retry_at:
+                # A missing folder may be back, or a lock released.
+                for closet_id in list(self._broken):
+                    self._try_open(closets[closet_id])
+                self._retry_at = time.monotonic() + _RETRY_SECONDS
+        # Closing waits for running jobs; other requests go on meanwhile.
+        for opened in removed:
+            self._close(opened, removed=True)
+        if not self._pruned:
+            self._pruned = self._prune(list(closets.values()))
+
+    def _check(self, closet: Closet) -> None:
+        """Turn an edited ignore file into a decision; skip absent folders."""
+        if not closet_present(closet.path):
+            # Unmounted or moved: a question about it could not be answered.
+            for decision in self.store.decisions():
+                if decision.closet_id == closet.id:
+                    self.store.close_decision(decision.id, "withdrawn")
+            return
+        try:
+            check_ignore(self.store, closet)
+        except OSError as error:
+            logger.warning("cannot read the ignore file of %s: %s", closet.path, error)
+
+    def _apply_rules(self, opened: OpenCloset) -> None:
+        applied = self.store.applied_ignore(opened.id)
+        if applied != opened.policy.ignore_text:
+            opened.policy.update(applied)
+            if opened.scan is not None:
+                opened.scan.request_rescan()
 
     def _try_open(self, closet: Closet) -> None:
         try:
+            if not closet_present(closet.path):
+                raise RequestError(f"The folder is missing or empty: {closet.path}")
             self._open[closet.id] = self._build(closet)
             self._broken.pop(closet.id, None)
         except (OSError, HangerError) as error:
-            logger.warning("cannot open closet %s: %s", closet.path, error)
+            if self._broken.get(closet.id) != str(error):
+                logger.warning("cannot open closet %s: %s", closet.path, error)
             self._broken[closet.id] = str(error)
             return
         if self._watching:
@@ -179,6 +213,8 @@ class ClosetHub:
             try:
                 opened.synchronizer.index.delete()
             except (TransportError, ApiError) as error:
+                # The prune on a later refresh removes it.
+                self._pruned = False
                 logger.warning(
                     "could not delete the index of %s: %s", opened.root, error
                 )
@@ -187,26 +223,30 @@ class ClosetHub:
             _release(opened.root)
             shutil.rmtree(self.folder / str(opened.id), ignore_errors=True)
 
-    def _prune(self, registered: set[int]) -> None:
-        """Remove state and indexes of closets removed while nothing ran."""
+    def _prune(self, registered: list[Closet]) -> bool:
+        """Remove state and indexes of closets that are no longer registered.
+
+        Returns False when the search server could not be asked yet, so a
+        later refresh tries again.
+        """
+        ids = {str(closet.id) for closet in registered}
         if self.folder.is_dir():
             for entry in self.folder.iterdir():
-                if entry.is_dir() and not (
-                    entry.name.isdigit() and int(entry.name) in registered
-                ):
+                if entry.is_dir() and entry.name not in ids:
                     shutil.rmtree(entry, ignore_errors=True)
         if not self.owns_search:
-            return
-        keep = {opened.synchronizer.index.name for opened in self._open.values()}
+            return True
+        keep = {index_name(str(closet.path)) for closet in registered}
         client = Elasticsearch(self.search_url, request_timeout=20, max_retries=0)
         try:
             for name in client.indices.get(index=INDEX_PREFIX + "*"):
                 if name not in keep:
                     client.options(ignore_status=404).indices.delete(index=name)
         except (TransportError, ApiError):
-            return  # the search server is not up yet; the next refresh retries
+            return False
         finally:
             client.close()
+        return True
 
     # ---------- lookups ----------
 
@@ -250,10 +290,14 @@ class ClosetHub:
             opened = self._open.get(closet.id)
             if opened is None:
                 reason = self._broken.get(closet.id, "it is not open yet")
+                hint = (
+                    ""
+                    if closet_present(closet.path)
+                    else " If the folder moved, remove the closet (hanger closet "
+                    f"remove {closet.id}) and add the new location."
+                )
                 raise RequestError(
-                    f"Closet {closet.path} is not available: {reason}. If the "
-                    "folder moved, remove it (hanger closet remove "
-                    f"{closet.id}) and add the new location.",
+                    f"Closet {closet.path} is not available: {reason}.{hint}",
                     code="closet_unavailable",
                 )
             return opened

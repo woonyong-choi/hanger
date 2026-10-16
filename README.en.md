@@ -55,7 +55,7 @@ write: false
 Notes in this folder are final. Quote them; do not change them.
 ```
 
-**The user approves ignore-rule changes**: editing or deleting `.hangerignore` does not take effect at once; it is recorded as a decision. While a decision is pending, Hanger refuses every search and change request and asks for the answer first. File watching and index updates keep running. Hanger asks because a note taken out of the index may not get the same keywords and links when it is indexed again. For a deleted file, approving recreates the default file and declining restores the previous one.
+**The user approves ignore-rule changes**: editing the patterns in `.hangerignore` or deleting the file does not take effect at once; it is recorded as a decision. An edit that only changes comments cannot affect the index and applies at once. While a decision is pending, Hanger refuses every search and change request and asks for the answer first. If a closet's folder is missing or empty (an unplugged drive, say), its decision is withdrawn and asked again when the folder is back. File watching and index updates keep running. Hanger asks because a note taken out of the index may not get the same keywords and links when it is indexed again. For a deleted file, approving recreates the default file and declining restores the previous one.
 
 ## Using it from AI tools
 

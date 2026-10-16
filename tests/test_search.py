@@ -12,6 +12,7 @@ import pytest
 
 from hanger.documents import Documents
 from hanger.errors import RequestError, SearchUnavailableError
+from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
 from hanger.watcher import ClosetWatcher
@@ -24,6 +25,8 @@ def sync(tmp_path: Path) -> Iterator[Synchronizer]:
         pytest.skip("requires an explicit local Elasticsearch test endpoint")
     closet = tmp_path / "closet"
     closet.mkdir()
+    # A registered closet always holds its ignore file.
+    (closet / IGNORE_FILE).write_text(DEFAULT_IGNORE)
     index = SearchIndex(url, str(closet))
     index.ensure()
     yield Synchronizer(Documents(closet), index)
@@ -370,3 +373,15 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
         "absent", folders=("문서/개발",), fallback_reason="insufficient_evidence"
     )
     assert absent["documents"] == []
+
+
+# A closet folder that vanished or became an empty mount point keeps its index.
+def test_reconcile_refuses_a_missing_or_empty_folder(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    (root / "a.md").write_text("# kept")
+    sync.reconcile()
+    for name in (IGNORE_FILE, "a.md"):
+        (root / name).unlink()
+    with pytest.raises(RequestError, match="missing or empty"):
+        sync.reconcile()
+    assert [entry["path"] for entry in sync.index.entries()] == ["a.md"]

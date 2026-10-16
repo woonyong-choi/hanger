@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__all__ = ["INDEX_PREFIX", "SearchIndex"]
+__all__ = ["INDEX_PREFIX", "SearchIndex", "index_name"]
 
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -14,11 +14,16 @@ from hanger.scope import SearchScope
 INDEX_PREFIX = "hanger-"
 
 
+def index_name(closet_identity: str) -> str:
+    """The index of a closet, named after its path."""
+    return INDEX_PREFIX + digest(closet_identity.encode())[:24] + "-v2"
+
+
 class SearchIndex:
     """The search index of one closet, named after the closet's path."""
 
     def __init__(self, url: str, closet_identity: str) -> None:
-        self.name = INDEX_PREFIX + digest(closet_identity.encode())[:24] + "-v2"
+        self.name = index_name(closet_identity)
         self.client = Elasticsearch(url, request_timeout=20, max_retries=0)
 
     def close(self) -> None:

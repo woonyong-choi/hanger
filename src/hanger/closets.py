@@ -14,6 +14,7 @@ from __future__ import annotations
 __all__ = [
     "ClosetPolicy",
     "check_ignore",
+    "closet_present",
     "describe_decision",
     "register_closet",
     "resolve_decision",
@@ -95,6 +96,18 @@ class ClosetPolicy:
         return [{"file": path, "rules": text} for path, text in ordered]
 
 
+def closet_present(root: Path) -> bool:
+    """Whether a closet's folder is there to work on.
+
+    An empty folder counts as absent: it is most likely an unmounted drive's
+    mount point, and treating it as a closet would empty its index.
+    """
+    try:
+        return root.is_dir() and any(root.iterdir())
+    except OSError:
+        return False
+
+
 def ignore_file(root: Path) -> Path:
     return root / IGNORE_FILE
 
@@ -144,6 +157,8 @@ def check_ignore(store: StateStore, closet: Closet) -> int | None:
     that only touches comments is applied at once; a file put back to the
     applied text withdraws the question.
     """
+    if not closet_present(closet.path):
+        return None
     applied = store.applied_ignore(closet.id)
     current = _read(ignore_file(closet.path))
     pending = [d for d in store.decisions() if d.closet_id == closet.id]
@@ -245,6 +260,12 @@ def resolve_decision(
             code="decision_closed",
         )
     closet = next(c for c in store.closets() if c.id == decision.closet_id)
+    if not closet_present(closet.path):
+        raise RequestError(
+            f"The folder of closet #{closet.id} is missing or empty: {closet.path}. "
+            "Reconnect it and answer again.",
+            code="closet_unavailable",
+        )
     path = ignore_file(closet.path)
     if answer == "approve":
         text = decision.detail.get("text", DEFAULT_IGNORE)

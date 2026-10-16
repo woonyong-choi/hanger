@@ -243,3 +243,47 @@ def test_setup_prints_runnable_serve_command(tmp_path: Path) -> None:
     arguments = _parser().parse_args(words[1:])
     assert arguments.command == "serve"
     assert arguments.state == tmp_path / "state"
+
+
+# A key used in one closet cannot start a job in another.
+def test_key_is_not_reused_across_closets(tmp_path: Path) -> None:
+    store = StateStore(tmp_path / "state")
+    service = Service(ClosetHub(store, Settings(), _OFFLINE))
+    for name in ("one", "two"):
+        service.register_closet(str(_closet(tmp_path / name)))
+    key = service.issue_key()
+    assert service.collect(key, "memo", closet="1")["status"] == "accepted"
+    with pytest.raises(RequestError) as caught:
+        service.collect(key, "memo", closet="2")
+    assert caught.value.code == "key_reused"
+    service.hub.close()
+
+
+# A missing folder withdraws its question and is reported; it comes back later.
+def test_missing_folder_withdraws_its_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = StateStore(tmp_path / "state")
+    root = _closet(tmp_path / "closet")
+    hub = ClosetHub(store, Settings(), _OFFLINE)
+    service = Service(hub)
+    service.register_closet(str(root))
+    (root / IGNORE_FILE).write_text(DEFAULT_IGNORE + "private/\n")
+    assert service.list_decisions()["decisions"]
+    moved = tmp_path / "moved"
+    root.rename(moved)
+    assert service.list_decisions()["decisions"] == []
+    root.mkdir()  # an empty mount point counts as missing too
+    monkeypatch.setattr("hanger.hub._RETRY_SECONDS", 0)
+    hub._close(hub._open.pop(1))  # as if the folder vanished before opening
+    hub._broken[1] = "gone"
+    with pytest.raises(RequestError) as caught:
+        service.read_document("notes/a.md")
+    assert caught.value.code == "closet_unavailable"
+    assert "hanger closet remove 1" in str(caught.value)
+    root.rmdir()
+    moved.rename(root)
+    with pytest.raises(RequestError) as waiting:
+        service.read_document("notes/a.md")
+    assert waiting.value.code == "decision_required"
+    hub.close()

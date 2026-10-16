@@ -14,7 +14,7 @@ from elastic_transport import TransportError
 from elasticsearch import ApiError, BadRequestError
 from elasticsearch.helpers import BulkIndexError
 
-from hanger.closets import ClosetPolicy
+from hanger.closets import ClosetPolicy, closet_present
 from hanger.config import Settings
 from hanger.context import snippets
 from hanger.documents import Documents
@@ -52,6 +52,11 @@ class Synchronizer:
     def reconcile(
         self, is_cancelled: Callable[[], bool] = lambda: False
     ) -> dict[str, Any]:
+        if not closet_present(self.documents.root):
+            # An unmounted drive would look like a closet whose notes all went.
+            raise RequestError(
+                f"The closet folder is missing or empty: {self.documents.root}"
+            )
         with self._writer:
             self.index.ensure()
             self.diagnostics.clear()
