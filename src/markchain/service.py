@@ -7,6 +7,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
@@ -19,7 +20,7 @@ from markchain.model import Intent
 from markchain.runtime import Runtime
 from markchain.sync import Synchronizer
 from markchain.watcher import VaultWatcher
-from markchain.workflows import collect_proposal
+from markchain.workflows import collect_file_target, collect_proposal
 
 if TYPE_CHECKING:
     from markchain.elastic import ElasticManager
@@ -124,12 +125,23 @@ class Service:
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = collected text bytes
     # basis: estimate
-    def collect(self, key: str, text: str) -> dict[str, str]:
-        """Save any text unchanged under inbox/ (no model).
+    def collect(
+        self, key: str, text: str | None = None, file: str | None = None
+    ) -> dict[str, str]:
+        """Save text or any file unchanged under inbox/ (no model).
 
-        The file is named collection time, title, then a short content hash.
+        Give exactly one of text or file (an absolute path on this computer).
+        Names are collection time, title (first heading, first line, or the
+        file's own name), then a short content hash.
         """
         self.touch()
+        if (text is None) == (file is None):
+            raise RequestError("text와 file 중 하나만 지정하십시오.")
+        if file is not None:
+            return self._collect_file(key, file)
+        return self._collect_text(key, text or "")
+
+    def _collect_text(self, key: str, text: str) -> dict[str, str]:
         try:
             size = len(text.encode())
         except UnicodeEncodeError as error:
@@ -142,6 +154,33 @@ class Service:
         proposal = collect_proposal(text, self.runtime.key_issued(key))
         status = self.runtime.submit(key, proposal)
         return {"key": key, "status": status, "path": proposal.changes[0].path}
+
+    # cost: time O(n), heap O(1), stack O(1), io O(n)
+    # vars: n = file bytes
+    # basis: estimate
+    def _collect_file(self, key: str, file: str) -> dict[str, str]:
+        source = Path(file).expanduser()
+        if not source.is_absolute():
+            raise RequestError("file에는 이 컴퓨터의 절대 경로를 지정하십시오.")
+        if not source.is_file():
+            raise RequestError(
+                f"수집할 파일을 찾을 수 없습니다: {file}", code="not_found"
+            )
+        issued = self.runtime.key_issued(key)
+        target, digest = collect_file_target(source.resolve(), issued)
+        if not self.synchronizer.settings.writable(target):
+            raise RequestError(
+                f"쓰기 허용 범위 밖의 경로입니다: {target}", code="write_denied"
+            )
+        fingerprint = "file:" + digest + ":" + target
+        if self.runtime.seen(key, fingerprint):
+            return {"key": key, "status": "duplicate", "path": target}
+        try:
+            outcome = self.runtime.documents.store_file(target, source, digest)
+        except OSError as error:
+            raise RequestError(f"파일을 수집하지 못했습니다: {error}") from error
+        self.runtime.record_done(key, fingerprint, {target: outcome})
+        return {"key": key, "status": "completed", "path": target}
 
     # cost: time O(n), heap O(k), stack O(d), io O(f)
     # vars: n = searched bytes, k = result bytes, d = directory depth, f = files read

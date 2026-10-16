@@ -402,3 +402,73 @@ def test_similar_document_is_checked_before_create(
     assert any("비슷한 기존 문서" in prompt for prompt in model.prompts)
     assert not (root / "docs/retry.md").exists()
     assert "3회" in (root / "docs/payment.md").read_text()
+
+
+# Any file is collected byte for byte, named time-filename-hash.extension.
+def test_collect_any_file(tmp_path: Path) -> None:
+    root = tmp_path / "vault"
+    root.mkdir()
+    picture = tmp_path / "회의 사진 (1).PNG"
+    data = bytes(range(256)) * 4000
+    picture.write_bytes(data)
+    service, runtime = _service(root, tmp_path / "state", Settings())
+    with runtime:
+        key = runtime.issue_key()
+        result = service.collect(key, file=str(picture))
+        assert result["status"] == "completed"
+        digest = hashlib.sha256(data).hexdigest()
+        assert result["path"].endswith(f"-회의-사진-(1)-{digest[:8]}.png")
+        assert (root / result["path"]).read_bytes() == data
+        assert service.collect(key, file=str(picture))["status"] == "duplicate"
+        assert runtime.describe(key)["status"] == "completed"
+        other = tmp_path / "other.pdf"
+        other.write_bytes(b"%PDF-1.7")
+        with pytest.raises(RequestError, match="다른 내용으로 사용된"):
+            service.collect(key, file=str(other))
+        with pytest.raises(RequestError, match="절대 경로"):
+            service.collect(runtime.issue_key(), file="other.pdf")
+        with pytest.raises(RequestError) as missing:
+            service.collect(runtime.issue_key(), file=str(tmp_path / "none.bin"))
+        assert missing.value.code == "not_found"
+        with pytest.raises(RequestError, match="하나만"):
+            service.collect(runtime.issue_key(), text="a", file=str(other))
+    leftovers = [p.name for p in (root / "inbox").iterdir() if p.name.startswith(".")]
+    assert leftovers == []
+
+
+# A file whose content changes while it is copied leaves nothing behind.
+def test_collect_file_changed_while_copying(tmp_path: Path) -> None:
+    from markchain.errors import ConflictError
+
+    root = tmp_path / "vault"
+    root.mkdir()
+    source = tmp_path / "a.bin"
+    source.write_bytes(b"first")
+    documents = Documents(root)
+    with pytest.raises(ConflictError):
+        documents.store_file(
+            "inbox/x-a-00000000.bin", source, hashlib.sha256(b"other").hexdigest()
+        )
+    assert not (root / "inbox" / "x-a-00000000.bin").exists()
+    assert [p.name for p in (root / "inbox").iterdir()] == []
+
+
+# Collecting a file into a folder that is not writable is refused.
+def test_collect_file_respects_writable(layout: tuple[Path, Path, Settings]) -> None:
+    root, state, settings = layout
+    source = root.parent / "a.txt"
+    source.write_text("x")
+    service, runtime = _service(root, state, settings)
+    with runtime, pytest.raises(RequestError) as caught:
+        service.collect(runtime.issue_key(), file=str(source))
+    assert caught.value.code == "write_denied"
+
+
+# A missing model command fails at once with a clear message, without retries.
+def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    from markchain.model import ClaudeModel
+
+    monkeypatch.setenv("PATH", "/nonexistent")
+    with pytest.raises(RequestError) as caught:
+        ClaudeModel().generate("prompt", lambda: False)
+    assert caught.value.code == "model_missing"

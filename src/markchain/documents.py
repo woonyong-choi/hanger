@@ -5,6 +5,7 @@ __all__ = ["Documents"]
 import hashlib
 import logging
 import os
+import shutil
 from pathlib import Path
 
 from markchain.errors import ConflictError, RequestError
@@ -13,6 +14,8 @@ from markchain.requests import Change, Proposal, digest
 logger = logging.getLogger(__name__)
 
 _DELETING = ".markchain-deleting"
+# Space kept free on the disk after collecting a file.
+_FREE_MARGIN = 1024 * 1024 * 1024
 
 
 class Documents:
@@ -21,6 +24,11 @@ class Documents:
         self._writer_id = writer_id
 
     def resolve(self, relative: str) -> Path:
+        if Path(relative).suffix.lower() != ".md":
+            raise RequestError("Markdown(.md) 문서만 다룰 수 있습니다.")
+        return self._resolve_any(relative)
+
+    def _resolve_any(self, relative: str) -> Path:
         path = Path(relative)
         if path.is_absolute() or ".." in path.parts or not path.parts:
             raise RequestError(
@@ -32,8 +40,6 @@ class Documents:
             )
         if any(part.startswith(".") for part in path.parts):
             raise RequestError("숨김 경로의 문서는 다룰 수 없습니다.")
-        if path.suffix.lower() != ".md":
-            raise RequestError("Markdown(.md) 문서만 다룰 수 있습니다.")
         target = self.root / path
         if not target.resolve().is_relative_to(self.root):
             raise RequestError("문서 경로가 Vault 밖을 가리킵니다.")
@@ -96,6 +102,56 @@ class Documents:
             if target.exists():
                 pending.chmod(target.stat().st_mode & 0o777)
             os.replace(pending, target)
+            _sync_directory(target.parent)
+        finally:
+            pending.unlink(missing_ok=True)
+        return "applied"
+
+    # cost: time O(n), heap O(1), stack O(1), io O(n/b)
+    # vars: n = file bytes, b = 1 MiB copy block
+    # basis: estimate
+    def store_file(self, relative: str, source: Path, expected: str) -> str:
+        """Copy any file into the vault unchanged, never replacing a file.
+
+        The copy is written to a hidden temporary name, checked against the
+        expected SHA-256, then linked into place. Nothing is left behind if
+        any step fails.
+        """
+        target = self._resolve_any(relative)
+        if target.exists():
+            if _hash_file(target) == expected:
+                return "already_applied"
+            raise ConflictError(f"같은 이름의 다른 파일이 이미 있습니다: {relative}")
+        size = source.stat().st_size
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if shutil.disk_usage(target.parent).free < size + _FREE_MARGIN:
+            raise RequestError("디스크 여유 공간이 부족해 파일을 수집할 수 없습니다.")
+        pending = self._pending_path(relative)
+        pending.unlink(missing_ok=True)
+        try:
+            hashed = hashlib.sha256()
+            with source.open("rb") as reader, pending.open("xb") as output:
+                while chunk := reader.read(1024 * 1024):
+                    hashed.update(chunk)
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            if hashed.hexdigest() != expected:
+                raise ConflictError(
+                    f"수집하는 동안 원본 파일이 변경되었습니다: {source}"
+                )
+            try:
+                os.link(pending, target)  # fails instead of overwriting
+            except FileExistsError:
+                if _hash_file(target) == expected:
+                    return "already_applied"
+                raise ConflictError(
+                    f"같은 이름의 다른 파일이 이미 있습니다: {relative}"
+                ) from None
+            except OSError:
+                if target.exists():
+                    raise
+                os.rename(pending, target)
             _sync_directory(target.parent)
         finally:
             pending.unlink(missing_ok=True)

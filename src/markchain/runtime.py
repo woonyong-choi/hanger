@@ -252,6 +252,42 @@ class Runtime:
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = prior proposal and observed effects bytes
     # basis: estimate
+    def seen(self, key: str, fingerprint: str) -> bool:
+        """Return whether this key already carries this request.
+
+        Raises when the key was used for a different request.
+        """
+        validate_key(key, self._secret)
+        previous = self.status(key)
+        if not previous:
+            return False
+        if previous["fingerprint"] != fingerprint:
+            raise RequestError(
+                "이미 다른 내용으로 사용된 요청 키입니다. "
+                "issue_key로 새 키를 발급받으십시오."
+            )
+        return True
+
+    def record_done(self, key: str, fingerprint: str, results: dict[str, str]) -> None:
+        """Record work finished at once (a collected file) as a completed job."""
+        deadline = validate_key(key, self._secret)
+        with self._admission:
+            if self.status(key):
+                return
+            self._graph.update_state(
+                _config(key),
+                {
+                    "key": key,
+                    "fingerprint": fingerprint,
+                    "deadline": deadline,
+                    "status": "completed",
+                    "results": results,
+                    "error": "",
+                    "error_code": "",
+                },
+                as_node="apply",
+            )
+
     def key_issued(self, key: str) -> float:
         """Return when a valid key was issued."""
         return validate_key(key, self._secret) - KEY_LIFETIME_SECONDS
