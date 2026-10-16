@@ -77,9 +77,11 @@ def materialize(
     policy: EditPolicy | None = None,
 ) -> dict[str, Any]:
     policy = policy or EditPolicy()
-    if any(path not in sources for path in decision.sources):
+    unknown = [path for path in decision.sources if path not in sources]
+    if unknown:
         raise RequestError(
-            "You cited a note you were not given. Cite only the given notes.",
+            f"You cited notes you were not given: {', '.join(unknown)}. Cite only "
+            "the given notes, or 'request' for the user's own text.",
             code="model_output",
         )
     for evidence in decision.evidence:
