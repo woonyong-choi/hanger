@@ -43,7 +43,8 @@ class Intent(BaseModel):
     paths: tuple[str, ...] = Field(
         default=(),
         max_length=100,
-        description="Explicit source paths read independently of the search folders",
+        description="Existing notes to read in addition to the search results. "
+        "Do not list a note that is still to be created",
     )
     folders: tuple[str, ...] = Field(
         default=(),
@@ -334,7 +335,10 @@ class Planner:
             except FileNotFoundError as error:
                 if path not in applied or applied[path] is not None:
                     raise RequestError(
-                        f"An input note is missing: {path}", code="input_missing"
+                        f"An input note is missing: {path}. paths lists existing "
+                        "notes to read; to create a new note, leave it out of paths "
+                        "and say where it goes in the instruction.",
+                        code="input_missing",
                     ) from error
         if previous:
             for change in previous.get("proposal", {}).get("changes", []):

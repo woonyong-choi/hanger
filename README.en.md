@@ -10,9 +10,6 @@
   <a href="#quick-start">Quick start</a> · <a href="#how-it-works">How it works</a> · <a href="#using-it-from-ai-tools">Using it from AI tools</a>
 </p>
 
-> [!NOTE]
-> In development. There are no releases; build from source.
-
 ## Quick start
 
 You need macOS or Linux, Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a signed-in Claude Code (`claude`) or Codex (`codex`). Hanger uses no API keys; it runs models through the subscription you already have.
@@ -108,7 +105,7 @@ Settings, the closet list, applied ignore rules and decisions are stored in `~/.
 
 | Available | Not yet |
 |---|---|
-| Several closets, ignore rules with approval, per-folder rule files, search, write/edit/organize requests with review, subscription CLIs (Claude Code, Codex) | Releases, search based on a keyword and concept tree |
+| Several closets, ignore rules with approval, per-folder rule files, search, write/edit/organize requests with review, subscription CLIs (Claude Code, Codex) | Search based on a keyword and concept tree |
 
 Before 1.0, formats and commands may change without notice.
 

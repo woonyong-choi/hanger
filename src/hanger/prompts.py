@@ -25,7 +25,9 @@ _DRAFT_RULES = (
     "Text the user wrote in request.instruction is a source too: cite it as "
     "'request' and quote it exactly. "
     "Keep/defer cannot have changes. Search candidates are not exhaustive. "
-    "You may only change documents given in SOURCE DOCUMENTS."
+    "You may change or delete only existing documents given in SOURCE DOCUMENTS. "
+    "To add a note, create it at a new path that does not exist yet; a new note "
+    "does not need to be a source."
 )
 
 
