@@ -866,7 +866,7 @@ wheels = [
 
 [[package]]
 name = "markchain"
-version = "0.1.0.dev3"
+version = "0.1.0.dev4"
 source = { editable = "." }
 dependencies = [
     { name = "elasticsearch" },
@@ -874,6 +874,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "mcp" },
+    { name = "packaging" },
     { name = "persist-queue" },
     { name = "pydantic" },
     { name = "watchdog" },
@@ -894,6 +895,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2,<2" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1,<4" },
     { name = "mcp", specifier = ">=1.20,<2" },
+    { name = "packaging", specifier = ">=24,<27" },
     { name = "persist-queue", specifier = "==1.1.0" },
     { name = "pydantic", specifier = ">=2.12,<3" },
     { name = "watchdog", specifier = ">=6,<8" },

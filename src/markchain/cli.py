@@ -20,6 +20,7 @@ from elastic_transport import TransportError
 from elasticsearch import ApiError
 from pydantic import ValidationError
 
+from markchain import __version__
 from markchain.config import Settings, load_settings
 from markchain.documents import Documents
 from markchain.elastic import ES_VERSION, INSTALL_STEPS, ElasticManager
@@ -49,6 +50,9 @@ _DEFAULT_STATE = _INSTALL_ROOT / "vault"
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="markchain")
+    parser.add_argument(
+        "--version", action="version", version=f"markchain {__version__}"
+    )
     parser.add_argument(
         "--vault", type=Path, help="vault root (default: the one chosen in setup)"
     )

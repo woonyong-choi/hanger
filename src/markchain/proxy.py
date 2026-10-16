@@ -19,6 +19,7 @@ from typing import Any, BinaryIO
 
 import mcp.types as types
 from filelock import FileLock, Timeout
+from packaging.version import InvalidVersion, Version
 
 from markchain import __version__
 from markchain.daemon import DaemonInfo, socket_path
@@ -40,6 +41,18 @@ _children: list[subprocess.Popen[bytes]] = []
 
 def _reap() -> None:
     _children[:] = [child for child in _children if child.poll() is None]
+
+
+def _older(running: str) -> bool:
+    """Return whether a running daemon is older than this client.
+
+    Only older daemons are replaced, so a client left over from an earlier
+    version never stops a newer daemon over and over.
+    """
+    try:
+        return Version(running) < Version(__version__)
+    except InvalidVersion:
+        return running != __version__
 
 
 def _alive(pid: int) -> bool:
@@ -116,7 +129,7 @@ class Launcher:
     def ensure(self) -> socket.socket:
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
         info = DaemonInfo.read(self.state)
-        if info is not None and info.version != __version__ and _alive(info.pid):
+        if info is not None and _older(info.version) and _alive(info.pid):
             logger.info("replacing service %s with %s", info.version, __version__)
             self.stop()
         client = self.connect()

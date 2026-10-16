@@ -129,6 +129,16 @@ def test_version_mismatch_replaces_daemon(env: tuple[Path, Path, Launcher]) -> N
     assert _pid(state) != first
 
 
+# #3: a client from an older version never stops a newer daemon.
+def test_newer_daemon_is_kept(env: tuple[Path, Path, Launcher]) -> None:
+    _, state, launcher = env
+    call_tool(launcher, "issue_key", {})
+    first = _pid(state)
+    DaemonInfo(first, "999.0").write(state)
+    call_tool(launcher, "issue_key", {})
+    assert _pid(state) == first and _alive(first)
+
+
 # #3: the stdio relay replays the handshake and pending request after a crash,
 # and replaces a daemon that stops answering.
 def test_relay_survives_crash_and_hang(
