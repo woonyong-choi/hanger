@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from conftest import OFFLINE
@@ -30,10 +31,14 @@ def sync(tmp_path: Path) -> Iterator[Synchronizer]:
     # A registered closet always holds its ignore file.
     (closet / IGNORE_FILE).write_text(DEFAULT_IGNORE)
     index = SearchIndex(url, str(closet))
-    index.ensure()
-    yield Synchronizer(Documents(closet), index)
-    index.client.indices.delete(index=index.name)
-    index.close()
+    try:
+        index.ensure()
+        yield Synchronizer(Documents(closet), index)
+    finally:
+        try:
+            index.delete()
+        finally:
+            index.close()
 
 
 # rebuild after missing every event, including rename and deletion.
@@ -275,7 +280,9 @@ def test_search_folders_preserve_union_and_boundaries(
         for path in selected:
             (root / path).write_text("# 재시도\n현재의 멱등성 키")
     folders = ("docs/api/", "docs/api/child", "docs/api", "worktree/app/docs", "legacy")
-    reason = "user_reported_missing" if source == "unindexed" else None
+    reason: Literal["user_reported_missing"] | None = (
+        "user_reported_missing" if source == "unindexed" else None
+    )
 
     result = sync.search("재시도", folders=folders, fallback_reason=reason)
 
@@ -408,7 +415,12 @@ def test_watcher_survives_unexpected_error(
     monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
     stop = threading.Event()
     thread = threading.Thread(target=watcher.run, args=(stop,), daemon=True)
-    monkeypatch.setattr(stop, "wait", lambda seconds: time.sleep(0.05) or False)
+
+    def wait(seconds: float) -> bool:
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(stop, "wait", wait)
     thread.start()
     time.sleep(0.5)
     assert thread.is_alive()
@@ -427,7 +439,7 @@ def test_watcher_rebuilds_a_lost_index(
     (root / "a.md").write_text("# 결제\n재시도")
     watcher = ClosetWatcher(sync)
     real_audit = sync.audit
-    failures = []
+    failures: list[bool] = []
 
     def audit(limit: int = 64) -> dict[str, int]:
         if not failures:
