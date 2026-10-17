@@ -603,7 +603,8 @@ class Runtime:
         state = self.status(key)
         proposal = state.get("proposal")
         if proposal:
-            self.documents.discard_pending(Proposal.model_validate(proposal))
+            with self._admission:
+                self.documents.discard_pending(Proposal.model_validate(proposal))
         status = state.get("status", "")
         kept = KEPT + (() if resolved else EXTRA.get(status, ()))
         record = {name: state[name] for name in kept if name in state}
@@ -832,38 +833,42 @@ class Runtime:
                 "error_code": "storage",
             }
         for cursor in range(state["cursor"], len(proposal.changes)):
-            if self._interrupted.is_set():
-                raise InterruptedError("runtime stopped before document replacement")
             with self._admission:
+                if self._interrupted.is_set():
+                    raise InterruptedError(
+                        "runtime stopped before document replacement"
+                    )
                 request = self._pending[state["key"]]
-            if request["cancelled"]:
-                return self._stopped(proposal, "cancelled")
-            if time.time() >= state["deadline"]:
-                return self._stopped(proposal, "expired")
-            change = proposal.changes[cursor]
-            try:
-                for path, expected in state.get("dependencies", {}).items():
-                    if path in targets:
-                        continue
-                    if self.documents.read_hash(path) != expected:
-                        raise ConflictError(f"A note used as a source changed: {path}")
-                self.documents.check_proposal(proposal, cursor)
-                with self._trace.measure("apply"):
-                    outcome = self.documents.apply(change)
-            except ConflictError as error:
-                stopped = self._stopped(proposal, "conflict")
-                return {
-                    **stopped,
-                    **self._conflict(state, str(error)),
-                    "cursor": cursor,
-                    "applied": {**applied, **stopped["applied"]},
-                }
-            except RequestError as error:
-                return {
-                    **self._stopped(proposal, "failed"),
-                    "error": f"This change cannot be applied: {error}",
-                    "error_code": "invalid_target",
-                }
+                if request["cancelled"]:
+                    return self._stopped(proposal, "cancelled")
+                if time.time() >= state["deadline"]:
+                    return self._stopped(proposal, "expired")
+                change = proposal.changes[cursor]
+                try:
+                    for path, expected in state.get("dependencies", {}).items():
+                        if path in targets:
+                            continue
+                        if self.documents.read_hash(path) != expected:
+                            raise ConflictError(
+                                f"A note used as a source changed: {path}"
+                            )
+                    self.documents.check_proposal(proposal, cursor)
+                    with self._trace.measure("apply"):
+                        outcome = self.documents.apply(change)
+                except ConflictError as error:
+                    stopped = self._stopped(proposal, "conflict")
+                    return {
+                        **stopped,
+                        **self._conflict(state, str(error)),
+                        "cursor": cursor,
+                        "applied": {**applied, **stopped["applied"]},
+                    }
+                except RequestError as error:
+                    return {
+                        **self._stopped(proposal, "failed"),
+                        "error": f"This change cannot be applied: {error}",
+                        "error_code": "invalid_target",
+                    }
             results[change.path] = outcome
             applied[change.path] = (
                 None if change.after is None else digest(change.after.encode())
