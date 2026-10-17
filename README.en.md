@@ -7,8 +7,21 @@
 <p align="center">
   Local Markdown document automation with durable workflows<br>
   <a href="README.md">한국어</a> | English<br>
-  <a href="#quick-start">Quick start</a> · <a href="#how-it-works">How it works</a> · <a href="#using-it-from-ai-tools">Using it from AI tools</a>
 </p>
+
+## Contents
+
+- [Quick start](#quick-start)
+- [Why](#why)
+- [How it works](#how-it-works)
+  - [Rule files](#rule-files)
+  - [Keyword tree](#keyword-tree)
+  - [Ignore-rule changes](#ignore-rule-changes)
+- [Using it from AI tools](#using-it-from-ai-tools)
+- [Terminal commands](#terminal-commands)
+- [Status](#status)
+- [Development](#development)
+- [License](#license)
 
 ## Quick start
 
@@ -40,14 +53,16 @@ If you keep a handful of notes in one folder and editing them yourself is quicke
 
 ## How it works
 
-1. **Register a closet**: a notes folder Hanger keeps is called a closet. You can register several. A folder inside, or containing, a registered closet is refused as a duplicate. Registering creates a default `.hangerignore` and `HANGER.md` at the root only when they are missing.
-2. **Index**: a background service watches for file changes and keeps the search index current. Files matched by `.hangerignore` (`.gitignore` syntax) and `HANGER.md` files are not indexed. The default file holds only syntax notes and no patterns, so at first every Markdown note is indexed.
-3. **Keyword tree**: alongside indexing, each note gets a concept name, other names, a definition and broader, related and prerequisite concepts, forming a tree per closet. See "Keyword tree" below.
-4. **Request**: an AI tool searches, or asks to write, edit or organize. Change requests are queued and the service works through them.
-5. **Draft and review**: the model gets the related notes together with the `HANGER.md` rules for their folders and drafts a change; a separate call reviews it. A rejected draft is written again with the reasons.
-6. **Write**: files change only after Hanger confirms the source is unchanged. Folders with `write: false` and ignored files are never changed.
+1. Register a closet. A notes folder Hanger keeps is called a closet. You can register several. A folder inside, or containing, a registered closet is refused as a duplicate. Registering creates a default `.hangerignore` and `HANGER.md` at the root only when they are missing.
+2. Index. A background service watches for file changes and keeps the search index current. Files matched by `.hangerignore` (`.gitignore` syntax) and `HANGER.md` files are not indexed. The default file holds only syntax notes and no patterns, so at first every Markdown note is indexed.
+3. Keyword tree. Alongside indexing, each note gets a concept name, other names, a definition and broader, related and prerequisite concepts, forming a tree per closet. See [Keyword tree](#keyword-tree).
+4. Request. An AI tool searches, or asks to write, edit or organize. Change requests are queued and the service works through them.
+5. Draft and review. The model gets the related notes together with the `HANGER.md` rules for their folders and drafts a change; a separate call reviews it. A rejected draft is written again with the reasons.
+6. Write. Files change only after Hanger confirms the source is unchanged. Folders with `write: false` and ignored files are never changed.
 
-**Rule files, `HANGER.md`**: one can sit in any folder and applies to that folder and below. For settings between the top `---` lines, the nearest file wins; the written rules all reach the model, from the root down to the nearest folder. The file has its own name so it does not mix with other AI tools' rule files (`AGENTS.md`, `CLAUDE.md` and so on).
+### Rule files
+
+`HANGER.md` can sit in any folder and applies to that folder and below. For settings between the top `---` lines, the nearest file wins. For each note path, Hanger selects written rules from the nearest folder first, up to a total of 32 KiB, then sends the selected rules from the root down to the nearest folder. The file has its own name so it does not mix with other AI tools' rule files (`AGENTS.md`, `CLAUDE.md` and so on).
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -56,7 +71,7 @@ If you keep a handful of notes in one folder and editing them yourself is quicke
 | `keywords` | `true` | `false` keeps notes here out of the keyword tree (they are still indexed and searched) |
 | `merge` | empty | `auto` queues a merge when two notes answer the same central question |
 
-```md
+```markdown
 ---
 write: false
 ---
@@ -64,18 +79,22 @@ write: false
 Notes in this folder are final. Quote them; do not change them.
 ```
 
-**Keyword tree**: one note is one concept. Broader concepts the user wrote come first: a `parent` in the front matter (a slug, file name or link), and index notes whose list lines start with a link (that note is the parent of the notes it lists). Where the user wrote nothing, the model reads the note with its 20 nearest notes and proposes a concept name, other names, a definition and broader, related and prerequisite concepts; the program checks and stores them.
+### Keyword tree
+
+One note is one concept. Broader concepts the user wrote come first: a `parent` in the front matter (a slug, file name or link), and index notes whose list lines start with a link (that note is the parent of the notes it lists). Where the user wrote nothing, the model reads the note with its 20 nearest notes and proposes a concept name, other names, a definition and broader, related and prerequisite concepts; the program checks and stores them.
 
 - A broader concept must be in the same tree and cannot form a cycle.
 - A new broader name joins a note or concept of the same name; otherwise it becomes a concept when a second note proposes it, and goes back to waiting if it drops to one child.
 - A concept with more than 15 direct children is split into narrower groups by the model.
 - When a note is deleted, its children move up a level and are placed again.
 - Notes that answer the same central question are reported, and when both folders set `merge: auto` a merge job is queued. Merges are reviewed like any other change.
-- Concept names and other names add lightly to search, so a note is found by names its text never uses. Search results and drafts carry each note's place in the tree.
+- Concept names and other names add lightly to search, so a note is found by names its text never uses. Search results and drafts carry a note's place when the note belongs to the tree.
 
 The tree is built in the background, one note at a time, while no user request waits. `hanger keywords` and `list_closets` show progress.
 
-**The user approves ignore-rule changes**: editing the patterns in `.hangerignore` or deleting the file does not take effect at once; it is recorded as a decision. An edit that only changes comments cannot affect the index and applies at once. While a decision is pending, Hanger refuses every search and change request and asks for the answer first. If a closet's folder is missing or empty (an unplugged drive, say), its decision is withdrawn and asked again when the folder is back. File watching and index updates keep running. Hanger asks because a note taken out of the index may not get the same keywords and links when it is indexed again. For a deleted file, approving recreates the default file and declining restores the previous one.
+### Ignore-rule changes
+
+Editing the patterns in `.hangerignore` or deleting the file does not take effect at once; it is recorded as a decision. An edit that only changes comments cannot affect the index and applies at once. While a decision is pending, Hanger refuses every search and change request and asks for the answer first. If a closet's folder is missing or empty (an unplugged drive, say), its decision is withdrawn and asked again when the folder is back. File watching and index updates keep running. Hanger asks because a note taken out of the index may not get the same keywords and links when it is indexed again. For a deleted file, approving recreates the default file and declining restores the previous one.
 
 ## Using it from AI tools
 
@@ -87,7 +106,8 @@ Connected as an MCP server, Hanger offers these tools. Its messages and question
 | `register_closet` | Registers a closet by absolute path |
 | `remove_closet` | Always refuses and gives the terminal command for the user to run |
 | `list_decisions`, `decide` | Shows pending decisions and applies the user's answer |
-| `search_documents`, `read_document` | Search and read; each result shows its place in the keyword tree |
+| `search_documents` | Searches; results include a keyword position when the note belongs to the tree |
+| `read_document` | Reads the current text and hash |
 | `keyword_tree` | The top of each tree, or one concept's names, definition, place, broader, narrower, related and prerequisite concepts |
 | `issue_key`, `request_change`, `collect` | Write, edit and organize requests; keep a file or text unchanged in `inbox/` |
 | `job_status`, `cancel_job`, `resolve_conflict` | Check progress, cancel, reconsider a job stopped by a changed note |
@@ -99,7 +119,7 @@ With more than one closet, each request passes `closet` as an id or a path insid
 | Command | What it does |
 |---|---|
 | `hanger setup [--reinstall]` | Checks the model provider and installs the search engine |
-| `hanger provider` | Shows the CLI and model for each role (draft, review) |
+| `hanger provider` | Shows the CLI and model for each role (draft, review, keywords) |
 | `hanger closet add <folder>` / `list` / `remove <id\|path> [--yes]` | Adds, lists and removes closets. Removing keeps the notes and rule files and deletes only the index and job history |
 | `hanger ignore show` / `add <pattern>` / `remove <pattern>` `[--closet] [--yes]` | Shows and changes ignore rules, showing how many notes change and asking to confirm |
 | `hanger decisions` / `hanger decide <id> approve\|decline` | Lists and answers pending decisions |
@@ -124,16 +144,27 @@ Settings, the closet list, applied ignore rules and decisions are stored in `~/.
 
 ## Status
 
-Several closets, ignore rules with approval, per-folder rule files, search, the keyword tree, write/edit/organize requests with review, and subscription CLIs (Claude Code, Codex) are supported. Before 1.0, formats and commands may change without notice.
+Several closets, ignore rules with approval, per-folder rule files, search, the keyword tree, write/edit/organize requests with review, and subscription CLIs (Claude Code, Codex) are supported. Version 0.2.0 is released.
+
+[Search omissions](https://github.com/woonyong-choi/hanger/issues/7) and [cost and quality across the full workflow](https://github.com/woonyong-choi/hanger/issues/8) remain under investigation. Implementing keyword trees does not establish search recall or merge quality. Before 1.0, formats and commands may change without notice.
 
 ## Development
 
 ```sh
-uv sync
-HANGER_TEST_SEARCH_URL=http://127.0.0.1:19200 uv run pytest
+uv sync --locked
+uv build
+uv run pytest
 uv run ruff check src tests
 uv run ruff format --check src tests
 uv run mypy src
 ```
 
 Tests that need search use the Elasticsearch (with the Nori analyzer) given in `HANGER_TEST_SEARCH_URL` and are skipped without it.
+
+```sh
+HANGER_TEST_SEARCH_URL=http://127.0.0.1:19200 uv run pytest
+```
+
+## License
+
+[MIT](LICENSE)

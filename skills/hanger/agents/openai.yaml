@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hanger"
+  short_description: "등록한 Markdown 노트의 검색·작성·병합"
+  default_prompt: "$hanger로 등록한 노트를 찾아 요청한 내용을 반영해 줘."
