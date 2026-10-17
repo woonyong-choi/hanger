@@ -104,6 +104,9 @@ class ClosetWatcher(FileSystemEventHandler):
                         next_audit = time.monotonic() + 60
                 except (OSError, HangerError, TransportError, ApiError) as error:
                     logger.warning("search sync will retry: %s", error)
+                    # A lost index (a wiped server, say) is rebuilt by a rescan.
+                    with self._lock:
+                        self._rescan = True
                     stop.wait(10)
                 except Exception:
                     # Keep the index updating; the next pass rescans everything.

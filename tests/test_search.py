@@ -416,3 +416,43 @@ def test_watcher_survives_unexpected_error(
     stop.set()
     monkeypatch.undo()
     thread.join(timeout=5)
+
+
+def test_watcher_rebuilds_a_lost_index(
+    sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from elasticsearch import NotFoundError
+
+    root = sync.documents.root
+    (root / "a.md").write_text("# 결제\n재시도")
+    watcher = ClosetWatcher(sync)
+    real_audit = sync.audit
+    failures = []
+
+    def audit(limit: int = 64) -> dict[str, int]:
+        if not failures:
+            # The server lost the index while the service ran.
+            sync.index.delete()
+            failures.append(True)
+        return real_audit(limit)
+
+    monkeypatch.setattr(sync, "audit", audit)
+    monkeypatch.setattr("hanger.watcher.ClosetWatcher.start", lambda self: None)
+    monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
+    stop = threading.Event()
+    real_wait = stop.wait
+    monkeypatch.setattr(stop, "wait", lambda seconds: real_wait(0.05))
+    thread = threading.Thread(target=watcher.run, args=(stop,), daemon=True)
+    thread.start()
+    found: list[str] = []
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not found:
+        time.sleep(0.2)
+        try:
+            sync.index.refresh()
+            found = [h["path"] for h in sync.index.find("결제", 5)]
+        except NotFoundError:
+            continue
+    stop.set()
+    thread.join(timeout=5)
+    assert failures and found == ["a.md"]

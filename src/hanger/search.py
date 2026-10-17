@@ -16,7 +16,7 @@ INDEX_PREFIX = "hanger-"
 
 def index_name(closet_identity: str) -> str:
     """The index of a closet, named after its path."""
-    return INDEX_PREFIX + digest(closet_identity.encode())[:24] + "-v2"
+    return INDEX_PREFIX + digest(closet_identity.encode())[:24] + "-v3"
 
 
 class SearchIndex:
@@ -72,7 +72,7 @@ class SearchIndex:
                                 "surface": {"type": "text", "analyzer": "standard"}
                             },
                         }
-                        for field in ("title", "content")
+                        for field in ("title", "content", "names")
                     },
                     "cursor": {"type": "keyword"},
                 },
@@ -89,7 +89,7 @@ class SearchIndex:
         return {
             item["_source"]["path"]: item["_source"]
             for item in response["docs"]
-            if item["found"]
+            if item.get("found")
         }
 
     # cost: time O(n), heap O(b), stack O(1), io O(n/b)
@@ -170,6 +170,15 @@ class SearchIndex:
                             "multi_match": {
                                 "query": query,
                                 "fields": ["title.surface^3", "content.surface"],
+                            }
+                        },
+                        # Keyword tree names: other names and the model's name
+                        # for a note, weighed lightly so text matches lead.
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["names", "names.surface"],
+                                "boost": 0.5,
                             }
                         },
                     ],

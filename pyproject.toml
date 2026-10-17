@@ -1,12 +1,12 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling>=1.27", "hatch-fancy-pypi-readme>=24"]
 build-backend = "hatchling.build"
 
 [project]
 name = "hanger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Keeps a folder of Markdown notes searchable and lets AI tools edit it by your rules"
-readme = "README.en.md"
+dynamic = ["readme"]
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Woonyong Choi" }]
@@ -79,6 +79,21 @@ ignore_missing_imports = true
 filterwarnings = ["error"]
 testpaths = ["tests"]
 addopts = "--basetemp=tests/.runtime"
+
+# PyPI shows README.en.md with its relative links pointing at GitHub.
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.en.md"
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = 'src="(docs/[^"]+)"'
+replacement = 'src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/\1"'
+
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(href="|\]\()((?:README|skills/)[^")]+)'
+replacement = '\1https://github.com/woonyong-choi/hanger/blob/main/\2'
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hanger"]
