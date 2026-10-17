@@ -6,7 +6,7 @@
 
 <p align="center">
   Search and edit local Markdown notes through MCP<br>
-  <a href="https://github.com/woonyong-choi/hanger/releases/latest"><img src="https://img.shields.io/github/v/release/woonyong-choi/hanger?label=release" alt="GitHub release"></a>
+  <a href="https://github.com/woonyong-choi/hanger/releases/latest"><img src="https://img.shields.io/badge/release-v0.2.0-blue" alt="GitHub release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a><br>
   <a href="README.md">한국어</a> | English
 </p>
