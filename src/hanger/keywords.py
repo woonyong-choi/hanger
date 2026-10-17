@@ -754,6 +754,16 @@ class KeywordGraph:
                 MAX_ATTEMPTS,
                 PROMPT_VERSION,
             ) or (0,)
+            # Notes that answer the same question; merged ones are gone.
+            same = [
+                {"notes": [a, b], "merge_queued": bool(queued)}
+                for a, b, queued in self._rows(
+                    "SELECT owner, target, EXISTS(SELECT 1 FROM merges WHERE pair="
+                    "CASE WHEN owner<target THEN owner||char(10)||target "
+                    "ELSE target||char(10)||owner END) FROM edges "
+                    "WHERE kind='same' ORDER BY owner LIMIT 20"
+                )
+            ]
             (nodes,) = self._one("SELECT COUNT(*) FROM nodes") or (0,)
             (waiting,) = self._one("SELECT COUNT(DISTINCT key) FROM pending") or (0,)
             return {
@@ -762,6 +772,7 @@ class KeywordGraph:
                 "queued": total - done - failed,
                 "failed_count": failed,
                 "failed": failures,
+                "same_question": same,
                 "generated_concepts": nodes,
                 "waiting_names": waiting,
             }
@@ -913,13 +924,15 @@ class KeywordGraph:
                     "SELECT target FROM edges WHERE owner=? AND kind='broader'", path
                 )
             }
-            requires = {t for t in map(target, answer.requires) if t}
-            for node in requires - broader:
+            # Parents the user set are not related or prerequisite either.
+            above = broader | set(self.parents(path)[0])
+            requires = {t for t in map(target, answer.requires) if t} - above
+            for node in requires:
                 self._db.execute(
                     "INSERT OR IGNORE INTO edges VALUES(?,?,'requires')", (path, node)
                 )
             for node in {t for t in map(target, answer.related) if t}:
-                if node not in broader | requires:
+                if node not in above | requires:
                     self._db.execute(
                         "INSERT OR IGNORE INTO edges VALUES(?,?,'related')",
                         (path, node),

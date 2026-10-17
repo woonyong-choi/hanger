@@ -502,6 +502,8 @@ def _tidy_citations(decision: Decision) -> Decision:
         for item in decision.evidence
         if (n := name(item.path))
     ]
+    # A note quoted as evidence is a source even when the model forgot to say so.
+    sources = list(dict.fromkeys([*sources, *(item.path for item in evidence)]))
     return decision.model_copy(update={"sources": sources, "evidence": evidence})
 
 

@@ -85,13 +85,18 @@ def materialize(
             code="model_output",
         )
     for evidence in decision.evidence:
-        if (
-            evidence.path not in decision.sources
-            or evidence.quote not in sources[evidence.path]["content"]
-        ):
+        if evidence.path not in sources:
             raise RequestError(
-                "A quote in evidence is not in its note. Quote the note's text "
-                "exactly.",
+                f"Evidence names {evidence.path}, which is not a given note. Quote "
+                "only the given notes or 'request'.",
+                code="model_output",
+            )
+        # Line breaks and spacing may differ; the words must be the note's own.
+        if _squeeze(evidence.quote) not in _squeeze(sources[evidence.path]["content"]):
+            raise RequestError(
+                f"This evidence quote is not in {evidence.path}: "
+                f"{evidence.quote[:200]!r}. Copy the note's text exactly, or drop "
+                "this evidence item.",
                 code="model_output",
             )
     if policy.require_evidence and decision.changes and not decision.evidence:
@@ -224,3 +229,7 @@ def describe_changes(
                 {"path": path, "operation": "replace", "diff": "".join(diff)}
             )
     return described
+
+
+def _squeeze(text: str) -> str:
+    return " ".join(text.split())
