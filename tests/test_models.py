@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
 
@@ -50,6 +51,12 @@ else:
 """
 
 
+class _CliCall(TypedDict):
+    cli: str
+    args: list[str]
+    prompt: str
+
+
 @pytest.fixture
 def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     bin_dir = tmp_path / "bin"
@@ -65,7 +72,7 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return log
 
 
-def _calls(log: Path) -> list[dict[str, object]]:
+def _calls(log: Path) -> list[_CliCall]:
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
 
 

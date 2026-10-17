@@ -493,7 +493,6 @@ def _hidden(root: Path) -> list[str]:
 def test_delete_is_verified_and_leaves_no_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from hanger import documents as documents_module
     from hanger.errors import ConflictError
     from hanger.requests import digest
 
@@ -512,12 +511,14 @@ def test_delete_is_verified_and_leaves_no_files(
     target.write_text("planned")
     rename = os.rename
 
-    def save_then_rename(source: object, destination: object) -> None:
-        if Path(str(source)) == target:
+    def save_then_rename(
+        source: str | os.PathLike[str], destination: str | os.PathLike[str]
+    ) -> None:
+        if Path(source) == target:
             target.write_text("saved by the user")
-        rename(source, destination)  # type: ignore[arg-type]
+        rename(source, destination)
 
-    monkeypatch.setattr(documents_module.os, "rename", save_then_rename)
+    monkeypatch.setattr(os, "rename", save_then_rename)
     with pytest.raises(ConflictError):
         documents.apply(change)
     monkeypatch.undo()

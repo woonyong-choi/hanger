@@ -306,10 +306,9 @@ def test_builder_maps_short_ids_and_records_failures(graph: KeywordGraph) -> Non
     assert reindexed == [{"chair.md"}]
     _observe(graph, root, "chair.md", "# Chair\nChanged.\n")
     assert builder.step(lambda: False)
-    assert (
-        graph.note("chair.md")["definition"]
-        == "A chair is a kind of furniture with a back."
-    )  # type: ignore[index]
+    note = graph.note("chair.md")
+    assert note is not None
+    assert note["definition"] == "A chair is a kind of furniture with a back."
     assert graph.status()["queued"] == 1
     # A malformed answer counts as a failed attempt; the note stays queued.
     assert graph.next_note() == "chair.md"
