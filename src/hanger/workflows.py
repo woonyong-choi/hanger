@@ -62,6 +62,8 @@ class _State(TypedDict):
     rules: list[dict[str, str]]
     # Given notes the model may read but not change.
     read_only: list[str]
+    # Keyword tree facts of the notes in play, by path.
+    keywords: dict[str, Any]
     applied: list[str]
     signatures: dict[str, str]
     decision: dict[str, Any]
@@ -148,6 +150,7 @@ _EMPTY: dict[str, Any] = {
     "feedback": [],
     "rules": [],
     "read_only": [],
+    "keywords": {},
     "applied": [],
     "signatures": {},
     "decision": {},
@@ -499,6 +502,8 @@ def _tidy_citations(decision: Decision) -> Decision:
         for item in decision.evidence
         if (n := name(item.path))
     ]
+    # A note quoted as evidence is a source even when the model forgot to say so.
+    sources = list(dict.fromkeys([*sources, *(item.path for item in evidence)]))
     return decision.model_copy(update={"sources": sources, "evidence": evidence})
 
 

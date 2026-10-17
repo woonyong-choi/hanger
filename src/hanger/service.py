@@ -46,6 +46,7 @@ _MONITOR_SECONDS = 5
 SEARCH_WAIT_SECONDS = 30
 _CLEANUP_SECONDS = 30
 _WORKERS = ("hanger-worker-1", "hanger-worker-2")
+_KEYWORDS = "hanger-keywords"
 
 INSTRUCTIONS = """\
 Hanger keeps the user's Markdown notes in registered folders called closets.
@@ -58,7 +59,10 @@ language the user writes in or has set for you. Keep these words as they are in
 every language: closet, Hanger, .hangerignore, HANGER.md, and every command,
 path and id. "Then" is for you: do it.
 A decision_required error means Hanger waits for the user's own answer. Show
-the question and both choices, wait, then call decide. Never answer for them."""
+the question and both choices, wait, then call decide. Never answer for them.
+Hanger builds a keyword tree of the notes in the background. Search results
+show each note's place in it; keyword_tree shows a concept's names, broader and
+narrower concepts and relations, and the top of each tree."""
 
 
 def _threaded(function: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
@@ -97,6 +101,7 @@ class Service:
             self.job_status,
             self.cancel_job,
             self.resolve_conflict,
+            self.keyword_tree,
         ):
             self.mcp.add_tool(
                 tool if inspect.iscoroutinefunction(tool) else _threaded(tool)
@@ -110,6 +115,7 @@ class Service:
         self.hub.watch()
         self._targets = {name: functools.partial(self._work, name) for name in _WORKERS}
         self._targets["hanger-monitor"] = self._maintain
+        self._targets[_KEYWORDS] = self._build_keywords
         for name in self._targets:
             self._spawn(name)
 
@@ -131,8 +137,11 @@ class Service:
         self.last_activity = time.monotonic()
 
     def idle(self) -> bool:
-        pending = sum(o.runtime.pending_count() for o in self.hub.opened())
-        return not pending and not self._busy
+        opened = self.hub.opened()
+        pending = sum(o.runtime.pending_count() for o in opened)
+        # The keyword tree keeps the service up until every note is placed.
+        building = any(o.keywords is not None and o.keywords.busy() for o in opened)
+        return not pending and not building and not self._busy
 
     # cost: time O(w), heap O(1), stack O(1)
     # vars: w = worker threads
@@ -196,11 +205,17 @@ class Service:
         self.touch()
         self.hub.refresh()
         broken = self.hub.broken()
+        opened = {o.id: o for o in self.hub.opened()}
         closets = [
             {
                 **closet.as_dict(),
                 "available": closet.id not in broken,
                 **({"problem": broken[closet.id]} if closet.id in broken else {}),
+                **(
+                    {"keyword_tree": graph.status()}
+                    if (graph := getattr(opened.get(closet.id), "keywords", None))
+                    else {}
+                ),
             }
             for closet in self.hub.store.closets()
         ]
@@ -412,12 +427,51 @@ class Service:
             load=synchronizer.read,
             peek=synchronizer.peek,
         )
+        graph = opened.keywords
+        if graph is not None:
+            for item in [*full.values(), *listed]:
+                summary = graph.summary(item["path"])
+                if summary is not None:
+                    item["keywords"] = summary
         return {
             **result,
             "closet": str(opened.root),
             "documents": list(full.values()),
             "listed": listed,
         }
+
+    # cost: time O(c*h), heap O(c), stack O(h), io O(1)
+    # vars: c = concepts shown, h = tree height
+    # basis: estimate
+    def keyword_tree(
+        self, concept: str | None = None, closet: str | None = None
+    ) -> dict[str, Any]:
+        """Show the keyword tree: the top of each tree, or one concept.
+
+        concept is a note path, a generated concept id or a name. The result
+        lists its names, definition, place from the root, broader and
+        narrower concepts, related concepts and concepts to read first.
+        """
+        self.ready()
+        opened = self._closet(closet)
+        graph = opened.keywords
+        if graph is None:
+            raise RequestError("This closet has no keyword tree.", code="not_found")
+        if concept is None:
+            return {
+                "closet": str(opened.root),
+                "status": graph.status(),
+                "trees": graph.roots(),
+            }
+        found = graph.find(concept)
+        described = graph.describe(found) if found else None
+        if described is None:
+            raise RequestError(
+                f"No concept or note matches {concept}. Search for it first, or "
+                "call keyword_tree without concept to see the top of each tree.",
+                code="not_found",
+            )
+        return {"closet": str(opened.root), **described}
 
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes
@@ -515,6 +569,44 @@ class Service:
                 finally:
                     self._busy.pop(name, None)
                 self._beats[name] = time.monotonic()
+
+    # cost: time O(n), heap O(n), stack O(1), io O(f), tokens O(n)
+    # vars: n = notes placed over the service lifetime, f = notes read
+    # basis: estimate
+    def _build_keywords(self) -> None:
+        """Place notes in the keyword tree while no user job waits."""
+        while not self._stop.wait(1):
+            self._beats[_KEYWORDS] = time.monotonic()
+            if self.engine is not None and not self.engine.ready():
+                continue
+            for opened in self.hub.opened():
+                if (
+                    opened.builder is None
+                    or not opened.synchronizer.reconciled
+                    or opened.runtime.pending_count()
+                ):
+                    continue
+                self._busy[_KEYWORDS] = time.monotonic()
+                try:
+                    while not self._stop.is_set() and not opened.stop.is_set():
+                        if opened.runtime.pending_count():
+                            break  # user requests go first
+                        if not opened.builder.step(
+                            lambda o=opened: (
+                                self._stop.is_set()  # type: ignore[misc]
+                                or o.stop.is_set()
+                                or o.runtime.pending_count() > 0
+                            )
+                        ):
+                            break
+                        self._beats[_KEYWORDS] = time.monotonic()
+                except SearchUnavailableError:
+                    continue
+                except Exception:
+                    logger.exception("%s: keyword step failed", opened.root)
+                    self._stop.wait(5)
+                finally:
+                    self._busy.pop(_KEYWORDS, None)
 
     # cost: time O(c), heap O(b), stack O(1), io O(c)
     # vars: c = expired checkpoint bytes, b = checkpoint page bytes

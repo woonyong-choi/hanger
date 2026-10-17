@@ -21,7 +21,7 @@ from pydantic import (
 from hanger.config import Settings
 from hanger.context import shape
 from hanger.editing import Decision, Review
-from hanger.errors import ConflictError, ModelError, RequestError
+from hanger.errors import ConflictError, ModelError, ModelOutputError, RequestError
 from hanger.profiles import Profile
 from hanger.providers import Choice, resolve_choice
 from hanger.scope import SearchScope
@@ -104,7 +104,7 @@ class CliModel:
         self.override = override
         self.timeout_seconds = timeout_seconds
 
-    def choice(self, role: Literal["draft", "review"]) -> Choice:
+    def choice(self, role: Literal["draft", "review", "keywords"]) -> Choice:
         """The provider, model and effort one role runs with right now."""
         model = self.settings.role(role)
         return resolve_choice(model.provider, self.override or model.name, model.effort)
@@ -122,6 +122,20 @@ class CliModel:
     def review(self, prompt: str, is_cancelled: Callable[[], bool]) -> dict[str, Any]:
         response = self._invoke(prompt, is_cancelled, Review, "review")
         return {"review": response["value"], "usage": response["usage"]}
+
+    def ask(
+        self,
+        prompt: str,
+        schema: type[BaseModel],
+        is_cancelled: Callable[[], bool],
+        role: str = "draft",
+    ) -> dict[str, Any]:
+        """One structured answer in the given schema."""
+        if role not in {"draft", "review", "keywords"}:
+            raise ValueError(f"unknown model role: {role}")
+        response = self._invoke(prompt, is_cancelled, schema, role)  # type: ignore[arg-type]
+        value: dict[str, Any] = response["value"]
+        return value
 
     # cost: time O(1), heap O(s), stack O(d), io O(1), tokens 0
     # vars: s = schema bytes, d = schema depth
@@ -218,7 +232,7 @@ class CliModel:
         prompt: str,
         is_cancelled: Callable[[], bool],
         schema: type[BaseModel],
-        role: Literal["draft", "review"] = "draft",
+        role: Literal["draft", "review", "keywords"] = "draft",
     ) -> dict[str, Any]:
         choice = self.choice(role)
         if is_cancelled():
@@ -281,7 +295,9 @@ class CliModel:
         try:
             value, usage = self._parse(choice.provider, output, folder, schema)
         except (ValueError, ValidationError, AttributeError, OSError) as error:
-            raise ModelError("The model output does not match its format.") from error
+            raise ModelOutputError(
+                "The model output does not match its format."
+            ) from error
         return {"value": value.model_dump(), "usage": usage}
 
 
@@ -355,6 +371,9 @@ class Planner:
             "previous": previous,
             "feedback": feedback or [],
             "rules": policy.rules(documents, intent.folders),
+            "keywords": _tree_facts(
+                self.synchronizer, [*documents, *listed_paths(listed)]
+            ),
             "read_only": [path for path in documents if not policy.writable(path)],
             "applied": sorted(applied),
             "signatures": {path: doc["signature"] for path, doc in documents.items()},
@@ -370,3 +389,22 @@ class Planner:
                 "listed": planned.pop("listed"),
             },
         }
+
+
+def listed_paths(listed: Any) -> list[str]:
+    return [
+        item["path"] for item in listed if isinstance(item, dict) and "path" in item
+    ]
+
+
+def _tree_facts(synchronizer: Synchronizer, paths: list[str]) -> dict[str, Any]:
+    """Where each note sits in the keyword tree, for placing changes."""
+    graph = synchronizer.keywords
+    if graph is None:
+        return {}
+    facts = {}
+    for path in dict.fromkeys(paths):
+        summary = graph.summary(path)
+        if summary is not None:
+            facts[path] = summary
+    return facts

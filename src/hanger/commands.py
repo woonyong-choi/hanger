@@ -97,7 +97,11 @@ def _pick(store: StateStore, reference: str | None) -> Closet:
 
 def provider_lines(ui: Progress, settings: Settings) -> None:
     """Show which CLI and model each role runs with; fail when none is found."""
-    roles: tuple[Literal["draft", "review"], ...] = ("draft", "review")
+    roles: tuple[Literal["draft", "review", "keywords"], ...] = (
+        "draft",
+        "review",
+        "keywords",
+    )
     for role in roles:
         model = settings.role(role)
         try:

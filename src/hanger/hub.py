@@ -26,9 +26,10 @@ from elasticsearch import ApiError, Elasticsearch
 from hanger.closets import ClosetPolicy, check_ignore, closet_present
 from hanger.config import Settings
 from hanger.documents import Documents
-from hanger.errors import HangerError, RequestError, guidance
-from hanger.model import CliModel, Planner
-from hanger.requests import load_secret
+from hanger.errors import HangerError, RequestError, SearchUnavailableError, guidance
+from hanger.keywords import KeywordBuilder, KeywordGraph
+from hanger.model import CliModel, Intent, Planner
+from hanger.requests import issue_key, load_secret
 from hanger.runtime import Runtime
 from hanger.search import INDEX_PREFIX, SearchIndex, index_name
 from hanger.store import Closet, StateStore
@@ -53,6 +54,8 @@ class OpenCloset:
     synchronizer: Synchronizer
     runtime: Runtime
     resources: ExitStack
+    keywords: KeywordGraph | None = None
+    builder: KeywordBuilder | None = None
     stop: threading.Event = field(default_factory=threading.Event)
     watcher: threading.Thread | None = None
     scan: ClosetWatcher | None = None
@@ -188,7 +191,8 @@ class ClosetHub:
             synchronizer = Synchronizer(
                 Documents(closet.path), index, self.settings, policy
             )
-            planner = Planner(synchronizer, CliModel(self.settings, self.model))
+            model = CliModel(self.settings, self.model)
+            planner = Planner(synchronizer, model)
             runtime = resources.enter_context(
                 Runtime(
                     closet.path,
@@ -199,11 +203,28 @@ class ClosetHub:
                     secret=self.secret,
                 )
             )
+            graph = KeywordGraph(
+                closet.path, self.folder / str(closet.id) / "keywords.sqlite", policy
+            )
+            resources.callback(graph.close)
         except BaseException:
             resources.close()
             raise
         runtime.health = lambda: self.health()
-        return OpenCloset(closet, policy, synchronizer, runtime, resources)
+        synchronizer.keywords = graph
+        graph.on_same = lambda a, b, name: _queue_merge(
+            runtime, self.secret, a, b, name
+        )
+        builder = KeywordBuilder(
+            graph,
+            model,
+            read=synchronizer.text,
+            search=lambda query, limit: _find(index, query, limit),
+            reindex=synchronizer.reindex,
+        )
+        return OpenCloset(
+            closet, policy, synchronizer, runtime, resources, graph, builder
+        )
 
     def _close(self, opened: OpenCloset, *, removed: bool = False) -> None:
         opened.stop.set()
@@ -379,3 +400,37 @@ def _release(root: Path) -> None:
         Documents(root).release()
     except OSError as error:
         logger.warning("could not clean up %s: %s", root, error)
+
+
+def _queue_merge(
+    runtime: Runtime, secret: bytes, first: str, second: str, name: str
+) -> None:
+    """Two notes answer the same question in folders that allow merging."""
+    try:
+        runtime.submit_intent(
+            issue_key(secret),
+            Intent(
+                kind="organize",
+                query=name,
+                instruction=(
+                    f"These notes answer the same central question ({name}): "
+                    f"{first} and {second}. Merge them into one note as the closet "
+                    "rules say. Keep every fact that only one of them has, keep the "
+                    "note that other notes link to, and delete the other one."
+                ),
+                paths=(first, second),
+                allow_delete=True,
+            ),
+        )
+        logger.info("keywords: queued a merge of %s and %s", first, second)
+    except HangerError as error:
+        logger.warning(
+            "keywords: could not queue a merge of %s and %s: %s", first, second, error
+        )
+
+
+def _find(index: SearchIndex, query: str, limit: int) -> list[str]:
+    try:
+        return [hit["path"] for hit in index.find(query, limit)]
+    except (TransportError, ApiError) as error:
+        raise SearchUnavailableError("The search server is not responding.") from error
