@@ -1,0 +1,666 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" class="fl" width="100%" viewBox="0 0 282.1 246" role="img" data-scene="0" data-mode="once">
+<title>Change request</title>
+<style>@font-face{font-family:FigSans;font-weight:400;src:url(data:font/woff2;base64,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) format("woff2")}
+@font-face{font-family:FigSans;font-weight:600;src:url(data:font/woff2;base64,d09GMk9UVE8AAAW8AAwAAAAACzQAAAVvAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAADYceGhQbggochXAGYAA0ATYCJAMyBAYFgmoHIBtbCsieBXbjSxFLvJSAQnGgjXEhuMFHEvw/v5ae+z4O7GySAs2WkBWwrWSjSAMKjbIqsiRsjQjw/+q0bztABZwCKgM4z1HaHiJuCDDpHBV44P8Y/n3LpCiaN46yj0ekpm08Kh9tmA00wGn8SJ2chBHEp4NpGOdw+P73a6vuwxPDR0PSyBAKQ0hMJyX+Yhr5i8uJJvMk1q9Us2ZSVUK7a5vChXbpFvHcdogplPUgNxUfBQqM49XZjgmkV0tfe0DngIm/zsoG7VOXG+a1mv9co281S65otonmuH3nenq7OZKskehmhsTXiV0PmFvWA/JO0C/c+klj6AH7W5Jce4DGUoPRzdrDRdu1Owsr7EcemE1fTl68du+jFZHr22JncWFEQHUrI3BXwOgIRj4bi/6bEQ8I2zUO/dkminsewmLUXf+vh7hpMP7k7JxpmEdPE4OR8JG6vo/274vsGCx92h1BzO64emvQAbkesP0S1zGwo2hH9v4O7f0ZPcjb/MJ/+8SkciBAQ4FxabWg9lz8GepWF82bVzmURq7FOw/Q8cCzA8v9JV9fBjdHzWiKdbUq8jXVxKgiaysdEN8dLTNOWrwzkQRGauN1eM6KUq2Nd8lE7c+tMWqnkcvif5opoyOpZzRNlpNuoo1eEq1JprhyIllG66ljNI2PJcVE0+0B1dBEgGxSCFvuxI0XH3JQnNJCfqgIjb98vm/MjVPnaO+lHf5XLiUpLXKKA+W1X7K1uKf1h9uwe87Eq0gtdLyUTk3kswTpsnbiGlkbrWmZWE0jxp/ZQeqF5L2N1PT9b6peumJaoI/daZGQTnqaY6UkTzwe6tW/ZuTwxMLlZUU01p2jXWK64evMuEI1NP73gzkK2ikn0VvE+tKuE4pV03/JWtWztOh9iGnTttbRtv+J5s5dUVaYielLQ+Kxboh9BxCoAYAY8QRKK4Vjq2ryy8F6vGc4BmsesB7fYWygD4MCmFTvh2QKmQoYgMx6JQk4LxArgCyaWeoVEMcJKmIqxgMHDAA4YkwQSMVlRyFmLS+6LHTGKOtA0JqkBqcALwugc0iST0PBGkeDM6ebZ9wWzqVkhVKl1tHo9vQIw+Fu38jgYk6WvhlSyu5+bDbB1p/JOAjWD47i22Hl5AhTHyyeDkVh7nRHZPqcxM8nzvG4E0bPDQuuAH97RQi6A1RPpHWei9QDCwEoXklKkQiKApAaiAFpgGQgAUgHiIui2MVBWWRxJ1SmKcDdQF8YHRpDfvDlqzevjuxYNR7yNSoWzxWDRUxZCJZjzwHWJFKuT+fiwf//W1Q/RLY3v0QJXl8AfviiOxCizLHlvAxKM4/pfZBUZylvSvZTicAsp+LIVowBgECXSIDMz6cxLUsVafhpHHme8Ww66Uv1tp0TF33gsFOVubudS+GaVIliRQrmKRjLSABJIfBMFBQVfSmJ29ordJRqlQyjRKcxPmaXVZMilPjbgHeunr3AYcT8mhQJzJ0gPvtzoquiDM4qFhK7YdoeJG9Ev5GC2QTwlWE3WEoDDDgwG0cVJLEUPIjZ9n/INRq6JwBOq9bsh3E9eD81fihzCgD4P4G/udforRZfZ/HcnXk1SAyAkHatCM2dp4h8dRkY2eNXccDr2MlWHLmf/qhcONqV5xGdUmMGkavpj3aVby3QvAnPnRWuggYkt3AUpQQ46GFDLasdVJvGZ7VzUPtYT1cHh3n+n9FqwFV9OgzXAWvXok+7AGU6mPBSmQnaVerQZxieGYaECBQmWIw4WQRj9Og2DBImUCjEW5hQoSL4cK6ONOUqlIlDhdJylxEE6uD85tGfKY1ZjzH68Lp0Gw7Zo1CoYKHCIHl4AiTbGCNgXQIY8TAOADNa2C8LAA==) format("woff2")}
+/* tokens/tokens.json: 생성물, 손으로 고치지 않음 */
+:root {
+  --color-gray-0: #ffffff;
+  --color-gray-59: #f0f0f0;
+  --color-gray-212: #c9c9c9;
+  --color-gray-282: #b7b7b7;
+  --color-gray-467: #888888;
+  --color-gray-529: #787878;
+  --color-gray-910: #171717;
+  --color-gray-933: #111111;
+  --color-group-title: var(--color-help-title-color);
+  --color-outline: var(--color-gray-529);
+  --color-line: var(--color-gray-282);
+  --color-state-active: var(--color-category-blue-light-border);
+  --color-state-active-text: var(--color-category-blue-light-ink);
+  --color-state-on-active: var(--color-gray-0);
+  --color-ui-focus: var(--color-action-link);
+  --color-data-grid: var(--color-gray-212);
+  --color-data-category-1: var(--color-category-blue-solid);
+  --color-figure-icon: var(--color-category-blue-light-border);
+  --color-figure-queue-empty: var(--color-gray-59);
+  --color-figure-number-fill: var(--primitive-figure-number-fill);
+  --color-figure-number-ink: var(--primitive-figure-number-ink);
+  --color-figure-outline: var(--color-gray-467);
+  --color-figure-selection-fill: var(--color-category-blue-light-tint-3);
+  --color-figure-canvas: var(--primitive-help-bg);
+  --color-figure-flash: var(--primitive-search-hover);
+  --color-figure-active-surface: var(--primitive-help-hover);
+  --color-paint-blue-fill: var(--color-category-blue-light-tint-1);
+  --color-paint-blue-outline: var(--color-category-blue-light-border);
+  --color-paint-blue-ink: var(--color-category-blue-light-ink);
+  --color-ui-card: var(--color-gray-0);
+  --color-ink: var(--primitive-ink);
+  --color-ui-muted: var(--primitive-muted);
+  --color-ui-line: var(--primitive-line);
+  --color-help-title-color: var(--primitive-help-title-color);
+  --color-action-link: var(--primitive-link);
+  --color-category-blue-anchor: #1e6bd6;
+  --color-category-blue-fill: var(--color-category-blue-anchor);
+  --color-category-blue-on: var(--color-gray-0);
+  --color-category-blue-light-border: #1e6bd6;
+  --color-category-blue-light-ink: #1161cb;
+  --color-category-blue-light-tint-1: #f7fafe;
+  --color-category-blue-light-tint-3: #d5e4fa;
+  --color-category-blue-dark-border: #3a85f2;
+  --color-category-blue-dark-ink: #6da8ff;
+  --color-category-blue-dark-tint-1: #303948;
+  --color-category-blue-dark-tint-3: #303d54;
+  --color-category-blue-solid: var(--color-category-blue-fill);
+  --font-figure-sans: FigSans, FigSansSym, FigSansMath, ui-sans-serif, -apple-system, BlinkMacSystemFont, Roboto, sans-serif;
+  --font-figure-mono: FigMono, FigSans, FigSansSym, FigSansMath, ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-card-radius: var(--primitive-card-radius);
+  --text-small-text: var(--primitive-small-text);
+  --text-tiny-text: var(--primitive-tiny-text);
+  --text-figure-meta: 11px;
+  --tracking-text: -0.3px;
+  --font-weight-semibold: 600;
+  --primitive-ink: #303336;
+  --primitive-muted: #55606e;
+  --primitive-line: #dfe3e8;
+  --primitive-link: #2576eb;
+  --primitive-small-text: 15px;
+  --primitive-tiny-text: 13px;
+  --primitive-help-bg: #f6f7fa;
+  --primitive-search-hover: #d9e6ff;
+  --primitive-help-hover: #ebf1ff;
+  --primitive-help-title-color: #3d4856;
+  --primitive-figure-dark-bg: #26272b;
+  --primitive-figure-dark-node: #303136;
+  --primitive-figure-dark-edge: #50535b;
+  --primitive-figure-dark-separator: #454850;
+  --primitive-figure-dark-hover: #343e50;
+  --primitive-figure-dark-selection: #274174;
+  --primitive-figure-dark-muted: #a9adb6;
+  --primitive-figure-dark-line: #7f8793;
+  --primitive-figure-dark-outline: #868686;
+  --primitive-figure-number-fill: #303336;
+  --primitive-figure-number-ink: #ffffff;
+  --primitive-card-radius: 18px;
+  --border-width-thin: 1px;
+  --border-width-hair: 0.75px;
+  --border-width-lifeline: 1.25px;
+  --border-width-edge: 1.75px;
+  --opacity-range: 0.4;
+  --dash-line: 5;
+  --dash-gap: 4;
+  --dash-card: 3;
+  --outline-width-focus: 3px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']):not([data-theme='dark']) {
+  --color-outline: var(--primitive-figure-dark-outline);
+  --color-line: var(--primitive-figure-dark-line);
+  --color-state-active: var(--color-category-blue-dark-border);
+  --color-state-active-text: var(--color-category-blue-dark-ink);
+  --color-state-on-active: var(--color-category-blue-on);
+  --color-data-grid: var(--primitive-figure-dark-edge);
+  --color-figure-icon: var(--color-category-blue-dark-border);
+  --color-figure-queue-empty: var(--color-gray-910);
+  --color-figure-number-fill: var(--color-gray-59);
+  --color-figure-number-ink: var(--color-gray-933);
+  --color-figure-outline: var(--color-line);
+  --color-figure-selection-fill: var(--color-category-blue-dark-tint-3);
+  --color-figure-canvas: var(--primitive-figure-dark-bg);
+  --color-figure-flash: var(--primitive-figure-dark-selection);
+  --color-figure-active-surface: var(--primitive-figure-dark-hover);
+  --color-paint-blue-fill: var(--color-category-blue-dark-tint-1);
+  --color-paint-blue-outline: var(--color-category-blue-dark-border);
+  --color-paint-blue-ink: var(--color-category-blue-dark-ink);
+  --color-ui-card: var(--primitive-figure-dark-node);
+  --color-ink: var(--color-gray-59);
+  --color-ui-muted: var(--primitive-figure-dark-muted);
+  --color-ui-line: var(--primitive-figure-dark-separator);
+  --color-help-title-color: var(--color-ink);
+  color-scheme: dark;
+  }
+}
+[data-theme='dark'] {
+  --color-outline: var(--primitive-figure-dark-outline);
+  --color-line: var(--primitive-figure-dark-line);
+  --color-state-active: var(--color-category-blue-dark-border);
+  --color-state-active-text: var(--color-category-blue-dark-ink);
+  --color-state-on-active: var(--color-category-blue-on);
+  --color-data-grid: var(--primitive-figure-dark-edge);
+  --color-figure-icon: var(--color-category-blue-dark-border);
+  --color-figure-queue-empty: var(--color-gray-910);
+  --color-figure-number-fill: var(--color-gray-59);
+  --color-figure-number-ink: var(--color-gray-933);
+  --color-figure-outline: var(--color-line);
+  --color-figure-selection-fill: var(--color-category-blue-dark-tint-3);
+  --color-figure-canvas: var(--primitive-figure-dark-bg);
+  --color-figure-flash: var(--primitive-figure-dark-selection);
+  --color-figure-active-surface: var(--primitive-figure-dark-hover);
+  --color-paint-blue-fill: var(--color-category-blue-dark-tint-1);
+  --color-paint-blue-outline: var(--color-category-blue-dark-border);
+  --color-paint-blue-ink: var(--color-category-blue-dark-ink);
+  --color-ui-card: var(--primitive-figure-dark-node);
+  --color-ink: var(--color-gray-59);
+  --color-ui-muted: var(--primitive-figure-dark-muted);
+  --color-ui-line: var(--primitive-figure-dark-separator);
+  --color-help-title-color: var(--color-ink);
+  color-scheme: dark;
+}
+[data-theme='light'] {
+  --color-outline: var(--color-gray-529);
+  --color-line: var(--color-gray-282);
+  --color-state-active: var(--color-category-blue-light-border);
+  --color-state-active-text: var(--color-category-blue-light-ink);
+  --color-state-on-active: var(--color-gray-0);
+  --color-data-grid: var(--color-gray-212);
+  --color-figure-icon: var(--color-category-blue-light-border);
+  --color-figure-queue-empty: var(--color-gray-59);
+  --color-figure-number-fill: var(--primitive-figure-number-fill);
+  --color-figure-number-ink: var(--primitive-figure-number-ink);
+  --color-figure-outline: var(--color-gray-467);
+  --color-figure-selection-fill: var(--color-category-blue-light-tint-3);
+  --color-figure-canvas: var(--primitive-help-bg);
+  --color-figure-flash: var(--primitive-search-hover);
+  --color-figure-active-surface: var(--primitive-help-hover);
+  --color-paint-blue-fill: var(--color-category-blue-light-tint-1);
+  --color-paint-blue-outline: var(--color-category-blue-light-border);
+  --color-paint-blue-ink: var(--color-category-blue-light-ink);
+  --color-ui-card: var(--color-gray-0);
+  --color-ink: var(--primitive-ink);
+  --color-ui-muted: var(--primitive-muted);
+  --color-ui-line: var(--primitive-line);
+  --color-help-title-color: var(--primitive-help-title-color);
+  color-scheme: light;
+}
+/* 그림 안 글자와 모양. HTML 재생기와 움직이는 SVG가 같이 쓴다. */
+/* 카드 안 글(label, sub, meta, cell, item, row)의 기준 점(text-anchor)은 글이 정한다(measure/texts.js의 anchor). 여기서는 글꼴과 색만 정한다. */
+/* 글 위계는 셋이다: 제목(공통 디자인.label-size 15: 카드 제목은 regular, 그룹 제목은 semibold), 문장과 이름표(detail-size 13: 부제, 선 라벨, 메모, 이동 글, 카드 줄, 제약, 형식), 작은 표시(micro-size 11: 번호, 태그, 표식, 키, 눈금, 단위). 크기와 굵기는 measure/texts.js의 STYLE이 같은 토큰으로 잰다. */
+.fl text {
+  font-family: var(--font-figure-sans);
+  letter-spacing: var(--tracking-text);
+}
+
+.fl .label {
+  font-size: var(--text-small-text);
+  fill: var(--color-ink);
+}
+
+.fl .sub {
+  font-size: var(--text-tiny-text);
+  fill: var(--color-ui-muted);
+}
+
+.fl .frame {
+  font-size: var(--text-small-text);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--color-group-title);
+}
+
+.fl .edgelabel {
+  font-size: var(--text-tiny-text);
+  text-anchor: middle;
+  fill: var(--fx-ink-rest);
+}
+
+/* 카드 줄, 메모와 구획 제목 같은 덧붙임 글, 관계 그래프 이름, 표 칸, 격자 칸은 문장이라 같은 크기와 글자색이다. */
+.fl .row,
+.fl .meta,
+.fl .mini,
+.fl .cell,
+.fl .item {
+  font-size: var(--text-tiny-text);
+  fill: var(--color-ink);
+}
+
+.fl .row.mono {
+  font-family: var(--font-figure-mono);
+  letter-spacing: normal;
+}
+
+/* 백틱으로 감싼 글. 코드 글꼴로 그린다. */
+.fl .code {
+  font-family: var(--font-figure-mono);
+  letter-spacing: normal;
+}
+
+.fl .muted {
+  fill: var(--color-ui-muted);
+}
+
+.fl .tag {
+  font-size: var(--text-figure-meta);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--color-ink);
+}
+
+.fl .mark {
+  font-size: var(--text-figure-meta);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--color-state-active-text);
+}
+
+/* 값 카드 줄의 값 글자. 줄의 이름(row)은 카드 층이 그리고 값은 오른쪽 끝에 얹힌다. 이름과 같은 크기이고 굵기만 다르다. */
+.fl .value {
+  font-size: var(--text-tiny-text);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--color-ink);
+}
+
+.fl .chip {
+  font-size: var(--text-tiny-text);
+  text-anchor: middle;
+}
+
+.fl .item.gap {
+  fill: var(--color-ui-muted);
+}
+
+/* 열 형식(타입)은 코드 글이라 코드 글꼴의 오른쪽 열이고 이름보다 옅다. NULL 허용 여부는 키 표시(.key)와 같은 작은 표시이고, 삭제 정책은 외래 키 선의 끝 글이다. */
+.fl .cell.type {
+  font-family: var(--font-figure-mono);
+  letter-spacing: normal;
+  fill: var(--color-ui-muted);
+}
+
+/* 순서 보기의 메시지, 메모, 구획, 활성 막대는 자기 장면이 보일 때만 보인다. 자리는 늘 같아 판 크기가 변하지 않는다. */
+.fl .fl-off {
+  display: none;
+}
+
+.fl .fl-edge {
+  color: var(--fx-line-rest);
+}
+
+.fl .fl-path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: var(--border-width-edge);
+}
+
+/* 열 키(PK, FK, UNQ)는 작은 표시이고 글자색이다. 파랑은 켜진 상태에만 쓴다. */
+.fl .cell .key {
+  font-size: var(--text-figure-meta);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--color-ink);
+}
+
+/* 그룹은 기본 면이 없다(투명). 경계와 제목만 있고, 깊이에 따라 회색 면을 겹치지 않는다. 고른 색은 아래 appearance 역할로 적용한다. */
+.fl .frame-box {
+  --fx-edge-rest: var(--color-figure-outline);
+  fill: none;
+  stroke: var(--fx-edge-rest);
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .fl-card {
+  fill: var(--color-ui-card);
+}
+
+.fl .fl-queue-slot {
+  fill: var(--color-figure-queue-empty);
+  stroke: var(--color-outline);
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .queue-fill .fl-queue-slot {
+  fill: var(--color-data-category-1);
+  stroke: var(--color-data-category-1);
+}
+
+.fl .fl-shape-external > :is(.fl-stroke, .fl-pulse),
+.fl .frame-box.dashed,
+.fl .fl-path.dashed {
+  stroke-dasharray: var(--dash-line) var(--dash-gap);
+}
+
+.fl .lifeline {
+  stroke: var(--color-line);
+  stroke-width: var(--border-width-lifeline);
+  stroke-dasharray: var(--dash-gap) var(--dash-gap);
+}
+
+.fl .fl-activation {
+  fill: var(--color-ui-card);
+  stroke: var(--color-line);
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .fl-destroy > circle {
+  fill: var(--color-figure-canvas);
+}
+
+.fl .fl-destruction {
+  fill: none;
+  stroke: var(--color-line);
+  stroke-width: var(--border-width-edge);
+  stroke-linecap: round;
+}
+
+.fl .note-box {
+  fill: var(--color-ui-card);
+  stroke: var(--color-line);
+  stroke-dasharray: var(--dash-card) var(--dash-card);
+}
+
+/* 알약은 모두 같은 중립 흰 면과 평소 경계다: 선 라벨, 배지와 개수. */
+.fl .pill,
+.fl .badge-pill {
+  fill: var(--color-ui-card);
+  stroke: var(--fx-edge-rest);
+}
+
+.fl .fl-mini-pill {
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .fl-mini-pill.fl-mini-lit {
+  fill: var(--fx-row);
+}
+
+.fl .fl-edge.fl-mini-lit {
+  color: var(--fx-edge);
+}
+
+.fl .part-bg {
+  --fx-face: transparent;
+  --fx-face-on: var(--fx-row);
+  fill: var(--fx-face);
+}
+
+.fl .col-line {
+  stroke: var(--color-data-grid);
+  stroke-width: var(--border-width-hair);
+}
+
+.fl .part-head {
+  fill: var(--color-figure-canvas);
+}
+
+.fl .grid-cell {
+  --fx-face: var(--color-ui-card);
+  --fx-face-on: var(--fx-row);
+  fill: var(--fx-face);
+  stroke: var(--color-data-grid);
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .grid-tray {
+  fill: var(--color-ui-card);
+}
+
+.fl .grid-cell.gap {
+  --fx-face: var(--color-ui-card);
+  stroke: var(--color-data-grid);
+}
+
+.fl .grid-cell.empty {
+  --fx-face: none;
+  stroke: var(--color-line);
+  stroke-dasharray: var(--dash-card) var(--dash-card);
+}
+
+.fl .fl-edge.mark {
+  --fx-line-rest: var(--color-ink);
+}
+
+/* 이름과 값은 평소 여백으로 구분한다. 명시한 면(face)과 값 갱신 강조만 배경을 더한다. */
+.fl .face {
+  fill: none;
+  stroke: none;
+}
+
+/* 도형 윗줄과 그룹 제목 줄의 장식: 글자 배지, 아이콘 */
+.fl .badge {
+  font-size: var(--text-figure-meta);
+  font-weight: var(--font-weight-semibold);
+  text-anchor: middle;
+  fill: var(--color-ink);
+}
+
+.fl .fl-icon {
+  color: var(--color-figure-icon);
+}
+
+.fl .fl-symbol .fl-icon {
+  color: inherit;
+}
+
+/* 선 번호 원. 흑백 번호이고 라벨 알약과 달리 켜져도 색이 바뀌지 않아 정지 그림과 같은 순서로 읽힌다. */
+.fl .number-pill {
+  fill: var(--color-figure-number-fill);
+}
+
+.fl .number {
+  font-size: var(--text-figure-meta);
+  font-weight: var(--font-weight-semibold);
+  text-anchor: middle;
+  fill: var(--color-figure-number-ink);
+}
+
+/* 도형은 그림자 없는 평면이다. 그림자는 떠 있는 메뉴 같은 조작에만 둔다. */
+.fl :where(.fl-node) > .fl-stroke {
+  stroke: var(--fx-edge-rest);
+  stroke-width: var(--border-width-thin);
+}
+
+/* 구획은 border.hair, 보조 경계는 border.thin, 관계는 border.edge, 생명선은 border.lifeline, 도형 경계는 공통 디자인.node-stroke다. 모든 선은 그림과 함께 확대·축소된다. */
+.fl .fl-path,
+.fl .fl-node > .fl-stroke,
+.fl .grid-cell,
+.fl .col-line,
+.fl .pill,
+.fl .badge-pill {
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 화살촉과 몸통은 같은 소유자의 색을 상속한다(draw/arrow.js). 화살촉은 채운 삼각형이다. 연결선은 선 묶음이, 차트 방향선은 역할 class(.arrow-main 등, chart.css)가 소유자다.
+   HTML 문서의 차트 마커 정의는 판 SVG 밖의 정의 전용 SVG에 있어 `.fl` 아래가 아니므로 이 규칙은 `.fl` 범위를 걸지 않는다. */
+.fl-arrowhead {
+  fill: currentColor;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 효과 한 벌: 켜짐과 평소의 모습을 정하는 유일한 정의다. 움직이는 SVG(animate/animator.js)의 keyframes와 HTML 재생기의 `.on` 규칙이 같은 `--fx-*`를 읽으므로 두 출력과 정지 그림이 늘 같다.
+   - 켜짐(on): --fx-edge 윤곽·그룹 경계·선·알약 테두리, --fx-ink 알약 글자, --fx-row 표 줄과 격자 칸의 면, --fx-face-on 요소의 켜진 면(도형은 아래), --fx-flash 값이 바뀐 순간의 면.
+   - 평소(rest): --fx-edge-rest 도형, 그룹, 알약의 경계, --fx-ink-rest 알약 글자, --fx-line-rest 선, --fx-face 요소의 평소 면.
+   효과는 도형이 고른 색(tone)이나 표현(appearance)과 상관없다. appearance는 고른 색을 평소 값(--fx-face, --fx-edge-rest)에만 적용하고, 켜진 동안은 강조 윤곽에 자리를 내준다. */
+.fl {
+  --paint-fill: var(--color-ui-card);
+  --paint-outline: var(--color-figure-outline);
+  --paint-ink: var(--color-group-title);
+  --fx-edge: var(--color-state-active);
+  --fx-ink: var(--color-state-active-text);
+  --fx-row: var(--color-figure-selection-fill);
+  --fx-flash: var(--color-figure-flash);
+  --fx-edge-rest: var(--color-figure-outline);
+  --fx-ink-rest: var(--color-ui-muted);
+  --fx-line-rest: var(--color-line);
+}
+
+/* 도형의 평소 면과 켜진 면. 옅은 면으로 고른 도형(filled)은 켜져도 면이 같다. 면이 없는 윤곽(fill='none')과 점은 자기 면이 없거나 자기 색이다. */
+.fl .fl-node {
+  --fx-face: var(--color-ui-card);
+  --fx-face-on: var(--color-figure-active-surface);
+}
+
+.fl .fl-node.ap-filled {
+  --fx-face: var(--paint-fill);
+  --fx-face-on: var(--fx-face);
+}
+
+/* 소비자는 쓴 톤의 --paint-* 변수만 연결한다. 면·경계·제목·차트 바탕의 역할은 여기서 한 번 정한다. */
+.fl .fl-node.ap-outline {
+  --fx-edge-rest: var(--paint-outline);
+}
+
+.fl .fl-group.ap-filled > .frame-box {
+  fill: var(--paint-fill);
+}
+
+.fl .fl-group.ap-outline > .frame-box {
+  --fx-edge-rest: var(--paint-outline);
+}
+
+.fl .fl-group:is(.ap-plain, .ap-filled, .ap-outline) > .frame {
+  fill: var(--paint-ink);
+}
+
+.fl .face.ap-filled {
+  fill: var(--paint-fill);
+}
+
+.fl .fl-layer.ap-filled {
+  --chart-ground: var(--paint-fill);
+}
+
+.fl .face.ap-outline {
+  stroke: var(--paint-outline);
+}
+
+.fl .fl-shape-start {
+  --fx-face: var(--color-ink);
+}
+
+.fl .fl-node > .fl-stroke[fill='none'] {
+  --fx-face: none;
+  --fx-face-on: none;
+}
+
+.fl :where(.fl-node) > .fl-stroke:where(:not([fill='none'])) {
+  fill: var(--fx-face);
+}
+
+/* `light`가 명시한 도형: 윤곽이 강조 색이 되고 면은 옅은 강조 면이다(옅은 면으로 고른 도형은 면을 그대로 둔다). 점이 닿은 도형은 도착 후광(.fl-pulse)만 쓴다. */
+.fl .fl-node.on > .fl-stroke {
+  stroke: var(--fx-edge);
+}
+
+.fl .fl-node.on > .fl-stroke:not([fill='none']) {
+  fill: var(--fx-face-on);
+}
+
+/* `light`가 명시한 그룹: 경계선만 강조 색이다. 굵기, 면, 모서리, 점선은 그대로다. */
+.fl .fl-group.on > .frame-box {
+  stroke: var(--fx-edge);
+}
+
+/* 켜진 표 줄(칸)과 격자 칸의 면. 모든 카드가 같은 규칙이다. */
+.fl .fl-part.on :is(.part-bg, .grid-cell) {
+  fill: var(--fx-face-on);
+}
+
+/* 도형에 마우스를 올려도 면이나 선이 켜지지 않는다(장식용 호버 활성 없음). 키보드 초점은 같은 외부 형상 위의 초점 표시이고 윤곽을 두 겹으로 만들지 않는다. */
+/* 브라우저 기본 초점 링은 g 요소의 사각 상자를 두르므로 둥근 도형과 어긋난다. 어떤 방식으로 초점이 가도 기본 링을 끄고, 키보드 초점(:focus-visible)은 도형 윤곽 자체로 표시한다. */
+.fl .fl-node:focus,
+.fl .fl-node:focus-visible {
+  outline: none;
+}
+
+.fl .fl-node:focus-visible > .fl-stroke {
+  stroke: var(--color-ui-focus);
+  stroke-width: var(--outline-width-focus);
+}
+
+/* 값이 바뀔 때 켜지는 배경 면. 도형과 같은 윤곽을 쓰고 테두리를 더하지 않는다. */
+.fl .fl-flash-face {
+  fill-opacity: var(--opacity-range);
+}
+
+.fl .fl-flash {
+  fill: var(--fx-flash);
+  stroke: none;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fl .fl-flash {
+    display: none;
+  }
+}
+
+/* 점이 도형에 닿을 때의 테두리 후광: 도형 윤곽과 같은 모양의 겹침 선이다. 면을 칠하지 않고 선 굵기가 윤곽과 같아 도형이 커지지 않는다. 불투명도(80/80/240ms)는 SMIL이나 재생기가 정한다. */
+.fl .fl-pulse {
+  fill: none;
+  stroke: var(--fx-edge);
+  stroke-width: var(--border-width-thin);
+  pointer-events: none;
+}
+
+/* 제어 구획의 경계는 관계선보다 약하며 제목 밑면은 생명선을 가린다. */
+.fl .fl-fragment-border {
+  fill: none;
+  stroke: var(--color-ui-line);
+  stroke-width: var(--border-width-thin);
+}
+
+.fl .fl-fragment-divider {
+  fill: none;
+  stroke: var(--color-ui-line);
+  stroke-width: var(--border-width-hair);
+  stroke-dasharray: var(--dash-card) var(--dash-card);
+}
+
+.fl .fl-fragment-heading {
+  fill: var(--color-ui-card);
+}
+
+.fl .fl-fragment-label {
+  font-weight: var(--font-weight-semibold);
+}
+
+.fl .fl-packet > circle:first-child {
+  opacity: 0;
+}
+
+/* 독립 SVG도 재생 판과 같은 바탕과 움직임 줄이기 규칙을 쓴다. */
+.fl .fl-canvas-surface { fill: var(--color-figure-canvas); rx: var(--radius-card-radius); }
+.fl .fl-still { display: none; }
+@media (prefers-reduced-motion: reduce) {
+  .fl .fl-motion { display: none; }
+  .fl .fl-still { display: inline; }
+}
+
+.fl .tn-blue {
+  --paint-fill: var(--color-paint-blue-fill);
+  --paint-outline: var(--color-paint-blue-outline);
+  --paint-ink: var(--color-paint-blue-ink);
+}
+
+@keyframes a0 { 0%,100% { fill: var(--fx-face); stroke: var(--fx-edge-rest) } }
+.fl .a0 { animation: a0 1.2s 1 forwards linear; }
+@keyframes a1 { 0%,66.658% { color: var(--fx-edge) } 66.667%,100% { color: var(--fx-line-rest) } }
+.fl .a1 { animation: a1 1.2s 1 forwards linear; }
+@keyframes a2 { 0%,66.658% { stroke: var(--fx-edge) } 66.667% { stroke: var(--fx-edge) } 99.992%,100% { stroke: var(--fx-edge-rest) } }
+.fl .a2 { animation: a2 1.2s 1 forwards linear; }
+@keyframes a3 { 0%,66.658% { fill: var(--fx-ink) } 66.667% { fill: var(--fx-ink) } 99.992%,100% { fill: var(--fx-ink-rest) } }
+.fl .a3 { animation: a3 1.2s 1 forwards linear; }
+.fl .sa0 { fill: var(--fx-face); stroke: var(--fx-edge-rest); }
+</style>
+<defs></defs>
+<rect x="0.5" y="0.5" width="281.1" height="245" class="fl-canvas-surface"/>
+<g class="fl-motion" transform="translate(0 0)">
+
+<g id="n-0" class="fl-node fl-shape-box tn-blue ap-filled" tabindex="0" role="img" aria-label="Proposal" data-id="proposal"><rect x="16" y="16" width="163.8" height="67" rx="8" class="fl-stroke a0"/><text x="97.9" y="44.9" class="label" text-anchor="middle">Proposal</text><text x="97.9" y="65.7" class="sub" text-anchor="middle">Review + source check</text></g>
+<g id="n-1" class="fl-node fl-shape-box" tabindex="0" role="img" aria-label="Write" data-id="write"><rect x="20.6" y="163" width="100" height="67" rx="8" class="fl-stroke a0"/><rect x="20.6" y="163" width="100" height="67" rx="8" class="fl-pulse" opacity="0" aria-hidden="true"><animate attributeName="opacity" dur="1.2s" repeatCount="1" fill="freeze" calcMode="linear" keyTimes="0;0.66667;0.73333;0.8;1" values="0;0;1;1;0"/></rect><text x="70.6" y="191.9" class="label" text-anchor="middle">Write</text><text x="70.6" y="212.7" class="sub" text-anchor="middle">One file</text></g>
+<g id="n-2" class="fl-node fl-shape-box" tabindex="0" role="img" aria-label="Conflict" data-id="conflict"><rect x="152.6" y="163" width="113.5" height="67" rx="8" class="fl-stroke a0"/><text x="209.3" y="191.9" class="label" text-anchor="middle">Conflict</text><text x="209.3" y="212.7" class="sub" text-anchor="middle">Stop or replan</text></g>
+<g id="e-0" class="fl-edge a1"><defs><marker id="fl-arrow-0" viewBox="0 0 5 5" refX="4" refY="2.5" markerWidth="5" markerHeight="5" orient="auto-start-reverse" overflow="visible"><path class="fl-arrowhead" d="M 1.1 0.25 L 4 2.5 L 1.1 4.75 Z" stroke-width="1"/></marker></defs><path id="p-0" d="M 70.6 83 L 70.6 163" class="fl-path" marker-end="url(#fl-arrow-0)"/></g>
+<g id="e-1" class="fl-edge "><defs><marker id="fl-arrow-1" viewBox="0 0 5 5" refX="4" refY="2.5" markerWidth="5" markerHeight="5" orient="auto-start-reverse" overflow="visible"><path class="fl-arrowhead" d="M 1.1 0.25 L 4 2.5 L 1.1 4.75 Z" stroke-width="1"/></marker></defs><path id="p-1" d="M 125.2 83 L 125.2 117 Q 125.2 139, 147.2 139 L 197.3 139 Q 209.3 139, 209.3 151 L 209.3 163" class="fl-path dashed" marker-end="url(#fl-arrow-1)"/></g>
+
+<g class="fl-packet p0-0" opacity="0" fill="var(--color-state-on-active)"><circle r="10" fill="var(--color-state-active)" opacity="0.2"/><circle r="4.5" fill="var(--color-state-active)"/><animate attributeName="opacity" dur="1.2s" repeatCount="1" fill="freeze" calcMode="discrete" keyTimes="0;0.66667" values="1;0"/><animateMotion dur="1.2s" repeatCount="1" fill="freeze" calcMode="spline" keyTimes="0;0.66667;1" keySplines="0 0 1 1;0 0 1 1" keyPoints="0;1;1"><mpath href="#p-0" xlink:href="#p-0"/></animateMotion></g>
+<g class="fl-pills"><g id="l-0" class="fl-edge"><g class="fl-pill"><rect x="74.6" y="141" width="91.5" height="18" rx="9" class="pill a2"/><rect x="76.6" y="143" width="14" height="14" rx="7" class="number-pill"/><text x="83.6" y="154" class="number">1</text><text x="126.9" y="154.7" class="edgelabel a3">Unchanged</text></g></g><g id="l-1" class="fl-edge"><g class="fl-pill"><rect x="130.2" y="105" width="64.8" height="18" rx="9" class="pill "/><text x="162.6" y="118.7" class="edgelabel ">Changed</text></g></g></g>
+</g>
+<g class="fl-still" transform="translate(0 0)">
+
+<g id="still-n-0" class="fl-node fl-shape-box tn-blue ap-filled" tabindex="0" role="img" aria-label="Proposal" data-id="proposal"><rect x="16" y="16" width="163.8" height="67" rx="8" class="fl-stroke sa0"/><text x="97.9" y="44.9" class="label" text-anchor="middle">Proposal</text><text x="97.9" y="65.7" class="sub" text-anchor="middle">Review + source check</text></g>
+<g id="still-n-1" class="fl-node fl-shape-box" tabindex="0" role="img" aria-label="Write" data-id="write"><rect x="20.6" y="163" width="100" height="67" rx="8" class="fl-stroke sa0"/><text x="70.6" y="191.9" class="label" text-anchor="middle">Write</text><text x="70.6" y="212.7" class="sub" text-anchor="middle">One file</text></g>
+<g id="still-n-2" class="fl-node fl-shape-box" tabindex="0" role="img" aria-label="Conflict" data-id="conflict"><rect x="152.6" y="163" width="113.5" height="67" rx="8" class="fl-stroke sa0"/><text x="209.3" y="191.9" class="label" text-anchor="middle">Conflict</text><text x="209.3" y="212.7" class="sub" text-anchor="middle">Stop or replan</text></g>
+<g id="still-e-0" class="fl-edge "><defs><marker id="still-fl-arrow-0" viewBox="0 0 5 5" refX="4" refY="2.5" markerWidth="5" markerHeight="5" orient="auto-start-reverse" overflow="visible"><path class="fl-arrowhead" d="M 1.1 0.25 L 4 2.5 L 1.1 4.75 Z" stroke-width="1"/></marker></defs><path id="still-p-0" d="M 70.6 83 L 70.6 163" class="fl-path" marker-end="url(#still-fl-arrow-0)"/></g>
+<g id="still-e-1" class="fl-edge "><defs><marker id="still-fl-arrow-1" viewBox="0 0 5 5" refX="4" refY="2.5" markerWidth="5" markerHeight="5" orient="auto-start-reverse" overflow="visible"><path class="fl-arrowhead" d="M 1.1 0.25 L 4 2.5 L 1.1 4.75 Z" stroke-width="1"/></marker></defs><path id="still-p-1" d="M 125.2 83 L 125.2 117 Q 125.2 139, 147.2 139 L 197.3 139 Q 209.3 139, 209.3 151 L 209.3 163" class="fl-path dashed" marker-end="url(#still-fl-arrow-1)"/></g>
+
+
+<g class="fl-pills"><g id="still-l-0" class="fl-edge"><g class="fl-pill"><rect x="74.6" y="141" width="91.5" height="18" rx="9" class="pill "/><rect x="76.6" y="143" width="14" height="14" rx="7" class="number-pill"/><text x="83.6" y="154" class="number">1</text><text x="126.9" y="154.7" class="edgelabel ">Unchanged</text></g></g><g id="still-l-1" class="fl-edge"><g class="fl-pill"><rect x="130.2" y="105" width="64.8" height="18" rx="9" class="pill "/><text x="162.6" y="118.7" class="edgelabel ">Changed</text></g></g></g>
+</g>
+</svg>

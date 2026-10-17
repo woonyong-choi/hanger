@@ -1,66 +1,112 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Hanger logo" height="120">
+  <img src="docs/assets/logo.png" alt="Hanger logo" height="80">
 </p>
 
 <h1 align="center">Hanger</h1>
 
 <p align="center">
-  Local Markdown document automation with durable workflows<br>
-  <a href="README.md">한국어</a> | English<br>
+  Search and edit local Markdown notes through MCP<br>
+  <a href="https://github.com/woonyong-choi/hanger/releases/latest"><img src="https://img.shields.io/github/v/release/woonyong-choi/hanger?label=release" alt="GitHub release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a><br>
+  <a href="README.md">한국어</a> | English
 </p>
-
-## Contents
-
-- [Quick start](#quick-start)
-- [Why](#why)
-- [How it works](#how-it-works)
-  - [Rule files](#rule-files)
-  - [Keyword tree](#keyword-tree)
-  - [Ignore-rule changes](#ignore-rule-changes)
-- [Using it from AI tools](#using-it-from-ai-tools)
-- [Terminal commands](#terminal-commands)
-- [Status](#status)
-- [Development](#development)
-- [License](#license)
 
 ## Quick start
 
-You need macOS or Linux, Python 3.12 or later, [uv](https://docs.astral.sh/uv/), and a signed-in Claude Code (`claude`) or Codex (`codex`). Hanger uses no API keys; it runs models through the subscription you already have.
+You need macOS or Linux, Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/). Hanger calls models through an authenticated Claude Code or Codex CLI.
 
 ```sh
 uv tool install hanger
 hanger setup
-claude mcp add --scope user hanger -- hanger serve
 hanger closet add ~/notes
 ```
 
-`hanger setup` asks no questions. It finds a model provider (Claude Code if present, otherwise Codex) and downloads and installs the search engine (Elasticsearch with the Korean analyzer). When no provider is found, setup stops and says why. You can register your notes folder in the terminal, as on the last line, or let your AI tool ask you for it on first use.
+Replace `~/notes` with an existing, readable and writable Markdown notes folder. Hanger calls a registered notes folder a closet.
 
-To connect Codex, use `codex mcp add hanger -- hanger serve`. To install the latest unreleased code, use `uv tool install git+https://github.com/woonyong-choi/hanger`.
+Registration creates `.hangerignore` and `HANGER.md` at the root only when they do not exist. It preserves existing files. The default ignore file has no exclusion patterns, so all Markdown notes are eligible for indexing. Hanger does not index `HANGER.md` itself.
 
-To update:
+`hanger setup` finds a model CLI and installs Elasticsearch with the Korean analyzer. It selects Claude Code first, then Codex. Setup stops if neither CLI is available. It does not check CLI authentication or an actual model response.
+
+### Connect an AI tool
+
+Run the connection command for your tool. A request to the connected MCP server starts the background service.
+
+<details>
+<summary>Connect Claude Code</summary>
+
+```sh
+claude mcp add --scope user hanger -- hanger serve
+```
+
+</details>
+
+<details>
+<summary>Connect Codex</summary>
+
+```sh
+codex mcp add hanger -- hanger serve
+```
+
+</details>
+
+### First request
+
+Ask the connected AI tool to search. Replace the search terms with a topic in your notes.
+
+```text
+Find notes about idempotency keys in my registered notes folder.
+```
+
+Search does not change notes. Request a change separately after finding the relevant content.
+
+```text
+Remove repeated sentences from the note you found. Preserve its sources and folder rules.
+```
+
+An `accepted` change request is queued. The AI tool uses `job_status` to check the final result and next action. A job that stops because its source changed requires user consent before reconsideration. See [skills/hanger/SKILL.md](skills/hanger/SKILL.md) for the tool instructions.
+
+<details>
+<summary>Updates and source installation</summary>
+
+Update the release with these commands.
 
 ```sh
 uv tool upgrade hanger
 hanger setup
 ```
 
+Install unreleased code with this command.
+
+```sh
+uv tool install git+https://github.com/woonyong-choi/hanger
+```
+
+</details>
+
 ## Why
 
-As Markdown notes pile up, the same topic ends up in several notes, and an AI tool asked to tidy them may change things without evidence or touch folders it should leave alone. Hanger sits between your AI tools and your notes folder and handles search, change planning, review and writing. It changes only passages of notes it has read, follows the rule files (`HANGER.md`) and ignore file (`.hangerignore`) you set, and stops instead of overwriting when a note changed in the meantime.
+As Markdown notes grow, the same explanation can spread across several files. Hanger connects AI tools to note search, change proposals, and review under folder rules. Changes to existing notes replace source passages that the model read. Hanger checks the sources again before applying changes.
 
-If you keep a handful of notes in one folder and editing them yourself is quicker, an editor is enough.
+If you have a few notes and editing them yourself takes less time, an editor is enough.
 
 ## How it works
 
-1. Register a closet. A notes folder Hanger keeps is called a closet. You can register several. A folder inside, or containing, a registered closet is refused as a duplicate. Registering creates a default `.hangerignore` and `HANGER.md` at the root only when they are missing.
-2. Index. A background service watches for file changes and keeps the search index current. Files matched by `.hangerignore` (`.gitignore` syntax) and `HANGER.md` files are not indexed. The default file holds only syntax notes and no patterns, so at first every Markdown note is indexed.
-3. Keyword tree. Alongside indexing, each note gets a concept name, other names, a definition and broader, related and prerequisite concepts, forming a tree per closet. See [Keyword tree](#keyword-tree).
-4. Request. An AI tool searches, or asks to write, edit or organize. Change requests are queued and the service works through them.
-5. Draft and review. The model gets the related notes together with the `HANGER.md` rules for their folders and drafts a change; a separate call reviews it. A rejected draft is written again with the reasons.
-6. Write. Files change only after Hanger confirms the source is unchanged. Folders with `write: false` and ignored files are never changed.
+The diagram shows a change request that uses models. Search ends with a result. The `collect` tool stores content unchanged in `inbox/` without a model.
 
-### Rule files
+<img src="docs/assets/change-request.svg" width="360" alt="A separate model call reviews the proposal, then source checks allow each file write or stop it on a conflict">
+
+1. The service queues the request and gathers related notes and folder rules for a draft.
+2. A separate model call reviews the draft. Rejection leads to another draft with the review feedback. Review does not imply a different model or human approval.
+3. Hanger checks the target and reference sources before writing each file. The default mode (`normal`) stops on changed sources. The `bypass` mode makes a new proposal from the current sources. Neither mode forces an overwrite.
+
+The files are not one transaction. A conflict or cancellation leaves files that were already changed in place.
+
+### Rules and search
+
+Hanger watches the registered folder and updates the search index. It follows folder rules in `HANGER.md` and ignore patterns in `.hangerignore`. It does not change notes under `write: false` or ignored files.
+
+<details>
+<summary>Per-folder rule files</summary>
 
 `HANGER.md` can sit in any folder and applies to that folder and below. For settings between the top `---` lines, the nearest file wins. For each note path, Hanger selects written rules from the nearest folder first, up to a total of 32 KiB, then sends the selected rules from the root down to the nearest folder. The file has its own name so it does not mix with other AI tools' rule files (`AGENTS.md`, `CLAUDE.md` and so on).
 
@@ -79,7 +125,10 @@ write: false
 Notes in this folder are final. Quote them; do not change them.
 ```
 
-### Keyword tree
+</details>
+
+<details>
+<summary>Keyword trees and merging</summary>
 
 One note is one concept. Broader concepts the user wrote come first: a `parent` in the front matter (a slug, file name or link), and index notes whose list lines start with a link (that note is the parent of the notes it lists). Where the user wrote nothing, the model reads the note with its 20 nearest notes and proposes a concept name, other names, a definition and broader, related and prerequisite concepts; the program checks and stores them.
 
@@ -92,11 +141,21 @@ One note is one concept. Broader concepts the user wrote come first: a `parent` 
 
 The tree is built in the background, one note at a time, while no user request waits. `hanger keywords` and `list_closets` show progress.
 
-### Ignore-rule changes
+</details>
+
+<details>
+<summary>Approval for ignore-rule changes</summary>
 
 Editing the patterns in `.hangerignore` or deleting the file does not take effect at once; it is recorded as a decision. An edit that only changes comments cannot affect the index and applies at once. While a decision is pending, Hanger refuses every search and change request and asks for the answer first. If a closet's folder is missing or empty (an unplugged drive, say), its decision is withdrawn and asked again when the folder is back. File watching and index updates keep running. Hanger asks because a note taken out of the index may not get the same keywords and links when it is indexed again. For a deleted file, approving recreates the default file and declining restores the previous one.
 
-## Using it from AI tools
+</details>
+
+### Tools and settings
+
+Expand the reference you need.
+
+<details>
+<summary>MCP tool reference</summary>
 
 Connected as an MCP server, Hanger offers these tools. Its messages and questions are in English, and it tells AI tools to translate them into the user's language.
 
@@ -114,7 +173,10 @@ Connected as an MCP server, Hanger offers these tools. Its messages and question
 
 With more than one closet, each request passes `closet` as an id or a path inside the closet. Usage guidance for AI tools is in [skills/hanger/SKILL.md](skills/hanger/SKILL.md).
 
-## Terminal commands
+</details>
+
+<details>
+<summary>Terminal commands and settings</summary>
 
 | Command | What it does |
 |---|---|
@@ -142,11 +204,18 @@ Main settings:
 
 Settings, the closet list, applied ignore rules and decisions are stored in `~/.local/share/hanger/state/hanger.db`. Setting changes apply when the service restarts (`hanger stop`).
 
+</details>
+
 ## Status
 
-Several closets, ignore rules with approval, per-folder rule files, search, the keyword tree, write/edit/organize requests with review, and subscription CLIs (Claude Code, Codex) are supported. Version 0.2.0 is released.
+[Release 0.2.0](https://github.com/woonyong-choi/hanger/releases/tag/v0.2.0) is available. Hanger supports multiple closets, folder rules, search, keyword trees, and change requests with review and recovery.
 
-[Search omissions](https://github.com/woonyong-choi/hanger/issues/7) and [cost and quality across the full workflow](https://github.com/woonyong-choi/hanger/issues/8) remain under investigation. Implementing keyword trees does not establish search recall or merge quality. Before 1.0, formats and commands may change without notice.
+| Available | Not yet available | Next | Measurement |
+|---|---|---|---|
+| Search and keyword trees | Verified search recall with the current tree | [Search recall fix](https://github.com/woonyong-choi/hanger/issues/7) | Current tree not remeasured |
+| Writing, editing, organizing, and review | A cost and quality comparison of the whole organizing workflow | [Whole workflow measurement](https://github.com/woonyong-choi/hanger/issues/8) | Whole comparison incomplete |
+
+Formats and commands can change without notice before 1.0.
 
 ## Development
 
@@ -159,11 +228,19 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-Tests that need search use the Elasticsearch (with the Nori analyzer) given in `HANGER_TEST_SEARCH_URL` and are skipped without it.
+Search integration tests use Elasticsearch with Nori at `HANGER_TEST_SEARCH_URL`. Managed-server lifecycle tests use an Elasticsearch installation with Nori at `HANGER_TEST_ES_HOME`. Tests without the required settings are skipped. Live model tests run only when explicitly enabled.
+
+<details>
+<summary>Regenerate the diagram</summary>
+
+[change-request.torso](docs/assets/change-request.torso) is the source; the SVG is generated. Set `TORSO_CLI` to the CLI path from [Torso 14e57b7](https://github.com/woonyong-choi/torso/tree/14e57b7b274ac791f46d6c7827acf17686a983ed).
 
 ```sh
-HANGER_TEST_SEARCH_URL=http://127.0.0.1:19200 uv run pytest
+node "$TORSO_CLI" check docs/assets/change-request.torso --strict
+node "$TORSO_CLI" render docs/assets/change-request.torso --strict --out docs/assets
 ```
+
+</details>
 
 ## License
 

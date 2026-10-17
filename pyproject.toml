@@ -95,6 +95,10 @@ replacement = 'src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/
 pattern = '(href="|\]\()((?:README|skills/)[^")]+)'
 replacement = '\1https://github.com/woonyong-choi/hanger/blob/main/\2'
 
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(\]\()(docs/[^")]+)'
+replacement = '\1https://raw.githubusercontent.com/woonyong-choi/hanger/main/\2'
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/hanger"]
 

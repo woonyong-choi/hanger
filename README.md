@@ -1,66 +1,112 @@
 <p align="center">
-  <img src="docs/assets/logo.png" alt="Hanger 로고" height="120">
+  <img src="docs/assets/logo.png" alt="Hanger 로고" height="80">
 </p>
 
 <h1 align="center">Hanger</h1>
 
 <p align="center">
-  Local Markdown document automation with durable workflows<br>
-  한국어 | <a href="README.en.md">English</a><br>
+  Search and edit local Markdown notes through MCP<br>
+  <a href="https://github.com/woonyong-choi/hanger/releases/latest"><img src="https://img.shields.io/github/v/release/woonyong-choi/hanger?label=release" alt="GitHub release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a><br>
+  한국어 | <a href="README.en.md">English</a>
 </p>
-
-## 목차
-
-- [빠른 시작](#빠른-시작)
-- [해결하는 문제](#해결하는-문제)
-- [작동 방식](#작동-방식)
-  - [규칙 파일](#규칙-파일)
-  - [키워드 트리](#키워드-트리)
-  - [무시 규칙 변경](#무시-규칙-변경)
-- [AI 도구에서 쓰기](#ai-도구에서-쓰기)
-- [터미널 명령](#터미널-명령)
-- [상태](#상태)
-- [개발](#개발)
-- [라이선스](#라이선스)
 
 ## 빠른 시작
 
-macOS나 Linux, Python 3.12 이상, [uv](https://docs.astral.sh/uv/), 로그인한 Claude Code(`claude`)나 Codex(`codex`)가 필요합니다. API 키는 쓰지 않고 이미 가입한 구독으로 모델을 실행합니다.
+macOS 또는 Linux, Python 3.12 이상, [uv](https://docs.astral.sh/uv/)가 필요합니다. 모델은 로그인한 Claude Code 또는 Codex CLI를 통해 호출합니다.
 
 ```sh
 uv tool install hanger
 hanger setup
-claude mcp add --scope user hanger -- hanger serve
 hanger closet add ~/notes
 ```
 
-`hanger setup`은 아무것도 묻지 않습니다. 모델 공급자를 찾고(Claude Code가 있으면 Claude Code, 없으면 Codex) 검색 엔진(Elasticsearch와 한국어 분석기)을 내려받아 설치합니다. 공급자가 하나도 없으면 설치를 멈추고 이유를 알려 줍니다. 노트 폴더는 마지막 줄처럼 터미널에서 등록해도 되고, AI 도구가 처음 쓸 때 사용자에게 물어 등록해도 됩니다.
+`~/notes`는 이미 존재하고 읽기·쓰기 가능한 Markdown 노트 폴더로 바꾸세요. Hanger가 관리하는 노트 폴더를 closet이라고 부릅니다.
 
-Codex에 연결할 때는 `codex mcp add hanger -- hanger serve`를 씁니다. 아직 배포되지 않은 최신 코드는 `uv tool install git+https://github.com/woonyong-choi/hanger`로 설치합니다.
+등록하면 루트에 `.hangerignore`와 `HANGER.md`가 없을 때만 기본 파일을 만듭니다. 기존 파일은 보존합니다. 기본 무시 파일에는 제외 패턴이 없어 모든 Markdown 노트가 색인 대상이며, `HANGER.md` 자체는 색인하지 않습니다.
 
-업데이트:
+`hanger setup`은 모델 CLI를 찾고 Elasticsearch와 한국어 분석기를 설치합니다. Claude Code가 있으면 먼저 선택하고, 없으면 Codex를 선택합니다. 모델 CLI가 없으면 설치를 멈춥니다. CLI 로그인과 실제 모델 응답은 이 단계에서 검사하지 않습니다.
+
+### AI 도구 연결
+
+사용하는 도구의 연결 명령을 실행하세요. 연결된 MCP 서버에 요청하면 백그라운드 서비스가 시작됩니다.
+
+<details>
+<summary>Claude Code 연결</summary>
+
+```sh
+claude mcp add --scope user hanger -- hanger serve
+```
+
+</details>
+
+<details>
+<summary>Codex 연결</summary>
+
+```sh
+codex mcp add hanger -- hanger serve
+```
+
+</details>
+
+### 첫 요청
+
+연결한 AI 도구에 검색을 요청하세요. 검색어는 등록한 노트의 내용에 맞춰 바꾸세요.
+
+```text
+등록한 노트 폴더에서 멱등성 키를 다룬 노트를 찾아 줘.
+```
+
+검색은 노트를 바꾸지 않습니다. 찾은 내용을 고치려면 변경을 따로 요청하세요.
+
+```text
+방금 찾은 노트에서 중복된 문장을 정리해 줘. 원문 근거와 폴더 규칙은 유지해 줘.
+```
+
+변경 요청의 `accepted`는 접수 상태입니다. AI 도구는 `job_status`로 최종 결과와 다음 행동을 확인합니다. 원문 변경으로 멈춘 작업은 사용자 동의를 받아 다시 검토합니다. 사용 지침은 [skills/hanger/SKILL.md](skills/hanger/SKILL.md)에 있습니다.
+
+<details>
+<summary>업데이트와 소스 설치</summary>
+
+배포판은 다음 명령으로 업데이트합니다.
 
 ```sh
 uv tool upgrade hanger
 hanger setup
 ```
 
+배포되지 않은 최신 코드는 다음 명령으로 설치합니다.
+
+```sh
+uv tool install git+https://github.com/woonyong-choi/hanger
+```
+
+</details>
+
 ## 해결하는 문제
 
-Markdown 노트가 쌓이면 같은 주제의 노트가 여러 곳에 생기고, AI 도구에 정리를 맡기면 근거 없이 고치거나 손대면 안 되는 폴더까지 바꿉니다. Hanger는 AI 도구와 노트 폴더 사이에서 검색, 수정 계획, 검토, 반영을 맡습니다. 노트를 고칠 때는 읽은 원문 구간만 바꾸고, 사용자가 정한 규칙 파일(`HANGER.md`)과 무시 파일(`.hangerignore`)을 따르며, 원문이 그사이 바뀌면 덮어쓰지 않고 멈춥니다.
+Markdown 노트가 쌓이면 같은 설명이 여러 파일에 흩어집니다. Hanger는 AI 도구가 노트를 검색하고, 폴더 규칙에 따라 변경안을 만들고 검토하도록 연결합니다. 기존 노트는 근거로 읽은 원문 구간을 바꾸며, 원문이 달라졌는지 반영 전에 다시 확인합니다.
 
-노트가 한 폴더에 몇 개뿐이고 직접 고치는 편이 빠르면 Hanger 없이 편집기로 충분합니다.
+노트가 몇 개뿐이고 직접 고치는 편이 빠르면 편집기로 충분합니다.
 
 ## 작동 방식
 
-1. closet 등록. Hanger가 관리하는 노트 폴더를 closet(옷장)이라고 부릅니다. 여러 개를 등록할 수 있고, 등록된 closet 안이나 바깥을 감싸는 폴더는 중복이라 거절합니다. 등록하면 루트에 `.hangerignore`와 `HANGER.md`가 없을 때만 기본 파일을 만듭니다.
-2. 색인. 백그라운드 서비스가 파일 변경을 감시해 검색 색인을 최신으로 유지합니다. `.hangerignore`(`.gitignore` 문법)에 맞는 파일과 `HANGER.md`는 색인하지 않습니다. 기본 파일은 패턴 없이 문법 안내만 담고 있어 처음에는 모든 Markdown 노트를 색인합니다.
-3. 키워드 트리. 색인과 함께 노트마다 개념 이름·다른 이름·정의·상위·연관·선행 개념을 정리해 closet별 트리를 만듭니다. [키워드 트리](#키워드-트리)에서 자세히 설명합니다.
-4. 요청. AI 도구가 검색하거나 작성·수정·정리를 요청합니다. 변경 요청은 대기열에 들어가고 서비스가 처리합니다.
-5. 초안과 검토. 관련 노트와 그 폴더들에 적용되는 `HANGER.md` 규칙을 모델에 함께 주고 수정안을 만든 뒤, 다른 호출로 검토합니다. 검토에서 거절되면 이유를 반영해 다시 씁니다.
-6. 반영. 원문이 그대로인지 확인한 뒤에만 파일을 바꿉니다. `write: false`인 폴더와 무시된 파일은 바꾸지 않습니다.
+그림은 모델을 거치는 변경 요청의 흐름입니다. 검색은 조회로 끝나고, `collect`는 모델 없이 내용을 그대로 `inbox/`에 보관합니다.
 
-### 규칙 파일
+<img src="docs/assets/change-request.svg" width="360" alt="수정안을 별도로 검토하고 원문을 재검사한 뒤 파일마다 반영하거나 충돌로 멈춥니다">
+
+1. 서비스가 변경 요청을 대기열에 저장하고, 관련 노트와 폴더 규칙을 모아 초안을 만듭니다.
+2. 모델을 별도로 호출해 초안을 검토합니다. 검토에서 거절하면 이유를 반영해 다시 작성합니다. 다른 모델이나 사람의 승인을 뜻하지 않습니다.
+3. 수정 대상과 참고 원문이 그대로인지 확인한 뒤 파일마다 반영합니다. 기본 모드(`normal`)는 원문이 달라지면 충돌로 멈춥니다. `bypass` 모드는 현재 원문으로 수정안을 다시 만듭니다. 강제로 덮어쓰지 않습니다.
+
+여러 파일 전체를 한 번에 되돌리는 방식은 아닙니다. 도중에 충돌하거나 취소해도 이미 반영한 파일은 남습니다.
+
+### 규칙과 검색
+
+등록한 폴더의 변경을 감시해 검색 색인을 갱신합니다. `HANGER.md`의 폴더 규칙과 `.hangerignore`의 무시 패턴을 따릅니다. `write: false`인 폴더와 무시된 파일은 변경하지 않습니다.
+
+<details>
+<summary>폴더별 규칙 파일</summary>
 
 `HANGER.md`는 폴더마다 둘 수 있고 그 폴더와 하위 폴더에 적용됩니다. 맨 위 `---` 사이의 설정은 가장 가까운 파일의 값이 이기고, 각 노트 경로에 적용할 본문 규칙은 합계 32KiB 안에서 가까운 폴더부터 고르고, 선택한 규칙은 루트부터 가까운 폴더 순서로 모델에 전달합니다. 다른 AI 도구의 규칙 파일(`AGENTS.md`, `CLAUDE.md` 등)과 섞이지 않도록 이름을 따로 씁니다.
 
@@ -79,7 +125,10 @@ write: false
 이 폴더의 노트는 확정본입니다. 인용만 하고 고치지 마세요.
 ```
 
-### 키워드 트리
+</details>
+
+<details>
+<summary>키워드 트리의 생성과 병합</summary>
 
 노트 하나가 개념 하나입니다. 상위 개념은 사용자가 쓴 것이 먼저입니다. 머리말의 `parent`(slug, 파일 이름, 링크 모두 가능)와, 목록 줄을 링크로 시작하는 색인 노트(그 노트가 링크한 노트들의 상위)가 그렇습니다. 사용자가 정하지 않은 자리는 모델이 노트와 비슷한 노트 20개를 보고 개념 이름, 다른 이름, 정의, 상위·연관·선행 개념을 제안하고, 프로그램이 검사해 저장합니다.
 
@@ -92,11 +141,21 @@ write: false
 
 트리는 사용자 요청이 없을 때 백그라운드에서 한 노트씩 만듭니다. 진행은 `hanger keywords`나 `list_closets`로 봅니다.
 
-### 무시 규칙 변경
+</details>
+
+<details>
+<summary>무시 규칙 변경의 승인</summary>
 
 `.hangerignore`의 패턴을 고치거나 파일을 지우면 바로 적용하지 않고 결정(decision)으로 기록합니다. 주석만 바꾼 수정은 색인에 영향이 없어 바로 적용합니다. 결정이 남아 있는 동안 Hanger는 검색과 변경 요청을 모두 거절하고 먼저 답을 요구합니다. closet 폴더가 없거나 비어 있으면(드라이브 연결 해제 등) 그 closet의 결정은 철회하고, 폴더가 돌아오면 다시 묻습니다. 파일 감시와 색인 갱신은 계속 돌아갑니다. 색인에서 빠진 노트는 다시 넣어도 같은 키워드와 링크를 보장할 수 없어서 이렇게 확인합니다. 지운 경우 승인하면 기본 파일을 다시 만들고, 거절하면 이전 파일을 되돌립니다.
 
-## AI 도구에서 쓰기
+</details>
+
+### 도구와 설정
+
+필요한 도구, 명령, 설정을 펼쳐 확인할 수 있습니다.
+
+<details>
+<summary>MCP 도구 목록</summary>
 
 MCP 서버로 연결하면 아래 도구를 씁니다. 안내 문구와 질문은 영어로 돌려주며, AI 도구에 사용자의 언어로 번역해 전달하라고 지시합니다.
 
@@ -114,7 +173,10 @@ MCP 서버로 연결하면 아래 도구를 씁니다. 안내 문구와 질문�
 
 closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경로를 넘깁니다. AI 도구에 줄 사용 지침은 [skills/hanger/SKILL.md](skills/hanger/SKILL.md)에 있습니다.
 
-## 터미널 명령
+</details>
+
+<details>
+<summary>터미널 명령과 설정</summary>
 
 | 명령 | 하는 일 |
 |---|---|
@@ -142,11 +204,18 @@ closet이 둘 이상이면 요청마다 `closet`에 id나 그 closet 안의 경�
 
 설정, closet 목록, 적용된 무시 규칙, 결정은 `~/.local/share/hanger/state/hanger.db`에 저장합니다. 설정 변경은 서비스가 다시 시작될 때 적용됩니다(`hanger stop`).
 
+</details>
+
 ## 상태
 
-여러 closet 관리, 무시 규칙과 승인 흐름, 폴더별 규칙 파일, 검색, 키워드 트리, 작성·수정·정리 요청과 검토, 구독 CLI(Claude Code, Codex) 실행을 지원합니다. 0.2.0을 배포했습니다.
+[0.2.0 배포판](https://github.com/woonyong-choi/hanger/releases/tag/v0.2.0)이 있습니다. 여러 closet 관리, 폴더 규칙, 검색·키워드 트리, 변경 요청·검토·복구를 지원합니다.
 
-의역 검색의 누락과 전체 정리 과정의 비용·품질 비교는 [검색 누락 이슈](https://github.com/woonyong-choi/hanger/issues/7)와 [비교 실험 이슈](https://github.com/woonyong-choi/hanger/issues/8)에서 추적합니다. 키워드 트리의 구현만으로 검색 누락 해결이나 병합 품질을 보장하지 않습니다. 1.0 전에는 형식과 명령이 예고 없이 바뀔 수 있습니다.
+| 있는 것 | 아직 없는 것 | 다음 | 측정 |
+|---|---|---|---|
+| 검색과 키워드 트리 | 현재 트리의 검색 누락 해결 판정 | [검색 누락 수정](https://github.com/woonyong-choi/hanger/issues/7) | 현재 트리 재측정 전 |
+| 작성·수정·정리와 검토 | 전체 정리 과정의 비용·품질 비교 | [전체 과정 측정](https://github.com/woonyong-choi/hanger/issues/8) | 전체 비교 미완료 |
+
+1.0 전에는 형식과 명령이 예고 없이 바뀔 수 있습니다.
 
 ## 개발
 
@@ -159,11 +228,19 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-검색이 필요한 테스트는 `HANGER_TEST_SEARCH_URL`에 지정한 Elasticsearch(Nori 분석기 포함)를 씁니다. 지정하지 않으면 해당 테스트를 건너뜁니다.
+검색 통합 검사는 `HANGER_TEST_SEARCH_URL`에 Elasticsearch와 Nori 분석기를 지정해 실행합니다. 관리형 서버 수명 검사에는 `HANGER_TEST_ES_HOME`으로 Nori가 설치된 Elasticsearch 경로를 지정합니다. 지정하지 않은 검사는 건너뜁니다. 실제 모델 호출 검사는 명시적으로 선택한 경우에만 실행합니다.
+
+<details>
+<summary>그림 다시 만들기</summary>
+
+[change-request.torso](docs/assets/change-request.torso)가 원본이고 SVG는 생성물입니다. [Torso 14e57b7](https://github.com/woonyong-choi/torso/tree/14e57b7b274ac791f46d6c7827acf17686a983ed)의 CLI 경로를 `TORSO_CLI`에 지정해 생성합니다.
 
 ```sh
-HANGER_TEST_SEARCH_URL=http://127.0.0.1:19200 uv run pytest
+node "$TORSO_CLI" check docs/assets/change-request.torso --strict
+node "$TORSO_CLI" render docs/assets/change-request.torso --strict --out docs/assets
 ```
+
+</details>
 
 ## 라이선스
 
