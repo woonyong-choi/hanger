@@ -9,7 +9,7 @@ import pytest
 
 from hanger.documents import Documents
 from hanger.model import CliModel, Intent, Planner
-from hanger.requests import Change, issue_key
+from hanger.requests import Change, Proposal, digest, issue_key
 from hanger.runtime import Runtime
 from hanger.search import SearchIndex
 from hanger.sync import Synchronizer
@@ -119,6 +119,134 @@ def test_parallel_proposals_recheck_shared_source(
             assert (root / "a.md").read_text() in {"first", "second"}
     finally:
         index.close()
+
+
+def test_parallel_proposals_preserve_first_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "closet"
+    root.mkdir()
+    target = root / "a.md"
+    target.write_text("original")
+    replacing = threading.Event()
+    released = threading.Event()
+    replace = os.replace
+
+    def pause_first_replace(source: Path, destination: Path) -> None:
+        if destination == target and not replacing.is_set():
+            replacing.set()
+            assert released.wait(5)
+        replace(source, destination)
+
+    with Runtime(root, tmp_path / "state") as runtime:
+        admission = runtime._admission
+
+        class ObservedAdmission:
+            def __enter__(self) -> None:
+                if not admission.acquire(blocking=False):
+                    released.set()
+                    admission.acquire()
+
+            def __exit__(self, *_: object) -> None:
+                admission.release()
+
+        monkeypatch.setattr(runtime, "_admission", ObservedAdmission())
+        monkeypatch.setattr(os, "replace", pause_first_replace)
+        before = runtime.documents.read_hash("a.md")
+        for text in ("first", "second"):
+            runtime.submit(
+                issue_key(runtime._secret),
+                Proposal(changes=(Change(path="a.md", before=before, after=text),)),
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(runtime.run_next)
+            try:
+                assert replacing.wait(5)
+                second = workers.submit(runtime.run_next)
+                second.add_done_callback(lambda _: released.set())
+                results = [first.result(timeout=10), second.result(timeout=10)]
+            finally:
+                released.set()
+
+        assert [result["status"] for result in results if result] == [
+            "completed",
+            "conflict",
+        ]
+        assert target.read_text() == "first"
+        assert sorted(path.name for path in root.iterdir()) == ["a.md"]
+
+
+def test_completed_job_cleanup_preserves_next_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "closet"
+    root.mkdir()
+    target = root / "a.md"
+    cleaning = threading.Event()
+    cleanup_released = threading.Event()
+    replacing = threading.Event()
+    replacement_released = threading.Event()
+    replace = os.replace
+
+    def pause_next_replace(source: Path, destination: Path) -> None:
+        if destination == target and cleaning.is_set() and not replacing.is_set():
+            replacing.set()
+            assert replacement_released.wait(5)
+        replace(source, destination)
+
+    with Runtime(root, tmp_path / "state") as runtime:
+        admission = runtime._admission
+        discard = runtime._discard
+        first_key = issue_key(runtime._secret)
+
+        class ObservedAdmission:
+            def __enter__(self) -> None:
+                if not admission.acquire(blocking=False):
+                    if replacing.is_set():
+                        replacement_released.set()
+                    admission.acquire()
+
+            def __exit__(self, *_: object) -> None:
+                admission.release()
+
+        def pause_first_cleanup(key: str, *, resolved: str = "") -> None:
+            if key == first_key:
+                cleaning.set()
+                assert cleanup_released.wait(5)
+            discard(key, resolved=resolved)
+
+        monkeypatch.setattr(runtime, "_admission", ObservedAdmission())
+        monkeypatch.setattr(runtime, "_discard", pause_first_cleanup)
+        monkeypatch.setattr(os, "replace", pause_next_replace)
+        runtime.submit(
+            first_key, Proposal(changes=(Change(path="a.md", after="first"),))
+        )
+        before = digest(b"first")
+        runtime.submit(
+            issue_key(runtime._secret),
+            Proposal(changes=(Change(path="a.md", before=before, after="second"),)),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            first = workers.submit(runtime.run_next)
+            try:
+                assert cleaning.wait(5)
+                second = workers.submit(runtime.run_next)
+                assert replacing.wait(5)
+                first.add_done_callback(lambda _: replacement_released.set())
+                cleanup_released.set()
+                results = [first.result(timeout=10), second.result(timeout=10)]
+            finally:
+                cleanup_released.set()
+                replacement_released.set()
+
+        assert [result["status"] for result in results if result] == [
+            "completed",
+            "completed",
+        ]
+        assert target.read_text() == "second"
+        assert sorted(path.name for path in root.iterdir()) == ["a.md"]
 
 
 class EditingModel(CliModel):
