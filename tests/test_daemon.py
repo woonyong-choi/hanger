@@ -15,6 +15,7 @@ from hanger import proxy
 from hanger.closets import register_closet
 from hanger.daemon import DaemonInfo, socket_path
 from hanger.proxy import Launcher, Relay, call_tool
+from hanger.rules import RULES_FILE
 from hanger.search import SearchIndex
 from hanger.store import StateStore
 
@@ -27,6 +28,7 @@ def env(tmp_path: Path) -> Iterator[tuple[Path, Path, Launcher]]:
     root = tmp_path / "closet"
     (root / "docs").mkdir(parents=True)
     (root / "docs/a.md").write_text("# 결제\n멱등성 키")
+    (root / RULES_FILE).write_text("---\nkeywords: false\n---\n")
     state = tmp_path / "s"
     store = StateStore(state)
     store.set_setting("service.idle_minutes", 0.05)
@@ -164,7 +166,7 @@ def test_relay_survives_crash_and_hang(
 
     def receive(identifier: int) -> dict[str, object]:
         while True:
-            reply = json.loads(reader.readline())
+            reply: dict[str, object] = json.loads(reader.readline())
             if reply.get("id") == identifier:
                 return reply
 
