@@ -219,7 +219,7 @@ def test_external_edit_during_workflow_stops_apply(flow: tuple[Runtime, Model]) 
 
 
 # missing evidence must be distinguishable from completed integration.
-def test_deferred_workflow_preserves_input_without_review(
+def test_deferred_workflow_preserves_input_after_review(
     flow: tuple[Runtime, Model],
 ) -> None:
     runtime, model = flow
@@ -228,7 +228,8 @@ def test_deferred_workflow_preserves_input_without_review(
     result = run(runtime)
     assert result["status"] == "deferred"
     assert result["decision"]["uncertainties"] == ["출처 필요"]
-    assert not model.reviews and result["review"] == {}
+    assert len(model.reviews) == 1
+    assert result["review"] == {"approved": True, "issues": []}
     assert (runtime.documents.root / "docs/a.md").read_bytes() == before
 
 

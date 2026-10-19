@@ -204,7 +204,7 @@ def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None
         "--state",
         str(paths[1]),
         "--search-url",
-        "http://127.0.0.1:19200",
+        os.environ.get("HANGER_TEST_SEARCH_URL", "http://127.0.0.1:19200"),
     ]
     subprocess.run([*base, "closet", "add", str(paths[0])], check=True, timeout=30)
     key_result = subprocess.run(

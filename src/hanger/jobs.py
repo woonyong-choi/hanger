@@ -18,6 +18,7 @@ class JobState(TypedDict):
     results: dict[str, str]
     intent: dict[str, Any]
     dependencies: dict[str, str]
+    policy_dependencies: dict[str, str | None]
     revision: int
     decision: dict[str, Any]
     review: dict[str, Any]
@@ -79,6 +80,7 @@ def initial_state(request: dict[str, Any]) -> JobState:
         "error_code": "",
         "intent": request.get("intent", {}),
         "dependencies": {},
+        "policy_dependencies": request.get("policy_dependencies", {}),
         "revision": 0,
         "decision": {},
         "review": {},

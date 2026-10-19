@@ -9,8 +9,11 @@ from __future__ import annotations
 
 __all__ = ["DEFAULT_RULES", "RULES_FILE", "rules_for"]
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+from hanger.errors import RequestError
 
 RULES_FILE = "HANGER.md"
 # Total rule text passed to the model per request.
@@ -42,6 +45,7 @@ class FolderRules:
     """Rules that apply to one closet path."""
 
     settings: dict[str, str]
+    dependencies: dict[str, str | None]
     # (rule file path, written rules) from the closet root down.
     texts: tuple[tuple[str, str], ...]
 
@@ -70,25 +74,31 @@ def _split(text: str) -> tuple[dict[str, str], str]:
 def rules_for(root: Path, path: str, *, folder: bool = False) -> FolderRules:
     """Collect the HANGER.md files that apply to a closet-relative path."""
     parts = PurePosixPath(path).parts
+    if PurePosixPath(path).is_absolute() or ".." in parts:
+        raise RequestError("invalid rule scope", code="invalid_target")
+    dependencies: dict[str, str | None] = {}
     depth = len(parts) if folder else len(parts) - 1
     settings: dict[str, str] = {}
     found: list[tuple[str, str]] = []
     for level in range(max(depth, 0) + 1):
         relative = PurePosixPath(*parts[:level], RULES_FILE)
+        candidate = root / relative
+        if not candidate.resolve().is_relative_to(root.resolve()):
+            raise RequestError("rule path escapes closet", code="invalid_target")
         try:
-            text = (root / relative).read_text(encoding="utf-8")
-        except (FileNotFoundError, NotADirectoryError, UnicodeDecodeError):
+            raw = candidate.read_bytes()
+        except (FileNotFoundError, NotADirectoryError):
+            dependencies[relative.as_posix()] = None
             continue
+        dependencies[relative.as_posix()] = hashlib.sha256(raw).hexdigest()
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RequestError(f"invalid UTF-8 rules: {relative}") from error
         values, body = _split(text)
         settings.update(values)
         if body:
             found.append((relative.as_posix(), body))
-    # Over the size budget, the rules closest to the note are kept.
-    kept: list[tuple[str, str]] = []
-    size = 0
-    for rule_path, body in reversed(found):
-        size += len(body.encode())
-        if size > _MAX_RULE_BYTES:
-            break
-        kept.append((rule_path, body))
-    return FolderRules(settings, tuple(reversed(kept)))
+    if sum(len(body.encode()) for _, body in found) > _MAX_RULE_BYTES:
+        raise RequestError("folder rules exceed 32 KiB", code="rules_limit")
+    return FolderRules(settings, dependencies, tuple(found))

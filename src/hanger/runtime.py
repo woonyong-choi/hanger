@@ -227,7 +227,12 @@ class Runtime:
         self._validate_proposal(proposal)
         return self._enqueue(
             key,
-            {"proposal": proposal.model_dump(mode="json")},
+            {
+                "proposal": proposal.model_dump(mode="json"),
+                "policy_dependencies": self.policy.context(
+                    (), targets=[change.path for change in proposal.changes]
+                )["policy_dependencies"],
+            },
             proposal.fingerprint,
             deadline,
         )
@@ -845,6 +850,18 @@ class Runtime:
                     return self._stopped(proposal, "expired")
                 change = proposal.changes[cursor]
                 try:
+                    policies = state.get("policy_dependencies", {})
+                    if not policies:
+                        raise ConflictError(
+                            "saved proposal lacks policy dependencies; reconsider it"
+                        )
+                    if not self.policy.matches(policies):
+                        raise ConflictError(
+                            "folder rules or ignore policy changed; "
+                            "reconsider the proposal"
+                        )
+                    if not self.policy.writable(change.path):
+                        raise RequestError(f"target is read-only: {change.path}")
                     for path, expected in state.get("dependencies", {}).items():
                         if path in targets:
                             continue

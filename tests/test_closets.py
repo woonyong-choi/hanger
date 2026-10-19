@@ -321,7 +321,7 @@ def test_request_text_is_a_source_and_rules_are_not(tmp_path: Path) -> None:
     prompt = draft_prompt(
         {"request": {"profile": "note", "instruction": "x"}, "documents": {}}
     )
-    assert '"now_for_file_names": "' in prompt
+    assert '"now_for_file_names":"' in prompt
     assert "never list a HANGER.md file" not in prompt  # no rules given here
 
 

@@ -59,7 +59,14 @@ class _State(TypedDict):
     previous: dict[str, Any] | None
     feedback: list[str]
     # HANGER.md texts that apply to the closet and the notes in play.
-    rules: list[dict[str, str]]
+    rule_catalog: dict[str, str]
+    source_rules: dict[str, list[str]]
+    target_rules: dict[str, list[str]]
+    folder_rules: dict[str, list[str]]
+    folder_writable: dict[str, bool]
+    policy_dependencies: dict[str, str | None]
+    policy_rounds: int
+    redraft: bool
     # Given notes the model may read but not change.
     read_only: list[str]
     # Keyword tree facts of the notes in play, by path.
@@ -148,7 +155,14 @@ _EMPTY: dict[str, Any] = {
     "coverage": None,
     "previous": None,
     "feedback": [],
-    "rules": [],
+    "rule_catalog": {},
+    "source_rules": {},
+    "target_rules": {},
+    "folder_rules": {},
+    "folder_writable": {},
+    "policy_dependencies": {},
+    "policy_rounds": 0,
+    "redraft": False,
     "read_only": [],
     "keywords": {},
     "applied": [],
@@ -224,6 +238,10 @@ def _profile_graph(policy: ProfilePolicy, workflow: _Workflow) -> Any:
     builder = StateGraph(_State)
     builder.add_node("draft", workflow.draft)
     builder.add_node("read_more", workflow.read_more)
+    builder.add_node("target_rules", workflow.target_rules)
+    builder.add_conditional_edges(
+        "target_rules", lambda state: "draft" if state["redraft"] else "assemble"
+    )
     builder.add_node("assemble", lambda state: workflow.assemble(state, policy))
     builder.add_node("similar", workflow.similar)
     builder.add_node("review", workflow.review)
@@ -238,10 +256,6 @@ def _profile_graph(policy: ProfilePolicy, workflow: _Workflow) -> Any:
     return builder.compile(name="profile_" + policy.name)
 
 
-# cost: time O(n*r+t), heap O(n), stack O(d), io O(f), tokens O(n)
-# vars: n = bounded context/result bytes, r = patches per file, t = model latency
-# vars: f = checked files, d = directory depth; drafts <= 1 + extra reads
-# basis: estimate
 def run_workflow(
     context: dict[str, Any],
     model: CliModel,
@@ -251,6 +265,7 @@ def run_workflow(
 ) -> dict[str, Any]:
     workflow = _Workflow(model, synchronizer, trace, is_cancelled)
     initial = {**_EMPTY, **context}
+    initial.update(workflow.context(cast(_State, initial), initial["documents"]))
     try:
         result = _writing_graph(workflow).invoke(
             cast(_State, initial), durability="sync"
@@ -261,7 +276,7 @@ def run_workflow(
         ) from error
     workflow.guard(cast(_State, result))
     check = result.get("review", {})
-    if result["proposal"] and (not check["approved"] or check["issues"]):
+    if not check["approved"] or check["issues"]:
         raise ReviewRejectedError(
             list(check["issues"]) or ["The review did not approve the change."]
         )
@@ -270,6 +285,7 @@ def run_workflow(
         "decision": result["decision"],
         "review": check,
         "usage": result["usage"],
+        "policy_dependencies": result["policy_dependencies"],
         "dependencies": {
             path: doc["hash"] for path, doc in result["documents"].items()
         },
@@ -292,11 +308,88 @@ class _Workflow:
         self.is_cancelled = is_cancelled
 
     def guard(self, state: _State) -> None:
-        if self.is_cancelled() or not self.synchronizer.matches(state["signatures"]):
-            raise ConflictError("A source note changed, or the job was cancelled.")
+        if self._invalidated(state):
+            raise ConflictError(
+                "A source note or folder policy changed, or the job was cancelled."
+            )
 
     def _invalidated(self, state: _State) -> bool:
-        return self.is_cancelled() or not self.synchronizer.matches(state["signatures"])
+        return (
+            self.is_cancelled()
+            or not self.synchronizer.matches(state["signatures"])
+            or not self.synchronizer.policy.matches(state["policy_dependencies"])
+        )
+
+    def context(
+        self, state: _State, documents: dict[str, Any], targets: list[str] | None = None
+    ) -> dict[str, Any]:
+        policy = self.synchronizer.policy.context(
+            documents,
+            state["request"].get("folders", ()),
+            list(
+                dict.fromkeys(
+                    [
+                        *documents,
+                        *(targets if targets is not None else state["target_rules"]),
+                    ]
+                )
+            ),
+        )
+        graph = self.synchronizer.keywords
+        keywords = {}
+        if graph is not None:
+            for path in dict.fromkeys(
+                [*documents, *(item["path"] for item in state["listed"])]
+            ):
+                summary = graph.summary(path)
+                if summary is not None:
+                    keywords[path] = summary
+        self.guard(state)
+        return {
+            **policy,
+            "documents": documents,
+            "keywords": keywords,
+            "signatures": {p: d["signature"] for p, d in documents.items()},
+        }
+
+    def target_rules(self, state: _State) -> dict[str, Any]:
+        self.guard(state)
+        targets = list(
+            dict.fromkeys(
+                [
+                    *state["target_rules"],
+                    *(change["path"] for change in state["decision"]["changes"]),
+                ]
+            )
+        )
+        if targets == list(state["target_rules"]):
+            return {"redraft": False}
+        context = self.context(state, state["documents"], targets)
+        known = {
+            (tuple(chain), path not in state["read_only"])
+            for path, chain in state["target_rules"].items()
+        } | {
+            (tuple(chain), state["folder_writable"][folder])
+            for folder, chain in state["folder_rules"].items()
+        }
+        changed = context["rule_catalog"] != state["rule_catalog"] or any(
+            (tuple(context["target_rules"][path]), path not in context["read_only"])
+            not in known
+            for path in targets
+        )
+        if not changed:
+            return {**context, "redraft": False}
+        if state["policy_rounds"] >= 4:
+            raise RequestError("target policies did not converge", code="policy_limit")
+        return {
+            **context,
+            "redraft": True,
+            "policy_rounds": state["policy_rounds"] + 1,
+            "feedback": [
+                *state["feedback"],
+                "Target policies loaded; reconsider changes under each target's rules.",
+            ],
+        }
 
     # cost: time O(n+t), heap O(n), stack O(1), io O(f), tokens O(n)
     # vars: n = prompt/result bytes, t = model latency, f = checked source files
@@ -328,7 +421,7 @@ class _Workflow:
             and self._readable(state)
         ):
             return "read_more"
-        return "assemble"
+        return "target_rules"
 
     def _readable(self, state: _State) -> list[str]:
         listed = {item["path"] for item in state["listed"]}
@@ -355,8 +448,7 @@ class _Workflow:
             used += size
             added.append(path)
         return {
-            "documents": documents,
-            "signatures": {p: d["signature"] for p, d in documents.items()},
+            **self.context(state, documents),
             "listed": [item for item in state["listed"] if item["path"] not in added],
             # No progress means further reads cannot help within this request.
             "reads_left": state["reads_left"] - 1 if added else 0,
@@ -393,8 +485,6 @@ class _Workflow:
         return {"proposal": proposal, "decision": decision.model_dump()}
 
     def after_assemble(self, state: _State) -> str:
-        if not state["proposal"]:
-            return END
         if state["similar"] == "" and _created(state["proposal"]):
             return "similar"
         return "review"
@@ -446,8 +536,7 @@ class _Workflow:
         )
         return {
             "similar": "found",
-            "documents": documents,
-            "signatures": {p: d["signature"] for p, d in documents.items()},
+            **self.context(state, documents),
             "feedback": [*state["feedback"], notice],
         }
 
@@ -456,12 +545,12 @@ class _Workflow:
     # basis: estimate
     def review(self, state: _State) -> dict[str, Any]:
         self.guard(state)
-        changed = {c["path"] for c in state["proposal"]["changes"]}
+        changed = {c["path"] for c in state["proposal"].get("changes", [])}
         cited = set(state["decision"].get("sources", []))
         sources = {
             path: doc
             for path, doc in state["documents"].items()
-            if path in changed | cited
+            if not changed or path in changed | cited
         }
         prompt = review_prompt(
             {**state, "documents": sources},

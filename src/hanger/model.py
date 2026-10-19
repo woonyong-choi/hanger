@@ -319,7 +319,6 @@ class Planner:
         feedback: list[str] | None = None,
     ) -> dict[str, Any]:
         settings = self.synchronizer.settings
-        policy = self.synchronizer.policy
         with self.trace.measure("search") as metrics:
             search = self.synchronizer.search(
                 intent.query,
@@ -370,11 +369,6 @@ class Planner:
             "coverage": search.get("coverage"),
             "previous": previous,
             "feedback": feedback or [],
-            "rules": policy.rules(documents, intent.folders),
-            "keywords": _tree_facts(
-                self.synchronizer, [*documents, *listed_paths(listed)]
-            ),
-            "read_only": [path for path in documents if not policy.writable(path)],
             "applied": sorted(applied),
             "signatures": {path: doc["signature"] for path, doc in documents.items()},
         }
@@ -389,22 +383,3 @@ class Planner:
                 "listed": planned.pop("listed"),
             },
         }
-
-
-def listed_paths(listed: Any) -> list[str]:
-    return [
-        item["path"] for item in listed if isinstance(item, dict) and "path" in item
-    ]
-
-
-def _tree_facts(synchronizer: Synchronizer, paths: list[str]) -> dict[str, Any]:
-    """Where each note sits in the keyword tree, for placing changes."""
-    graph = synchronizer.keywords
-    if graph is None:
-        return {}
-    facts = {}
-    for path in dict.fromkeys(paths):
-        summary = graph.summary(path)
-        if summary is not None:
-            facts[path] = summary
-    return facts
