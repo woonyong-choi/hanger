@@ -6,12 +6,12 @@ from typing import Any, cast
 
 import pytest
 
-from hanger.closets import ClosetPolicy
-from hanger.documents import Documents
-from hanger.keywords import Extraction, KeywordBuilder, KeywordGraph
-from hanger.search import SearchIndex
-from hanger.semantics import parse_semantics
-from hanger.sync import Synchronizer
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.keywords import Extraction, KeywordBuilder, KeywordGraph
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.semantics import parse_semantics
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.vaults import VaultPolicy
 
 
 class _Index:
@@ -61,17 +61,17 @@ class _Index:
 
 @pytest.fixture
 def sync(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[Synchronizer]:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     index: SearchIndex
     if getattr(request, "param", "memory") == "elasticsearch":
-        url = os.environ.get("HANGER_TEST_SEARCH_URL")
+        url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
         if not url:
             pytest.skip("requires explicit Elasticsearch test endpoint")
         index = SearchIndex(url, str(root))
     else:
         index = cast(SearchIndex, _Index())
-    graph = KeywordGraph(root, tmp_path / "state/keywords.sqlite", ClosetPolicy(root))
+    graph = KeywordGraph(root, tmp_path / "state/keywords.sqlite", VaultPolicy(root))
     synchronizer = Synchronizer(Documents(root), index, policy=graph.policy)
     synchronizer.keywords = graph
     try:
@@ -527,8 +527,8 @@ def test_search_cli_and_mcp_include_current_relation_evidence(
 
     from conftest import service_for
 
-    from hanger.cli import _call_local
-    from hanger.runtime import Runtime
+    from markdown_notes_agent.cli import _call_local
+    from markdown_notes_agent.runtime import Runtime
 
     _chain(sync)
     with Runtime(sync.documents.root, tmp_path / "runtime") as runtime:
@@ -738,7 +738,7 @@ def test_keyword_differentia_only_missing_values_are_inferred(
 def test_keyword_explicit_same_as_blocks_model_merge_in_both_directions(
     sync: Synchronizer, declared: str, value: str | None
 ) -> None:
-    rules = sync.documents.root / "notes/HANGER.md"
+    rules = sync.documents.root / "notes/VAULT.md"
     rules.parent.mkdir()
     rules.write_text("---\nmerge: auto\n---\n")
     for name in ("a.md", "b.md"):

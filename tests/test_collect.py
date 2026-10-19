@@ -7,16 +7,15 @@ from pathlib import Path
 import pytest
 from conftest import finish, offline_service
 
-from hanger.closets import ClosetPolicy
-from hanger.documents import Documents
-from hanger.errors import RequestError
-from hanger.requests import issue_key
-from hanger.rules import RULES_FILE
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.requests import issue_key
+from markdown_notes_agent.rules import RULES_FILE
+from markdown_notes_agent.vaults import VaultPolicy
 
 
-# collect refuses to write where Hanger may not write, and bad Unicode.
 def test_collect_respects_writable_and_rejects_bad_unicode(
-    layout: tuple[Path, Path, ClosetPolicy],
+    layout: tuple[Path, Path, VaultPolicy],
 ) -> None:
     root, state, policy = layout
     service, runtime = offline_service(root, state, policy)
@@ -42,7 +41,7 @@ def test_collect_respects_writable_and_rejects_bad_unicode(
     ],
 )
 def test_inbox_name_rule(text: str, title: str) -> None:
-    from hanger.workflows import inbox_path
+    from markdown_notes_agent.workflows import inbox_path
 
     issued = time.mktime((2026, 10, 16, 7, 31, 5, 0, 0, -1))
     path = inbox_path(text, issued)
@@ -53,7 +52,7 @@ def test_inbox_name_rule(text: str, title: str) -> None:
 
 # A resend with the same key lands on the same file.
 def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     service, runtime = offline_service(root, tmp_path / "state")
     with runtime:
@@ -69,7 +68,7 @@ def test_collect_resend_is_duplicate(tmp_path: Path) -> None:
 
 # Any file is collected byte for byte, named time-filename-hash.extension.
 def test_collect_any_file(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     picture = tmp_path / "회의 사진 (1).PNG"
     data = bytes(range(256)) * 4000
@@ -101,9 +100,9 @@ def test_collect_any_file(tmp_path: Path) -> None:
 
 # A file whose content changes while it is copied leaves nothing behind.
 def test_collect_file_changed_while_copying(tmp_path: Path) -> None:
-    from hanger.errors import ConflictError
+    from markdown_notes_agent.errors import ConflictError
 
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     source = tmp_path / "a.bin"
     source.write_bytes(b"first")
@@ -118,7 +117,7 @@ def test_collect_file_changed_while_copying(tmp_path: Path) -> None:
 
 # Collecting a file into a folder that is not writable is refused.
 def test_collect_file_respects_writable(
-    layout: tuple[Path, Path, ClosetPolicy],
+    layout: tuple[Path, Path, VaultPolicy],
 ) -> None:
     root, state, policy = layout
     source = root.parent / "a.txt"

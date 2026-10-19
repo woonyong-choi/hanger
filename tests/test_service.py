@@ -12,21 +12,21 @@ from conftest import offline_service, service_for
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from hanger.closets import ClosetPolicy
-from hanger.documents import Documents
-from hanger.errors import RequestError
-from hanger.requests import Change, Proposal, issue_key
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.requests import Change, Proposal, issue_key
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.vaults import VaultPolicy
 
 
 # the installed protocol keeps watch, search, writes and status in one owner.
 def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     try:
         asyncio.run(_scenario(root, tmp_path / "state", url))
@@ -35,7 +35,7 @@ def test_mcp_collect_search_and_control_in_one_process(tmp_path: Path) -> None:
             [
                 sys.executable,
                 "-m",
-                "hanger.cli",
+                "markdown_notes_agent.cli",
                 "--state",
                 str(tmp_path / "state"),
                 "--search-url",
@@ -55,7 +55,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         command=sys.executable,
         args=[
             "-m",
-            "hanger.cli",
+            "markdown_notes_agent.cli",
             "--state",
             str(state),
             "--search-url",
@@ -73,10 +73,10 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         assert {"collect", "search_documents", "request_change", "cancel_job"} <= {
             tool.name for tool in tools.tools
         }
-        empty = await session.call_tool("list_closets", {})
+        empty = await session.call_tool("list_vaults", {})
         assert empty.structuredContent is not None
-        assert "register_closet" in empty.structuredContent["next"]
-        added = await session.call_tool("register_closet", {"path": str(root)})
+        assert "register_vault" in empty.structuredContent["next"]
+        added = await session.call_tool("register_vault", {"path": str(root)})
         assert not added.isError
         key = await _key(session)
         unused = await session.call_tool("job_status", {"key": key})
@@ -116,7 +116,7 @@ async def _scenario(root: Path, state: Path, url: str) -> None:
         )
         assert empty.structuredContent is not None
         assert empty.structuredContent["documents"] == []
-        if os.environ.get("HANGER_TEST_LIVE_MODEL"):
+        if os.environ.get("MARKDOWN_NOTES_AGENT_TEST_LIVE_MODEL"):
             key = await _key(session)
             requested = await session.call_tool(
                 "request_change",
@@ -163,7 +163,7 @@ async def _completed(session: ClientSession, key: str) -> dict[str, Any]:
 
 # a failing job never kills a worker, and a dead worker is restarted.
 def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:
@@ -176,27 +176,31 @@ def test_worker_survives_errors_and_is_restarted(tmp_path: Path) -> None:
             raise RuntimeError("unexpected")
 
         runtime.run_next = explode  # type: ignore[method-assign]
-        service._targets = {"hanger-worker-1": lambda: service._work("hanger-worker-1")}
-        service._spawn("hanger-worker-1")
+        service._targets = {
+            "markdown-notes-agent-worker-1": lambda: service._work(
+                "markdown-notes-agent-worker-1"
+            )
+        }
+        service._spawn("markdown-notes-agent-worker-1")
         time.sleep(3)
         assert calls >= 2
-        assert service._threads["hanger-worker-1"].is_alive()
+        assert service._threads["markdown-notes-agent-worker-1"].is_alive()
         assert service.health() is None
         service._stop.set()
-        service._threads["hanger-worker-1"].join(5)
+        service._threads["markdown-notes-agent-worker-1"].join(5)
         service._stop.clear()
-        service._beats["hanger-worker-1"] = time.monotonic() - 3600
+        service._beats["markdown-notes-agent-worker-1"] = time.monotonic() - 3600
         assert service.health() == (
             "A job worker has not responded for more than 60 seconds."
         )
         dead = threading.Thread(target=lambda: None)
         dead.start()
         dead.join()
-        service._threads["hanger-worker-1"] = dead
+        service._threads["markdown-notes-agent-worker-1"] = dead
         monitor = threading.Thread(target=service._maintain, daemon=True)
         monitor.start()
         time.sleep(6)
-        assert service._threads["hanger-worker-1"] is not dead
+        assert service._threads["markdown-notes-agent-worker-1"] is not dead
         service.close()
 
 
@@ -214,7 +218,7 @@ class _Engine:
 
     def require(self) -> None:
         if not self.ready():
-            from hanger.errors import SearchUnavailableError
+            from markdown_notes_agent.errors import SearchUnavailableError
 
             raise SearchUnavailableError(self.message())
 
@@ -239,10 +243,10 @@ def test_search_waits_for_starting_server_with_progress(
 ) -> None:
     import asyncio
 
-    from hanger import service as service_module
-    from hanger.errors import SearchUnavailableError
+    from markdown_notes_agent import service as service_module
+    from markdown_notes_agent.errors import SearchUnavailableError
 
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     sync = Synchronizer(Documents(root), SearchIndex("http://127.0.0.1:9", str(root)))
     with Runtime(root, tmp_path / "state") as runtime:
@@ -261,7 +265,7 @@ def test_search_waits_for_starting_server_with_progress(
 
 # read_document honours the ignore rules.
 def test_read_document_rejects_ignored(
-    layout: tuple[Path, Path, ClosetPolicy],
+    layout: tuple[Path, Path, VaultPolicy],
 ) -> None:
     root, state, policy = layout
     service, runtime = offline_service(root, state, policy)
@@ -275,7 +279,7 @@ def test_read_document_rejects_ignored(
 
 # A missing document is a clear not_found error without the absolute path.
 def test_read_document_missing_is_not_found(
-    layout: tuple[Path, Path, ClosetPolicy],
+    layout: tuple[Path, Path, VaultPolicy],
 ) -> None:
     root, state, policy = layout
     service, runtime = offline_service(root, state, policy)
@@ -287,7 +291,7 @@ def test_read_document_missing_is_not_found(
 
 # Proposals submitted directly obey the same write policy as model edits.
 def test_direct_proposal_outside_writable_is_rejected(
-    layout: tuple[Path, Path, ClosetPolicy],
+    layout: tuple[Path, Path, VaultPolicy],
 ) -> None:
     root, state, policy = layout
     with (
@@ -301,3 +305,40 @@ def test_direct_proposal_outside_writable_is_rejected(
         )
     assert caught.value.code == "write_denied"
     assert not (root / "other/x.md").exists()
+
+
+def test_mcp_exposes_vault_contract_without_registered_folders(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    arguments = [
+        "-m",
+        "markdown_notes_agent.cli",
+        "--state",
+        str(state),
+        "--search-url",
+        "http://127.0.0.1:9",
+    ]
+
+    async def scenario() -> None:
+        parameters = StdioServerParameters(
+            command=sys.executable, args=[*arguments, "serve"]
+        )
+        async with (
+            stdio_client(parameters) as (reader, writer),
+            ClientSession(reader, writer) as session,
+        ):
+            initialized = await session.initialize()
+            assert initialized.serverInfo.name == "markdown-notes-agent"
+            response = await session.list_tools()
+            tools = {tool.name: tool for tool in response.tools}
+            assert {"list_vaults", "register_vault", "remove_vault"} <= tools.keys()
+            assert "vault" in tools["search_documents"].inputSchema["properties"]
+            assert "vault" in tools["remove_vault"].inputSchema["required"]
+            listed = await session.call_tool("list_vaults", {})
+            assert not listed.isError
+            assert listed.structuredContent is not None
+            assert listed.structuredContent["vaults"] == []
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        subprocess.run([sys.executable, *arguments, "stop"], check=True, timeout=30)

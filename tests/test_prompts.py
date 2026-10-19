@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from hanger import prompts
+from markdown_notes_agent import prompts
 
 _CASES = json.loads((Path(__file__).parent / "fixtures/prompt-cases.json").read_text())[
     "cases"
@@ -39,7 +39,7 @@ def test_structured_prompt_preserves_fixed_inputs(case: dict[str, Any]) -> None:
         assert result["input"]["body"] == case["args"]["body"]
         assert "rules" not in result["input"]
         assert (
-            result["policy"]["rule_catalog"]["HANGER.md"] == "Keep source distinctions."
+            result["policy"]["rule_catalog"]["VAULT.md"] == "Keep source distinctions."
         )
     else:
         assert result["input"]["children"] == case["args"]["children"]

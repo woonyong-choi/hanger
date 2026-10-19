@@ -8,17 +8,17 @@ from pathlib import Path
 
 import pytest
 
-from hanger.documents import Documents
-from hanger.errors import RequestError
-from hanger.requests import Change, Proposal, digest, issue_key
-from hanger.runtime import Limits, Runtime
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.requests import Change, Proposal, digest, issue_key
+from markdown_notes_agent.runtime import Limits, Runtime
 
 
 # daily cleanup removes expired work, not a still-valid completed identity.
 def test_cleanup_preserves_valid_keys_and_discards_expired_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     clock = time.time()
     monkeypatch.setattr(time, "time", lambda: clock)
@@ -49,7 +49,7 @@ def test_cleanup_preserves_valid_keys_and_discards_expired_work(
 def test_restart_removes_expired_pending_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     with Runtime(root, tmp_path / "state") as runtime:
         key = issue_key(runtime._secret)
@@ -66,7 +66,7 @@ def test_restart_removes_expired_pending_request(
 def test_expired_symlink_target_does_not_block_startup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     state = tmp_path / "state"
     with Runtime(root, state) as runtime:
@@ -95,7 +95,7 @@ def test_expired_symlink_target_does_not_block_startup(
 def test_admission_capacity_rejects_without_queueing(
     tmp_path: Path, boundary: str
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     overrides = {
         "count": {"pending_jobs": 0},
@@ -119,7 +119,7 @@ def test_admission_capacity_rejects_without_queueing(
 def test_cleanup_busy_writer_keeps_recovery_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     started = threading.Event()
     released = threading.Event()
@@ -153,7 +153,7 @@ def test_cleanup_busy_writer_keeps_recovery_state(
 def test_expired_crash_candidate_deleted_without_touching_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     state = tmp_path / "state"
     (root / "a.md").write_text("original")
@@ -169,7 +169,7 @@ def test_expired_crash_candidate_deleted_without_touching_source(
     code = """
 import os, sys
 from pathlib import Path
-from hanger.runtime import Runtime
+from markdown_notes_agent.runtime import Runtime
 def crash(*args):
     os._exit(74)
 os.replace = crash
@@ -180,12 +180,12 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
         [sys.executable, "-c", code, str(root), str(state)], check=False, timeout=30
     )
     assert result.returncode == 74
-    assert list(root.glob(".hanger-*.pending"))
+    assert list(root.glob(".markdown-notes-agent-*.pending"))
     future = time.time() + 25 * 3600
     monkeypatch.setattr(time, "time", lambda: future)
     with Runtime(root, state) as runtime:
         assert runtime.run_next() is None
-    assert not list(root.glob(".hanger-*.pending"))
+    assert not list(root.glob(".markdown-notes-agent-*.pending"))
     assert (root / "a.md").read_text() == "original"
 
 
@@ -193,7 +193,7 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
 def test_retry_limit_survives_restart_and_allows_other_work(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     state = tmp_path / "state"
     clock = time.time()

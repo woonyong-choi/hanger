@@ -1,6 +1,6 @@
 # 검색 응답
 
-`hanger search "needle" --folder public`과 MCP `search_documents`는 같은 검색 응답을 사용한다. 이름이나 본문에서 찾은 문서를 시작점으로 삼고, 검증한 관계로 연결된 자료를 `relations.documents`에 담는다. 이 명세는 관계 검색 변경과 함께 제공하는 계약이다.
+`markdown-notes-agent search "needle" --folder public`과 MCP `search_documents`는 같은 검색 응답을 사용한다. 이름이나 본문에서 찾은 문서를 시작점으로 삼고, 검증한 관계로 연결된 자료를 `relations.documents`에 담는다. 이 명세는 관계 검색 변경과 함께 제공하는 계약이다.
 
 ## 요청
 
@@ -11,12 +11,12 @@
 | 매개변수 | 형식 | 뜻 |
 |---|---|---|
 | `query` | 비어 있지 않은 문자열 | 본문, 제목, 별칭 검색어 |
-| `closet` | 문자열 또는 생략 | 등록한 closet 선택 |
-| `folders` | 문자열 배열 | closet 안 상대 폴더들의 합집합. 생략하면 전체 |
+| `vault` | 문자열 또는 생략 | 등록한 vault 선택 |
+| `folders` | 문자열 배열 | vault 안 상대 폴더들의 합집합. 생략하면 전체 |
 | `limit` | 1~100 정수 또는 생략 | Elasticsearch 시작 문서 후보 수. 생략하면 검색 설정값 |
 | `fallback_reason` | `insufficient_evidence`, `user_reported_missing` 또는 생략 | 해당 범위를 다시 동기화한 뒤 검색 |
 
-CLI는 `--folder`를 여러 번 받을 수 있다. 관계 조회에도 같은 폴더 범위와 `.hangerignore`를 적용한다.
+CLI는 `--folder`를 여러 번 받을 수 있다. 관계 조회에도 같은 폴더 범위와 `.markdown-notes-agentignore`를 적용한다.
 
 중복 폴더와 이미 선택한 상위 폴더에 포함되는 하위 폴더를 제거한 뒤 검색한다. 폴더 이름은 패턴으로 해석하지 않고 해당 폴더 아래의 경로만 선택한다. 정규화한 폴더가 256개 이하면 검색 요청 한 번을 보낸다. 그보다 많으면 256개씩 나누어 같은 인덱스 스냅샷(PIT)에서 검색한다. 배치가 `b`개이면 PIT 생성과 해제를 포함해 서버 요청은 `b + 2`번이다.
 
@@ -82,4 +82,4 @@ Markdown이 정본이다. `relations.sqlite`는 문서와 개체 식별자를 �
 
 ## 검증
 
-[관계 검색 검사](../tests/test_relations.py)는 합성 문서로 두 단계 연결, 별칭, 명시 빈 목록, 동명이인, 범위 제외, 삭제, 이름 변경, 원문 변경, 인용문 불일치, 읽기 한도와 CLI·MCP 응답을 검사한다. `HANGER_TEST_SEARCH_URL`을 지정하면 실제 Elasticsearch와 Nori를 사용한 별칭·관계 응답 검사도 실행한다.
+[관계 검색 검사](../tests/test_relations.py)는 합성 문서로 두 단계 연결, 별칭, 명시 빈 목록, 동명이인, 범위 제외, 삭제, 이름 변경, 원문 변경, 인용문 불일치, 읽기 한도와 CLI·MCP 응답을 검사한다. `MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL`을 지정하면 실제 Elasticsearch와 Nori를 사용한 별칭·관계 응답 검사도 실행한다.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Markdown Notes Agent"
+  short_description: "등록한 Markdown 노트의 검색·작성·병합"
+  default_prompt: "$markdown-notes-agent로 등록한 노트를 찾아 요청한 내용을 반영해 줘."

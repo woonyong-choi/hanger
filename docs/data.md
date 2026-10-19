@@ -46,8 +46,8 @@ WAL은 복구 기법이다.
 | namespace | `semantics` |
 | 입력 형식 | 문서 첫 줄과 닫는 줄의 `---` 사이에 JSON 객체 또는 안전한 YAML mapping |
 | 스키마 버전 | `semantics.version`, 현재 정수 `1` |
-| 파서 | [semantics.py](../src/hanger/semantics.py)의 Pydantic 모델과 PyYAML SafeLoader 기반 파서 |
-| 어휘 | [vocabulary.py](../src/hanger/vocabulary.py)의 `PREDICATES` |
+| 파서 | [semantics.py](../src/markdown_notes_agent/semantics.py)의 Pydantic 모델과 PyYAML SafeLoader 기반 파서 |
+| 어휘 | [vocabulary.py](../src/markdown_notes_agent/vocabulary.py)의 `PREDICATES` |
 | 부작용 | 파일·네트워크 읽기와 쓰기 없음 |
 | 소비 범위 | Python 파서와 검증 API |
 
@@ -56,8 +56,8 @@ WAL은 복구 기법이다.
 ## API
 
 ```python
-from hanger.semantics import parse_semantics, semantic_schema, verify_evidence
-from hanger.vocabulary import predicate_catalog
+from markdown_notes_agent.semantics import parse_semantics, semantic_schema, verify_evidence
+from markdown_notes_agent.vocabulary import predicate_catalog
 
 snapshot = parse_semantics(markdown_text, path="notes/wal.md")
 payload = snapshot.model_dump(mode="json")
@@ -75,7 +75,7 @@ checks = verify_evidence(snapshot, sources=other_snapshots)
 
 | 필드 | 형식 | 뜻 |
 |---|---|---|
-| `path` | 문자열 | closet 기준 상대 Markdown 경로 |
+| `path` | 문자열 | vault 기준 상대 Markdown 경로 |
 | `sha256` | 문자열 | frontmatter를 포함한 전체 `text`의 UTF-8 SHA-256 |
 | `text` | 문자열 | 변경하지 않은 전체 입력 |
 | `body` | 문자열 | frontmatter 뒤의 본문, frontmatter가 없으면 전체 입력 |
@@ -144,7 +144,7 @@ YAML의 목록·인용 문자열·여러 줄 문자열을 읽는다. 날짜와 t
 
 ## 관계
 
-등록부의 `domain`과 `range`는 Hanger가 지원하는 개체 종류다. `prov:Entity` 자리에는 이 계약의 `concept`, `person`, `agent`, `document`, `project`, `source`, `claim`을 허용한다. PROV의 Agent와 Entity는 겹칠 수 있으므로 사람·agent도 Entity 자리에 허용한다. `prov:Agent` 자리에는 `person`, `agent`를 허용한다. `activity`는 Entity 자리에 넣지 않는다.
+등록부의 `domain`과 `range`는 Markdown Notes Agent가 지원하는 개체 종류다. `prov:Entity` 자리에는 이 계약의 `concept`, `person`, `agent`, `document`, `project`, `source`, `claim`을 허용한다. PROV의 Agent와 Entity는 겹칠 수 있으므로 사람·agent도 Entity 자리에 허용한다. `prov:Agent` 자리에는 `person`, `agent`를 허용한다. `activity`는 Entity 자리에 넣지 않는다.
 
 | predicate | URI | domain | range |
 |---|---|---|---|
@@ -157,12 +157,12 @@ YAML의 목록·인용 문자열·여러 줄 문자열을 읽는다. 날짜와 t
 | `prov:wasDerivedFrom` | `http://www.w3.org/ns/prov#wasDerivedFrom` | PROV Entity | PROV Entity |
 | `prov:wasRevisionOf` | `http://www.w3.org/ns/prov#wasRevisionOf` | PROV Entity | PROV Entity |
 | `dcterms:subject` | `http://purl.org/dc/terms/subject` | document | concept, person |
-| `hanger:supportedBy` | `urn:hanger:relation:supportedBy` | claim | source, document |
-| `hanger:refutedBy` | `urn:hanger:relation:refutedBy` | claim | source, document |
-| `hanger:requires` | `urn:hanger:relation:requires` | concept | concept |
-| `hanger:supersedes` | `urn:hanger:relation:supersedes` | claim, document | claim, document |
+| `markdown-notes-agent:supportedBy` | `urn:markdown-notes-agent:relation:supportedBy` | claim | source, document |
+| `markdown-notes-agent:refutedBy` | `urn:markdown-notes-agent:relation:refutedBy` | claim | source, document |
+| `markdown-notes-agent:requires` | `urn:markdown-notes-agent:relation:requires` | concept | concept |
+| `markdown-notes-agent:supersedes` | `urn:markdown-notes-agent:relation:supersedes` | claim, document | claim, document |
 
-`skos:`와 `prov:`는 [W3C SKOS Reference](https://www.w3.org/TR/skos-reference/)와 [W3C PROV-O](https://www.w3.org/TR/prov-o/)의 URI를 사용한다. `dcterms:subject`는 [DCMI Metadata Terms](https://www.dublincore.org/specifications/dublin-core/dcmi-terms/#http://purl.org/dc/terms/subject)의 용어이며 document에서 concept·person으로 이어지는 범위는 이 계약의 지원 범위다. `hanger:` 네 관계는 Hanger 확장이며 W3C 표준 관계로 표시하지 않는다.
+`skos:`와 `prov:`는 [W3C SKOS Reference](https://www.w3.org/TR/skos-reference/)와 [W3C PROV-O](https://www.w3.org/TR/prov-o/)의 URI를 사용한다. `dcterms:subject`는 [DCMI Metadata Terms](https://www.dublincore.org/specifications/dublin-core/dcmi-terms/#http://purl.org/dc/terms/subject)의 용어이며 document에서 concept·person으로 이어지는 범위는 이 계약의 지원 범위다. `markdown-notes-agent:` 네 관계는 Markdown Notes Agent 확장이며 W3C 표준 관계로 표시하지 않는다.
 
 `skos:broader`와 `skos:related`는 concept 사이에서만 허용한다. 순환 검사, 전이 추론, 역관계 생성, 개체 병합은 이 파서에서 수행하지 않는다. SKOS 전체의 추론·일관성 검증을 보장하지 않는다.
 
@@ -172,7 +172,7 @@ YAML의 목록·인용 문자열·여러 줄 문자열을 읽는다. 날짜와 t
 |---|---|
 | ID 형식 | `urn:<namespace>:<value>`, 절대 HTTP(S) IRI, `doc:<percent-encoded relative Markdown path>`만 허용한다. `urn:uuid:`를 쓰면 실제 UUID 문법을 검사한다. |
 | 문서 경로와 사람 ID | `doc:`는 document에만 허용한다. 사람 이름이나 일반 파일 경로를 사람 ID로 받지 않는다. |
-| ID 생성과 범위 | 개체 ID는 호출자가 부여하고 이름으로 만들지 않는다. 자동 문서 ID만 `document_id_for_path(path)`로 만들며 closet 안에서만 유효하다. 서로 다른 closet은 별도 범위로 처리해야 한다. |
+| ID 생성과 범위 | 개체 ID는 호출자가 부여하고 이름으로 만들지 않는다. 자동 문서 ID만 `document_id_for_path(path)`로 만들며 vault 안에서만 유효하다. 서로 다른 vault은 별도 범위로 처리해야 한다. |
 | 문서 이동 | 명시한 URN·HTTP(S) 문서 ID는 경로와 독립이다. 자동 `doc:` ID는 경로를 바꾸면 달라진다. |
 | 중복 | 한 입력의 개체 ID와 현재 문서 ID가 중복되면 거부한다. 외부 근거 snapshot의 ID가 중복되어도 거부한다. |
 | 관계 끝점 | 현재 문서 ID 외에는 `entities`에 선언해야 한다. 선언하지 않은 타입이나 `unknown`을 관계에 필요한 타입으로 추정하지 않는다. |
@@ -180,7 +180,7 @@ YAML의 목록·인용 문자열·여러 줄 문자열을 읽는다. 날짜와 t
 | 잘못된 입력 | YAML·JSON 구문, 중복 키, 잘못된 종류·predicate·근거를 오류로 반환한다. 기존 모델이나 추론으로 숨기지 않는다. |
 | 누락과 빈 값 | 빈 개체·관계 목록은 정상이다. 실제 선언 여부를 `declared_fields`로 구분한다. |
 
-파싱 실패는 `HangerError`를 상속한 `SemanticError`다. 구문·루트 구조·중복 키 오류는 하위 `FrontmatterError`이며 오류 코드는 `invalid_frontmatter`다. namespace 형식, ID, 관계 타입, 인용 오류는 `invalid_semantics`다. 모델을 직접 생성하면 Pydantic `ValidationError`가 발생할 수 있으며 `parse_semantics()`가 이를 Hanger 오류로 변환한다.
+파싱 실패는 `MarkdownNotesAgentError`를 상속한 `SemanticError`다. 구문·루트 구조·중복 키 오류는 하위 `FrontmatterError`이며 오류 코드는 `invalid_frontmatter`다. namespace 형식, ID, 관계 타입, 인용 오류는 `invalid_semantics`다. 모델을 직접 생성하면 Pydantic `ValidationError`가 발생할 수 있으며 `parse_semantics()`가 이를 Markdown Notes Agent 오류로 변환한다.
 
 ## 보관 기간
 

@@ -11,18 +11,18 @@ from typing import Any
 
 import pytest
 
-from hanger.closets import ClosetPolicy
-from hanger.config import Settings
-from hanger.documents import Documents
-from hanger.hub import OpenCloset
-from hanger.ignore import DEFAULT_IGNORE
-from hanger.model import CliModel, Planner
-from hanger.rules import RULES_FILE
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.service import Service
-from hanger.store import Closet
-from hanger.sync import Synchronizer
+from markdown_notes_agent.config import Settings
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.hub import OpenVault
+from markdown_notes_agent.ignore import DEFAULT_IGNORE
+from markdown_notes_agent.model import CliModel, Planner
+from markdown_notes_agent.rules import RULES_FILE
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.service import Service
+from markdown_notes_agent.store import Vault
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.vaults import VaultPolicy
 
 
 class _NoDecisions:
@@ -30,12 +30,12 @@ class _NoDecisions:
         return []
 
 
-class OneCloset:
-    """Stands in for ClosetHub with one closet the test already opened."""
+class OneVault:
+    """Stands in for VaultHub with one vault the test already opened."""
 
     def __init__(self, runtime: Runtime, synchronizer: Synchronizer) -> None:
-        self.closet = OpenCloset(
-            Closet(1, runtime.documents.root),
+        self.vault = OpenVault(
+            Vault(1, runtime.documents.root),
             synchronizer.policy,
             synchronizer,
             runtime,
@@ -48,17 +48,17 @@ class OneCloset:
     def refresh(self) -> None:
         return None
 
-    def get(self, reference: str | None) -> OpenCloset:
-        return self.closet
+    def get(self, reference: str | None) -> OpenVault:
+        return self.vault
 
-    def holding(self, key: str) -> OpenCloset | None:
-        return self.closet if self.closet.runtime.status(key) else None
+    def holding(self, key: str) -> OpenVault | None:
+        return self.vault if self.vault.runtime.status(key) else None
 
-    def opened(self) -> list[OpenCloset]:
-        return [self.closet]
+    def opened(self) -> list[OpenVault]:
+        return [self.vault]
 
     def each(self, action: Any) -> None:
-        action(self.closet)
+        action(self.vault)
 
     def watch(self) -> None:
         return None
@@ -73,8 +73,8 @@ class OneCloset:
 def service_for(
     runtime: Runtime, synchronizer: Synchronizer, engine: Any = None
 ) -> Service:
-    """A service over one already-open closet, without the state database."""
-    return Service(OneCloset(runtime, synchronizer), engine)  # type: ignore[arg-type]
+    """A service over one already-open vault, without the state database."""
+    return Service(OneVault(runtime, synchronizer), engine)  # type: ignore[arg-type]
 
 
 def edit_decision(path: str, old: str, new: str) -> dict[str, Any]:
@@ -114,11 +114,11 @@ class ScriptedModel(CliModel):
 
 
 @pytest.fixture
-def closet(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+def vault(tmp_path: Path) -> Iterator[tuple[Path, Path, str]]:
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     (root / "docs").mkdir(parents=True)
     try:
         yield root, tmp_path / "state", url
@@ -134,7 +134,7 @@ def open_runtime(
     url: str,
     model: ScriptedModel,
     settings: Settings | None = None,
-    policy: ClosetPolicy | None = None,
+    policy: VaultPolicy | None = None,
 ) -> tuple[Runtime, Synchronizer]:
     settings = settings or Settings()
     sync = Synchronizer(Documents(root), SearchIndex(url, str(root)), settings, policy)
@@ -151,9 +151,9 @@ OFFLINE = "http://127.0.0.1:9"
 
 
 def offline_service(
-    root: Path, state: Path, policy: ClosetPolicy | None = None
+    root: Path, state: Path, policy: VaultPolicy | None = None
 ) -> tuple[Service, Runtime]:
-    policy = policy or ClosetPolicy(root)
+    policy = policy or VaultPolicy(root)
     sync = Synchronizer(Documents(root), SearchIndex(OFFLINE, str(root)), None, policy)
     runtime = Runtime(root, state)
     runtime.policy = policy
@@ -161,14 +161,14 @@ def offline_service(
 
 
 @pytest.fixture
-def layout(tmp_path: Path) -> tuple[Path, Path, ClosetPolicy]:
+def layout(tmp_path: Path) -> tuple[Path, Path, VaultPolicy]:
     """Ignores other/ and any private/ folder; inbox/ is read-only."""
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     for folder in ("notes", "notes/private", "other", "inbox"):
         (root / folder).mkdir(parents=True)
     (root / "notes/a.md").write_text("# a")
     (root / "notes/private/s.md").write_text("# secret")
     (root / "other/c.md").write_text("# c")
     (root / "inbox" / RULES_FILE).write_text("---\nwrite: false\n---\n")
-    policy = ClosetPolicy(root, DEFAULT_IGNORE + "other/\nprivate/\n")
+    policy = VaultPolicy(root, DEFAULT_IGNORE + "other/\nprivate/\n")
     return root, tmp_path / "state", policy

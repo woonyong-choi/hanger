@@ -5,7 +5,7 @@ import statistics
 import time
 from pathlib import Path
 
-from hanger.trace import Trace
+from markdown_notes_agent.trace import Trace
 
 
 def main() -> None:

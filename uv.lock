@@ -477,8 +477,8 @@ wheels = [
 ]
 
 [[package]]
-name = "hanger"
-version = "0.2.0"
+name = "markdown-notes-agent"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
