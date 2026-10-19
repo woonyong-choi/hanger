@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import tomllib
 import types
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-from hanger import prompts
+from markdown_notes_agent import prompts
 
 
 class _FixedTime(datetime):
@@ -39,15 +40,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", default="36906f6")
     args = parser.parse_args()
+    project = tomllib.loads(
+        subprocess.check_output(
+            ["git", "show", f"{args.baseline}:pyproject.toml"], text=True
+        )
+    )
+    package = project["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"][0]
     source = subprocess.check_output(
-        ["git", "show", f"{args.baseline}:src/hanger/prompts.py"], text=True
+        ["git", "show", f"{args.baseline}:{package}/prompts.py"],
+        text=True,
     )
     baseline = types.ModuleType("baseline_prompts")
+    source = source.replace(f"from {Path(package).name}", "from markdown_notes_agent")
     exec(compile(source, "baseline_prompts", "exec"), baseline.__dict__)
     profile_source = subprocess.check_output(
-        ["git", "show", f"{args.baseline}:src/hanger/profiles.py"], text=True
+        ["git", "show", f"{args.baseline}:{package}/profiles.py"],
+        text=True,
     )
-    baseline_profiles = {"__name__": "hanger.profiles"}
+    baseline_profiles = {"__name__": "markdown_notes_agent.profiles"}
     exec(compile(profile_source, "baseline_profiles", "exec"), baseline_profiles)
     baseline.PROFILES = baseline_profiles["PROFILES"]
     cases = json.loads(

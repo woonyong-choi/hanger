@@ -1,4 +1,4 @@
-"""Time indexing and Korean search quality on a large synthetic closet."""
+"""Time indexing and Korean search quality on a large synthetic vault."""
 
 import argparse
 import json
@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from hanger.documents import Documents
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
 
 FIXTURES = {
     "payment": (
@@ -44,7 +44,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.directory.exists() and not args.reuse_corpus:
         raise SystemExit("measurement directory must not already exist")
-    root = args.directory / "closet"
+    root = args.directory / "vault"
     if not args.reuse_corpus:
         _corpus(root, args.count)
     index = SearchIndex("http://127.0.0.1:19200", str(root.resolve()))

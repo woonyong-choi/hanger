@@ -9,9 +9,8 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from hanger.closets import ClosetPolicy
-from hanger.documents import Documents
-from hanger.keywords import (
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.keywords import (
     NODE,
     SPLIT_LIMIT,
     Extraction,
@@ -20,10 +19,11 @@ from hanger.keywords import (
     Split,
     parse_note,
 )
-from hanger.requests import digest
-from hanger.rules import RULES_FILE
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
+from markdown_notes_agent.requests import digest
+from markdown_notes_agent.rules import RULES_FILE
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.vaults import VaultPolicy
 
 
 def _write(root: Path, path: str, text: str) -> None:
@@ -39,9 +39,9 @@ def _observe(graph: KeywordGraph, root: Path, path: str, text: str) -> None:
 
 @pytest.fixture
 def graph(tmp_path: Path) -> Iterator[KeywordGraph]:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
-    opened = KeywordGraph(root, tmp_path / "state/keywords.sqlite", ClosetPolicy(root))
+    opened = KeywordGraph(root, tmp_path / "state/keywords.sqlite", VaultPolicy(root))
     yield opened
     opened.close()
 
@@ -317,12 +317,12 @@ def test_builder_maps_short_ids_and_records_failures(graph: KeywordGraph) -> Non
 
 @pytest.fixture
 def indexed(tmp_path: Path) -> Iterator[tuple[Synchronizer, KeywordGraph]]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
-    policy = ClosetPolicy(root)
+    policy = VaultPolicy(root)
     index = SearchIndex(url, str(root))
     sync = Synchronizer(Documents(root), index, None, policy)
     graph = KeywordGraph(root, tmp_path / "state/keywords.sqlite", policy)
@@ -459,7 +459,7 @@ def test_relative_link_prefers_the_notes_folder(graph: KeywordGraph) -> None:
 
 
 def test_model_outage_pauses_without_failing_notes(graph: KeywordGraph) -> None:
-    from hanger.errors import ModelError
+    from markdown_notes_agent.errors import ModelError
 
     root = graph.root
     _observe(graph, root, "a.md", "# A\n")
@@ -521,7 +521,7 @@ def test_invalid_rules_do_not_starve_other_notes(
     root = graph.root
     _observe(graph, root, "a/item.md", "# A\n")
     _observe(graph, root, "b.md", "# B\n")
-    (root / "a/HANGER.md").write_bytes(rules)
+    (root / "a/VAULT.md").write_bytes(rules)
     model = _Model(
         [
             {
@@ -549,7 +549,7 @@ def test_invalid_rules_do_not_starve_other_notes(
 def test_previous_prompt_extraction_is_queued_for_new_policy(
     graph: KeywordGraph, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from hanger import keywords
+    from markdown_notes_agent import keywords
 
     current_version = keywords.PROMPT_VERSION
     _observe(graph, graph.root, "a.md", "# A\n")

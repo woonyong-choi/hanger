@@ -8,9 +8,9 @@ from typing import TypedDict
 
 import pytest
 
-from hanger.config import Settings, unflatten
-from hanger.model import CliModel
-from hanger.providers import ProviderMissingError
+from markdown_notes_agent.config import Settings, unflatten
+from markdown_notes_agent.model import CliModel
+from markdown_notes_agent.providers import ProviderMissingError
 
 _DECISION = {
     "action": "keep",
@@ -168,7 +168,7 @@ def test_configured_provider_must_be_installed(
     with pytest.raises(ProviderMissingError) as caught:
         model.generate("초안 요청", lambda: False)
     assert caught.value.code == "provider_missing"
-    assert "hanger config set model.provider" in str(caught.value)
+    assert "markdown-notes-agent config set model.provider" in str(caught.value)
 
 
 def test_no_provider_at_all_is_reported(
@@ -182,8 +182,8 @@ def test_no_provider_at_all_is_reported(
 
 # A missing model command fails at once with a clear message, without retries.
 def test_missing_model_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hanger.model import CliModel
-    from hanger.providers import ProviderMissingError
+    from markdown_notes_agent.model import CliModel
+    from markdown_notes_agent.providers import ProviderMissingError
 
     monkeypatch.setenv("PATH", "/nonexistent")
     with pytest.raises(ProviderMissingError) as caught:

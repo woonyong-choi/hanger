@@ -1,4 +1,4 @@
-# Hanger
+# Markdown Notes Agent
 
 Markdown 노트를 검색하고 폴더 규칙에 따라 변경하는 로컬 도구다.
 
@@ -6,10 +6,10 @@ Markdown 노트를 검색하고 폴더 규칙에 따라 변경하는 로컬 도�
 
 | 경로 | 내용 |
 |---|---|
-| `src/hanger/` | CLI, MCP, closet 관리, 검색, 문서 변경과 복구 |
+| `src/markdown_notes_agent/` | CLI, MCP, vault 관리, 검색, 문서 변경과 복구 |
 | `tests/` | 기능·충돌·복구 검사 |
 | `benchmarks/` | 검색·비용·문서 처리 측정 |
-| `skills/hanger/` | 연결된 도구에서 쓰는 노트 작업 지침 |
+| `skills/markdown-notes-agent/` | 연결된 도구에서 쓰는 노트 작업 지침 |
 | `docs/assets/` | README 이미지 |
 
 ## 명령
@@ -23,7 +23,7 @@ uv run ruff format --check src tests
 uv run mypy src
 ```
 
-검색 통합 검사는 `HANGER_TEST_SEARCH_URL`에 Elasticsearch와 Nori 분석기를 지정해 실행한다. 지정하지 않으면 관련 검사를 건너뛴다.
+검색 통합 검사는 `MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL`에 Elasticsearch와 Nori 분석기를 지정해 실행한다. 지정하지 않으면 관련 검사를 건너뛴다.
 
 ## 규칙
 

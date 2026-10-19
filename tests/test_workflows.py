@@ -13,14 +13,14 @@ import pytest
 from conftest import service_for
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from hanger.documents import Documents
-from hanger.errors import RequestError
-from hanger.model import CliModel, Intent, Planner
-from hanger.profiles import Profile
-from hanger.requests import issue_key
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.model import CliModel, Intent, Planner
+from markdown_notes_agent.profiles import Profile
+from markdown_notes_agent.requests import issue_key
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
 
 
 class Model(CliModel):
@@ -63,10 +63,10 @@ class Model(CliModel):
 
 @pytest.fixture
 def flow(tmp_path: Path) -> Iterator[tuple[Runtime, Model]]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     (root / "docs").mkdir(parents=True)
     (root / "private").mkdir()
     (root / "docs/a.md").write_bytes(
@@ -290,10 +290,10 @@ def test_finished_job_is_cleaned_up(
 def test_killed_workflow_resumes_saved_draft(
     tmp_path: Path, *, external_edit: bool
 ) -> None:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     (root / "docs").mkdir(parents=True)
     target = root / "docs/a.md"
     target.write_text("# 원문\n이전")
@@ -317,11 +317,11 @@ def test_killed_workflow_resumes_saved_draft(
     code = """
 import os, sys
 from pathlib import Path
-from hanger.documents import Documents
-from hanger.model import CliModel, Planner
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.model import CliModel, Planner
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
 root, state = Path(sys.argv[1]), Path(sys.argv[2])
 class Model(CliModel):
     def generate(self, prompt, cancelled):
