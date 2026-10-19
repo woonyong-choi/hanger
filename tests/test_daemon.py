@@ -11,32 +11,32 @@ from pathlib import Path
 
 import pytest
 
-from hanger import proxy
-from hanger.closets import register_closet
-from hanger.daemon import DaemonInfo, socket_path
-from hanger.proxy import Launcher, Relay, call_tool
-from hanger.rules import RULES_FILE
-from hanger.search import SearchIndex
-from hanger.store import StateStore
+from markdown_notes_agent import proxy
+from markdown_notes_agent.daemon import DaemonInfo, socket_path
+from markdown_notes_agent.proxy import Launcher, Relay, call_tool
+from markdown_notes_agent.rules import RULES_FILE
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.store import StateStore
+from markdown_notes_agent.vaults import register_vault
 
 
 @pytest.fixture
 def env(tmp_path: Path) -> Iterator[tuple[Path, Path, Launcher]]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires explicit Elasticsearch test endpoint")
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     (root / "docs").mkdir(parents=True)
     (root / "docs/a.md").write_text("# 결제\n멱등성 키")
     (root / RULES_FILE).write_text("---\nkeywords: false\n---\n")
     state = tmp_path / "s"
     store = StateStore(state)
     store.set_setting("service.idle_minutes", 0.05)
-    register_closet(store, root)
+    register_vault(store, root)
     command = [
         sys.executable,
         "-m",
-        "hanger.cli",
+        "markdown_notes_agent.cli",
         "--state",
         str(state),
         "--search-url",
@@ -264,3 +264,29 @@ def test_long_state_path_uses_short_socket(tmp_path: Path) -> None:
     assert len(str(path).encode()) < 100
     assert path == socket_path(state)
     assert socket_path(tmp_path / ("y" * 120)) != path
+
+
+def test_module_daemon_stops_without_registered_vaults(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    launcher = Launcher(
+        state,
+        [
+            sys.executable,
+            "-m",
+            "markdown_notes_agent.cli",
+            "--state",
+            str(state),
+            "--search-url",
+            "http://127.0.0.1:9",
+            "daemon",
+        ],
+    )
+    try:
+        connection = launcher.ensure()
+        connection.close()
+        pid = _pid(state)
+        assert launcher.stop() is True
+        _wait_dead(pid)
+        assert not socket_path(state).exists()
+    finally:
+        launcher.kill()

@@ -8,23 +8,23 @@ from typing import Any
 import pytest
 from conftest import ScriptedModel, edit_decision, finish, open_runtime
 
-from hanger.closets import ClosetPolicy
-from hanger.config import Settings
-from hanger.context import shape
-from hanger.documents import Documents
-from hanger.editing import Decision, EditPolicy, materialize
-from hanger.errors import RequestError
-from hanger.ignore import DEFAULT_IGNORE
-from hanger.model import Intent
-from hanger.requests import digest, issue_key
-from hanger.rules import RULES_FILE
+from markdown_notes_agent.config import Settings
+from markdown_notes_agent.context import shape
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.editing import Decision, EditPolicy, materialize
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.ignore import DEFAULT_IGNORE
+from markdown_notes_agent.model import Intent
+from markdown_notes_agent.requests import digest, issue_key
+from markdown_notes_agent.rules import RULES_FILE
+from markdown_notes_agent.vaults import VaultPolicy
 
 
 # many matching documents no longer fail; extra ones are listed, not read.
 def test_large_candidate_set_is_listed_instead_of_failing(
-    closet: tuple[Path, Path, str],
+    vault: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = closet
+    root, state, url = vault
     body = "결제 재시도 정책은 서비스마다 다르다. " * 300
     for number in range(12):
         (root / f"docs/n{number:02d}.md").write_text(f"# 결제 {number}\n{body}")
@@ -49,8 +49,8 @@ def test_large_candidate_set_is_listed_instead_of_failing(
 
 
 # the model can ask for a listed document and decide after reading it.
-def test_read_more_loads_listed_document(closet: tuple[Path, Path, str]) -> None:
-    root, state, url = closet
+def test_read_more_loads_listed_document(vault: tuple[Path, Path, str]) -> None:
+    root, state, url = vault
     for number in range(8):
         (root / f"docs/n{number}.md").write_text(f"# 결제 {number}\n결제 본문 {number}")
     model = ScriptedModel()
@@ -83,9 +83,9 @@ def test_read_more_loads_listed_document(closet: tuple[Path, Path, str]) -> None
 # review rejections are retried with feedback, then reported briefly.
 @pytest.mark.parametrize("approve_on", [2, None])
 def test_review_rejection_retries_with_feedback(
-    closet: tuple[Path, Path, str], approve_on: int | None
+    vault: tuple[Path, Path, str], approve_on: int | None
 ) -> None:
-    root, state, url = closet
+    root, state, url = vault
     (root / "docs/a.md").write_text("# 결제\n재시도 2회")
     model = ScriptedModel()
     model.decisions = [edit_decision("docs/a.md", "재시도 2회", "재시도 3회")]
@@ -116,9 +116,9 @@ def test_review_rejection_retries_with_feedback(
 
 # the configured default mode applies when a request omits it.
 def test_configured_bypass_reconsiders_after_source_change(
-    closet: tuple[Path, Path, str],
+    vault: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = closet
+    root, state, url = vault
     target = root / "docs/a.md"
     target.write_text("# 결제\n재시도 2회")
     model = ScriptedModel()
@@ -150,9 +150,9 @@ def test_configured_bypass_reconsiders_after_source_change(
 
 # a reconsidered job reports only its own file effects.
 def test_reconsider_does_not_claim_previous_results(
-    closet: tuple[Path, Path, str],
+    vault: tuple[Path, Path, str],
 ) -> None:
-    root, state, url = closet
+    root, state, url = vault
     for name in "ab":
         (root / f"docs/{name}.md").write_text(f"# {name} 결제\n재시도 2회")
     model = ScriptedModel()
@@ -205,7 +205,7 @@ def test_reconsider_does_not_claim_previous_results(
 
 # how much to change is the model's judgment; only exactness is enforced.
 def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     content = "# 문서\n" + "".join(
         f"문단 {n}: 내용이 길게 이어진다.\n" for n in range(200)
@@ -223,7 +223,7 @@ def test_large_rewrite_is_left_to_the_model(tmp_path: Path) -> None:
 
 # Profiles that require evidence reject changes without a quoted source.
 def test_profile_evidence_requirement(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     content = "# 결제\n재시도 2회"
     sources = {"a.md": {"content": content, "hash": digest(content.encode())}}
@@ -248,8 +248,8 @@ def test_profile_evidence_requirement(tmp_path: Path) -> None:
 
 
 # configured write roots and exclusions are enforced before any model call.
-def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) -> None:
-    root, state, url = closet
+def test_vault_rules_limit_search_and_writes(vault: tuple[Path, Path, str]) -> None:
+    root, state, url = vault
     (root / "notes").mkdir()
     (root / "notes/a.md").write_text("# 결제\n재시도 2회")
     (root / "notes" / RULES_FILE).write_text(
@@ -257,7 +257,7 @@ def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) ->
     )
     (root / "docs/agent").mkdir()
     (root / "docs/agent/b.md").write_text("# 결제\n에이전트")
-    policy = ClosetPolicy(root, DEFAULT_IGNORE + "docs/agent/\n")
+    policy = VaultPolicy(root, DEFAULT_IGNORE + "docs/agent/\n")
     model = ScriptedModel()
     model.decisions = [edit_decision("notes/a.md", "재시도 2회", "재시도 3회")]
     model.checks = [{"approved": True, "issues": []}]
@@ -314,8 +314,8 @@ def test_shape_respects_budget_and_required_inputs() -> None:
 
 
 # An edit that breaks a rule (ambiguous anchor) is redrafted, not failed.
-def test_rule_violation_is_redrafted(closet: tuple[Path, Path, str]) -> None:  # noqa: F811
-    root, state, url = closet
+def test_rule_violation_is_redrafted(vault: tuple[Path, Path, str]) -> None:  # noqa: F811
+    root, state, url = vault
     (root / "docs/a.md").write_text("# 결제\n중복\n중복\n")
     model = ScriptedModel()
     model.decisions = [
@@ -341,9 +341,9 @@ def test_rule_violation_is_redrafted(closet: tuple[Path, Path, str]) -> None:  #
 
 # Before creating a document, a similar existing one is found and offered.
 def test_similar_document_is_checked_before_create(
-    closet: tuple[Path, Path, str],  # noqa: F811
+    vault: tuple[Path, Path, str],  # noqa: F811
 ) -> None:
-    root, state, url = closet
+    root, state, url = vault
     (root / "notes").mkdir()
     (root / "notes/cat.md").write_text("# 고양이\n고양이 메모")
     (root / "docs/payment.md").write_text("# 결제 재시도\n결제 재시도는 2회다.")
@@ -389,7 +389,7 @@ def test_similar_document_is_checked_before_create(
 
 # Listed search results are matched without reading their whole body.
 def test_listed_results_are_not_loaded() -> None:
-    from hanger.context import shape
+    from markdown_notes_agent.context import shape
 
     settings = Settings.model_validate({"search": {"full_text": 1}})
     ranked = [
@@ -412,7 +412,7 @@ def test_listed_results_are_not_loaded() -> None:
 
 
 def test_blank_citations_are_dropped() -> None:
-    from hanger.workflows import _tidy_citations
+    from markdown_notes_agent.workflows import _tidy_citations
 
     decision = Decision.model_validate(
         {

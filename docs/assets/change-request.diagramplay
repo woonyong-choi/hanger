@@ -1,0 +1,14 @@
+diagramplay
+title "Change request"
+
+box proposal "Proposal" "Review + source check" tone=blue appearance=filled
+box write "Write" "One file"
+box conflict "Conflict" "Stop or replan"
+
+proposal -> write "Unchanged" no=1
+proposal -> conflict "Changed" dashed
+
+view graph down
+
+scene "Normal path" mode=once
+  proposal -> write time=800ms

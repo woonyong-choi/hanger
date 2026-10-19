@@ -3,8 +3,8 @@ requires = ["hatchling>=1.27", "hatch-fancy-pypi-readme>=24"]
 build-backend = "hatchling.build"
 
 [project]
-name = "hanger"
-version = "0.2.0"
+name = "markdown-notes-agent"
+version = "0.3.0"
 description = "Keeps a folder of Markdown notes searchable and lets AI tools edit it by your rules"
 dynamic = ["readme"]
 license = "MIT"
@@ -41,12 +41,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/woonyong-choi/hanger"
-Repository = "https://github.com/woonyong-choi/hanger"
-Issues = "https://github.com/woonyong-choi/hanger/issues"
+Homepage = "https://github.com/woonyong-choi/markdown-notes-agent"
+Repository = "https://github.com/woonyong-choi/markdown-notes-agent"
+Issues = "https://github.com/woonyong-choi/markdown-notes-agent/issues"
 
 [project.scripts]
-hanger = "hanger.cli:main"
+markdown-notes-agent = "markdown_notes_agent.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=9", "ruff>=0.14", "mypy>=1.18", "types-pyyaml>=6"]
@@ -90,19 +90,19 @@ path = "README.en.md"
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = 'src="(docs/[^"]+)"'
-replacement = 'src="https://raw.githubusercontent.com/woonyong-choi/hanger/main/\1"'
+replacement = 'src="https://raw.githubusercontent.com/woonyong-choi/markdown-notes-agent/main/\1"'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '(href="|\]\()((?:README|skills/)[^")]+)'
-replacement = '\1https://github.com/woonyong-choi/hanger/blob/main/\2'
+replacement = '\1https://github.com/woonyong-choi/markdown-notes-agent/blob/main/\2'
 
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
 pattern = '(\]\()(docs/[^")]+)'
-replacement = '\1https://raw.githubusercontent.com/woonyong-choi/hanger/main/\2'
+replacement = '\1https://raw.githubusercontent.com/woonyong-choi/markdown-notes-agent/main/\2'
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hanger"]
+packages = ["src/markdown_notes_agent"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/hanger", "tests", "LICENSE", "README.md", "README.en.md"]
+include = ["src/markdown_notes_agent", "tests", "LICENSE", "README.md", "README.en.md"]
 exclude = ["tests/.runtime"]

@@ -13,28 +13,28 @@ import pytest
 from conftest import OFFLINE
 from elastic_transport import TransportError
 
-from hanger.closets import ClosetPolicy
-from hanger.documents import Documents
-from hanger.errors import RequestError, SearchUnavailableError
-from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
-from hanger.watcher import ClosetWatcher
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError, SearchUnavailableError
+from markdown_notes_agent.ignore import DEFAULT_IGNORE, IGNORE_FILE
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.vaults import VaultPolicy
+from markdown_notes_agent.watcher import VaultWatcher
 
 
 @pytest.fixture
 def sync(tmp_path: Path) -> Iterator[Synchronizer]:
-    url = os.environ.get("HANGER_TEST_SEARCH_URL")
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
     if not url:
         pytest.skip("requires an explicit local Elasticsearch test endpoint")
-    closet = tmp_path / "closet"
-    closet.mkdir()
-    # A registered closet always holds its ignore file.
-    (closet / IGNORE_FILE).write_text(DEFAULT_IGNORE)
-    index = SearchIndex(url, str(closet))
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # A registered vault always holds its ignore file.
+    (vault / IGNORE_FILE).write_text(DEFAULT_IGNORE)
+    index = SearchIndex(url, str(vault))
     try:
         index.ensure()
-        yield Synchronizer(Documents(closet), index)
+        yield Synchronizer(Documents(vault), index)
     finally:
         try:
             index.delete()
@@ -191,11 +191,11 @@ def test_watch_retries_unreadable_new_file(
         return read(path)
 
     monkeypatch.setattr(sync, "read", transient_read)
-    monkeypatch.setattr("hanger.watcher.time.monotonic", lambda: 0)
-    watcher = ClosetWatcher(sync)
+    monkeypatch.setattr("markdown_notes_agent.watcher.time.monotonic", lambda: 0)
+    watcher = VaultWatcher(sync)
     watcher.flush()
     assert not sync.index.metadata(["a.md"])
-    monkeypatch.setattr("hanger.watcher.time.monotonic", lambda: 11)
+    monkeypatch.setattr("markdown_notes_agent.watcher.time.monotonic", lambda: 11)
     watcher.flush()
     assert sync.index.metadata(["a.md"])
 
@@ -215,7 +215,7 @@ def test_repeated_signal_never_replays_old_content(sync: Synchronizer) -> None:
 
 # The native observer detects a file saved by another program.
 def test_native_watch_receives_external_file(sync: Synchronizer) -> None:
-    watcher = ClosetWatcher(sync)
+    watcher = VaultWatcher(sync)
     watcher.start()
     try:
         watcher.flush()
@@ -246,7 +246,7 @@ def test_invalid_file_does_not_block_sync(sync: Synchronizer, invalid: bytes) ->
 def test_search_outage_raises_without_local_scan(sync: Synchronizer) -> None:
     (sync.documents.root / "a.md").write_text("# 결제\n자료")
     sync.reconcile()
-    url = os.environ["HANGER_TEST_SEARCH_URL"]
+    url = os.environ["MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL"]
     sync.index.client.close()
     sync.index.client = SearchIndex(
         "http://127.0.0.1:9", str(sync.documents.root)
@@ -441,7 +441,7 @@ def test_find_many_folders_rejects_partial_results(
         index.close()
 
 
-# invalid scopes fail rather than silently reverting to the full closet.
+# invalid scopes fail rather than silently reverting to the full vault.
 @pytest.mark.parametrize(
     "folder",
     [
@@ -455,14 +455,14 @@ def test_find_many_folders_rejects_partial_results(
     ],
 )
 def test_search_invalid_folder_is_rejected(sync: Synchronizer, folder: str) -> None:
-    with pytest.raises(RequestError, match="relative to the closet root"):
+    with pytest.raises(RequestError, match="relative to the vault root"):
         sync.search("retry", folders=(folder,))
 
 
 # Ignored folders cannot be searched.
 def test_search_ignored_folder_is_rejected(sync: Synchronizer) -> None:
     sync.policy.update(".hidden/\n")
-    with pytest.raises(RequestError, match="ignored in .hangerignore"):
+    with pytest.raises(RequestError, match="ignored in .markdown-notes-agentignore"):
         sync.search("retry", folders=(".hidden",))
 
 
@@ -478,13 +478,13 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
     base = [
         sys.executable,
         "-m",
-        "hanger.cli",
+        "markdown_notes_agent.cli",
         "--state",
         str(root.parent / "cli-state"),
         "--search-url",
-        os.environ["HANGER_TEST_SEARCH_URL"],
+        os.environ["MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL"],
     ]
-    subprocess.run([*base, "closet", "add", str(root)], check=True)
+    subprocess.run([*base, "vault", "add", str(root)], check=True)
     result = subprocess.run(
         [
             *base,
@@ -511,7 +511,7 @@ def test_cli_repeated_folders_and_local_diagnostics(sync: Synchronizer) -> None:
     assert absent["documents"] == []
 
 
-# A closet folder that vanished or became an empty mount point keeps its index.
+# A vault folder that vanished or became an empty mount point keeps its index.
 def test_reconcile_refuses_a_missing_or_empty_folder(sync: Synchronizer) -> None:
     root = sync.documents.root
     (root / "a.md").write_text("# kept")
@@ -525,11 +525,11 @@ def test_reconcile_refuses_a_missing_or_empty_folder(sync: Synchronizer) -> None
 
 # The watcher keeps running after an unexpected error.
 def test_watcher_survives_unexpected_error(
-    layout: tuple[Path, Path, ClosetPolicy], monkeypatch: pytest.MonkeyPatch
+    layout: tuple[Path, Path, VaultPolicy], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root, _, policy = layout
     sync = Synchronizer(Documents(root), SearchIndex(OFFLINE, str(root)), None, policy)
-    watcher = ClosetWatcher(sync)
+    watcher = VaultWatcher(sync)
     calls = 0
 
     def flaky(*_: object) -> None:
@@ -538,7 +538,9 @@ def test_watcher_survives_unexpected_error(
         raise ValueError("unexpected")
 
     monkeypatch.setattr(watcher, "flush", flaky)
-    monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
+    monkeypatch.setattr(
+        "markdown_notes_agent.watcher.VaultWatcher.close", lambda self: None
+    )
     stop = threading.Event()
     thread = threading.Thread(target=watcher.run, args=(stop,), daemon=True)
 
@@ -563,7 +565,7 @@ def test_watcher_rebuilds_a_lost_index(
 
     root = sync.documents.root
     (root / "a.md").write_text("# 결제\n재시도")
-    watcher = ClosetWatcher(sync)
+    watcher = VaultWatcher(sync)
     real_audit = sync.audit
     failures: list[bool] = []
 
@@ -575,8 +577,12 @@ def test_watcher_rebuilds_a_lost_index(
         return real_audit(limit)
 
     monkeypatch.setattr(sync, "audit", audit)
-    monkeypatch.setattr("hanger.watcher.ClosetWatcher.start", lambda self: None)
-    monkeypatch.setattr("hanger.watcher.ClosetWatcher.close", lambda self: None)
+    monkeypatch.setattr(
+        "markdown_notes_agent.watcher.VaultWatcher.start", lambda self: None
+    )
+    monkeypatch.setattr(
+        "markdown_notes_agent.watcher.VaultWatcher.close", lambda self: None
+    )
     stop = threading.Event()
     real_wait = stop.wait
     monkeypatch.setattr(stop, "wait", lambda seconds: real_wait(0.05))

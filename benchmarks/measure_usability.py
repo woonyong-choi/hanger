@@ -1,5 +1,3 @@
-"""Run Hanger as an installed MCP server against synthetic notes and time each tool."""
-
 from __future__ import annotations
 
 import argparse
@@ -15,7 +13,7 @@ from typing import Any
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from hanger.search import SearchIndex
+from markdown_notes_agent.search import SearchIndex
 
 SOURCE = "# 재시도\n기본 재시도는 2회다.\n예외: 취소된 요청은 재시도하지 않는다.\n"
 OPERATIONS = "# 운영\n재시도 횟수: 2회\n출처: 합성 서비스의 운영 규칙\n"
@@ -24,7 +22,7 @@ OPERATIONS = "# 운영\n재시도 횟수: 2회\n출처: 합성 서비스의 운�
 class Scenario:
     def __init__(self, output: Path, python: str, url: str) -> None:
         self.output = output.resolve()
-        self.root = self.output / "closet"
+        self.root = self.output / "vault"
         self.state = self.output / "state"
         self.python = python
         self.url = url
@@ -208,7 +206,7 @@ class Scenario:
             server = [
                 row.split(None, 2)[0]
                 for row in rows
-                if f"-m hanger.cli --state {self.state}" in row
+                if f"-m markdown_notes_agent.cli --state {self.state}" in row
             ]
             if any(
                 row.split(None, 2)[1] in server and "--output-format json" in row
@@ -315,7 +313,7 @@ class Scenario:
             command=self.python,
             args=[
                 "-m",
-                "hanger.cli",
+                "markdown_notes_agent.cli",
                 "--state",
                 str(self.state),
                 "--search-url",
@@ -336,7 +334,7 @@ class Scenario:
                     await session.initialize()
                     if first:
                         await session.call_tool(
-                            "register_closet", {"path": str(self.root)}
+                            "register_vault", {"path": str(self.root)}
                         )
                         await self.intake()
                         if live_model:
@@ -370,7 +368,7 @@ def main() -> None:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--live-model", action="store_true")
     args = parser.parse_args()
-    url = os.environ["HANGER_TEST_SEARCH_URL"]
+    url = os.environ["MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL"]
     scenario = Scenario(args.output, args.python, url)
     scenario.setup()
     try:

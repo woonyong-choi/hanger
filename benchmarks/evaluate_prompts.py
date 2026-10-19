@@ -6,6 +6,7 @@ import argparse
 import copy
 import json
 import subprocess
+import tomllib
 import types
 from collections.abc import Callable
 from contextlib import closing
@@ -16,20 +17,24 @@ from unittest.mock import patch
 
 from measure_prompts import render
 
-from hanger import prompts, workflows
-from hanger.documents import Documents
-from hanger.editing import Decision, EditPolicy, Review, materialize
-from hanger.errors import HangerError, ModelError, RequestError
-from hanger.jobs import JobState
-from hanger.keywords import Extraction, Split
-from hanger.model import CliModel, Intent, Planner
-from hanger.profiles import PROFILES
-from hanger.providers import Choice
-from hanger.requests import issue_key
-from hanger.runtime import Runtime
-from hanger.search import SearchIndex
-from hanger.sync import Synchronizer
-from hanger.workflows import REQUEST_SOURCE, _tidy_citations
+from markdown_notes_agent import prompts, workflows
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.editing import Decision, EditPolicy, Review, materialize
+from markdown_notes_agent.errors import (
+    MarkdownNotesAgentError,
+    ModelError,
+    RequestError,
+)
+from markdown_notes_agent.jobs import JobState
+from markdown_notes_agent.keywords import Extraction, Split
+from markdown_notes_agent.model import CliModel, Intent, Planner
+from markdown_notes_agent.profiles import PROFILES
+from markdown_notes_agent.providers import Choice
+from markdown_notes_agent.requests import issue_key
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.search import SearchIndex
+from markdown_notes_agent.sync import Synchronizer
+from markdown_notes_agent.workflows import REQUEST_SOURCE, _tidy_citations
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMAS = {"draft": Decision, "review": Review, "extract": Extraction, "split": Split}
@@ -49,11 +54,22 @@ def _write(path: Path, value: Any) -> None:
 
 
 def _baseline(ref: str) -> types.ModuleType:
+    project = tomllib.loads(
+        subprocess.check_output(
+            ["git", "show", f"{ref}:pyproject.toml"], cwd=ROOT, text=True
+        )
+    )
+    package = project["tool"]["hatch"]["build"]["targets"]["wheel"]["packages"][0]
     module = types.ModuleType("baseline_prompts")
-    profiles: dict[str, Any] = {"__name__": "hanger.profiles"}
+    profiles: dict[str, Any] = {"__name__": "markdown_notes_agent.profiles"}
     for name, namespace in (("profiles", profiles), ("prompts", module.__dict__)):
         source = subprocess.check_output(
-            ["git", "show", f"{ref}:src/hanger/{name}.py"], cwd=ROOT, text=True
+            ["git", "show", f"{ref}:{package}/{name}.py"],
+            cwd=ROOT,
+            text=True,
+        )
+        source = source.replace(
+            f"from {Path(package).name}", "from markdown_notes_agent"
         )
         exec(compile(source, f"baseline_{name}", "exec"), namespace)
     module.PROFILES = profiles["PROFILES"]
@@ -206,7 +222,7 @@ class _RecordingModel(CliModel):
                 row["checks"] = _draft_checks(self.case, value, folder)
             elif not value.approved or value.issues:
                 row["checks"] = value.issues or ["review did not approve"]
-        except HangerError as error:
+        except MarkdownNotesAgentError as error:
             row["checks"] = [str(error)]
         if row["tool_calls"]:
             row["checks"].append("unexpected tool call")
@@ -252,7 +268,7 @@ class _FixturePlanner(Planner):
                 self.case, self.result["proposal"], self.folder
             )
             return self.result
-        except HangerError as error:
+        except MarkdownNotesAgentError as error:
             attempt["error"] = str(error)
             attempt["error_code"] = error.code
             raise
@@ -316,7 +332,7 @@ def _invoke(
             (folder / name).write_bytes(data)
         row["tool_calls"] = _tool_calls((folder / "events.jsonl").read_text())
         row["error"] = f"timeout after {args.timeout_seconds} seconds"
-    except (HangerError, OSError, ValueError, RuntimeError) as error:
+    except (MarkdownNotesAgentError, OSError, ValueError, RuntimeError) as error:
         row["error"] = str(error)
     row["elapsed_seconds"] = perf_counter() - started
     _write(folder / "results.json", row)
@@ -327,7 +343,7 @@ def _writing_run(
     case: dict[str, Any], module: Any, folder: Path, args: Any
 ) -> dict[str, Any]:
     folder.mkdir(parents=True, exist_ok=False)
-    root = folder / "closet"
+    root = folder / "vault"
     root.mkdir()
     state = case["state"]
     for path, content in {

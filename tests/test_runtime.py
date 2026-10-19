@@ -9,21 +9,21 @@ from pathlib import Path
 import pytest
 from conftest import finish
 
-from hanger.closets import register_closet
-from hanger.config import Settings
-from hanger.documents import Documents
-from hanger.errors import RequestError
-from hanger.hub import ClosetHub
-from hanger.requests import Change, Proposal, digest, issue_key
-from hanger.runtime import Runtime
-from hanger.store import StateStore
+from markdown_notes_agent.config import Settings
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.errors import RequestError
+from markdown_notes_agent.hub import VaultHub
+from markdown_notes_agent.requests import Change, Proposal, digest, issue_key
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.store import StateStore
+from markdown_notes_agent.vaults import register_vault
 
 
 @pytest.fixture
 def paths(tmp_path: Path) -> tuple[Path, Path]:
-    closet = tmp_path / "closet"
-    closet.mkdir()
-    return closet, tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    return vault, tmp_path / "state"
 
 
 def test_delayed_submission_expires_from_key_issuance(
@@ -132,9 +132,9 @@ def test_run_killed_after_replace_reconciles_files(
     code = """
 import os, sys
 from pathlib import Path
-from hanger.documents import Documents
-from hanger.runtime import Runtime
-from hanger.store import StateStore
+from markdown_notes_agent.documents import Documents
+from markdown_notes_agent.runtime import Runtime
+from markdown_notes_agent.store import StateStore
 original = Documents.apply
 def crash(self, change):
     original(self, change)
@@ -158,7 +158,9 @@ with Runtime(Path(sys.argv[1]), Path(sys.argv[2])) as runtime:
             runtime.cancel(key)
         elif stop == "expired":
             future = time.time() + 86401
-            monkeypatch.setattr("hanger.runtime.time.time", lambda: future)
+            monkeypatch.setattr(
+                "markdown_notes_agent.runtime.time.time", lambda: future
+            )
         result = runtime.run_next()
         assert result is not None
         if stop:
@@ -197,16 +199,19 @@ def test_runtime_second_owner_rejected(paths: tuple[Path, Path]) -> None:
 
 # the public CLI must preserve the same proposal and result contract.
 def test_cli_submit_run_status(paths: tuple[Path, Path], tmp_path: Path) -> None:
+    url = os.environ.get("MARKDOWN_NOTES_AGENT_TEST_SEARCH_URL")
+    if not url:
+        pytest.skip("requires explicit Elasticsearch test endpoint")
     base = [
         sys.executable,
         "-m",
-        "hanger.cli",
+        "markdown_notes_agent.cli",
         "--state",
         str(paths[1]),
         "--search-url",
-        os.environ.get("HANGER_TEST_SEARCH_URL", "http://127.0.0.1:19200"),
+        url,
     ]
-    subprocess.run([*base, "closet", "add", str(paths[0])], check=True, timeout=30)
+    subprocess.run([*base, "vault", "add", str(paths[0])], check=True, timeout=30)
     key_result = subprocess.run(
         [*base, "key"], capture_output=True, check=True, timeout=30
     )
@@ -231,7 +236,7 @@ def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> Non
         [
             sys.executable,
             "-m",
-            "hanger.cli",
+            "markdown_notes_agent.cli",
             "--state",
             str(paths[1]),
             "automate",
@@ -248,7 +253,7 @@ def test_cli_invalid_intent_names_missing_query(paths: tuple[Path, Path]) -> Non
 
 
 # a forged identity or escaping path must fail before queue admission.
-@pytest.mark.parametrize("path", ["../outside.md", "/outside.md", "HANGER.md"])
+@pytest.mark.parametrize("path", ["../outside.md", "/outside.md", "VAULT.md"])
 def test_submit_invalid_path_rejected(paths: tuple[Path, Path], path: str) -> None:
     with Runtime(*paths) as runtime:
         proposal = Proposal(changes=(Change(path=path, after="invalid"),))
@@ -268,7 +273,7 @@ def test_run_expired_request_does_not_write(
         )
     future = time.time() + 86401
     with Runtime(*paths) as runtime:
-        monkeypatch.setattr("hanger.runtime.time.time", lambda: future)
+        monkeypatch.setattr("markdown_notes_agent.runtime.time.time", lambda: future)
         result = runtime.run_next()
         assert result is not None and result["status"] == "expired"
         assert not (paths[0] / "a.md").exists()
@@ -316,12 +321,10 @@ def test_run_hundred_documents_completes(paths: tuple[Path, Path]) -> None:
     assert (paths[0] / "docs/99.md").read_text() == "99"
 
 
-# a removed closet is closed cleanly: its job state is deleted, and
-# Hanger's unfinished files in it are removed or put back.
-def test_removed_closet_is_cleaned_up(paths: tuple[Path, Path]) -> None:
+def test_removed_vault_is_cleaned_up(paths: tuple[Path, Path]) -> None:
     store = StateStore(paths[1] / "hub")
-    register_closet(store, paths[0])
-    hub = ClosetHub(store, Settings(), "http://127.0.0.1:9")
+    register_vault(store, paths[0])
+    hub = VaultHub(store, Settings(), "http://127.0.0.1:9")
     try:
         opened = hub.get(None)
         runtime = opened.runtime
@@ -329,14 +332,14 @@ def test_removed_closet_is_cleaned_up(paths: tuple[Path, Path]) -> None:
             issue_key(runtime._secret),
             Proposal(changes=(Change(path="a.md", after="x"),)),
         )
-        leftover = paths[0] / ".hanger-0123.pending"
+        leftover = paths[0] / ".markdown-notes-agent-0123.pending"
         leftover.write_text("partial")
         (paths[0] / "b.md").write_text("planned delete")
-        interrupted = paths[0] / ".b.md.hanger-deleting"
+        interrupted = paths[0] / ".b.md.note-deleting"
         (paths[0] / "b.md").rename(interrupted)
         state = hub.folder / str(opened.id)
         assert state.is_dir()
-        store.remove_closet(opened.id)
+        store.remove_vault(opened.id)
         hub.refresh()
         assert not hub.opened()
         assert not state.exists()
@@ -385,11 +388,13 @@ def test_submit_expired_or_forged_key_rejected(
     with Runtime(*paths) as runtime:
         key = issue_key(runtime._secret)
         proposal = Proposal(changes=(Change(path="a.md", after="a"),))
-        with pytest.raises(RequestError, match="not issued by this Hanger") as forged:
+        with pytest.raises(
+            RequestError, match="not issued by this Markdown Notes Agent"
+        ) as forged:
             runtime.submit(key[:-1] + ("0" if key[-1] != "0" else "1"), proposal)
         assert forged.value.code == "invalid_key"
         future = time.time() + 86401
-        monkeypatch.setattr("hanger.requests.time.time", lambda: future)
+        monkeypatch.setattr("markdown_notes_agent.requests.time.time", lambda: future)
         with pytest.raises(RequestError, match="expired"):
             runtime.submit(key, proposal)
         assert runtime.run_next() is None
@@ -421,7 +426,7 @@ def test_run_transient_write_failure_retries(
 
 # A cancelled job that has not started reports cancelled, not queued.
 def test_cancelled_queued_job_reports_cancelled(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     with Runtime(root, tmp_path / "state") as runtime:
         key = issue_key(runtime._secret)
@@ -432,7 +437,7 @@ def test_cancelled_queued_job_reports_cancelled(tmp_path: Path) -> None:
 
 # Writing many files keeps the job history small: one step, not one per file.
 def test_many_file_job_keeps_checkpoint_small(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     body = "x" * 9000
     proposal = Proposal(
@@ -451,7 +456,7 @@ def test_many_file_job_keeps_checkpoint_small(tmp_path: Path) -> None:
 def test_retry_is_visible_and_failure_leaves_no_work_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     clock = time.time()
     monkeypatch.setattr(time, "time", lambda: clock)
@@ -493,10 +498,10 @@ def _hidden(root: Path) -> list[str]:
 def test_delete_is_verified_and_leaves_no_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from hanger.errors import ConflictError
-    from hanger.requests import digest
+    from markdown_notes_agent.errors import ConflictError
+    from markdown_notes_agent.requests import digest
 
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     documents = Documents(root)
     target = root / "a.md"
@@ -526,26 +531,84 @@ def test_delete_is_verified_and_leaves_no_files(
 
     # A crash after the rename: the next attempt finishes the delete.
     target.write_text("planned")
-    rename(target, root / ".a.md.hanger-deleting")
+    rename(target, root / ".a.md.note-deleting")
     assert documents.apply(change) == "already_applied"
     assert not target.exists() and _hidden(root) == []
 
     # A crash after the rename of changed content: it is put back.
-    (root / ".a.md.hanger-deleting").write_text("changed")
+    (root / ".a.md.note-deleting").write_text("changed")
     with pytest.raises(ConflictError):
         documents.apply(change)
     assert target.read_text() == "changed" and _hidden(root) == []
 
     # Expired or failed jobs settle the same way.
     target.unlink()
-    (root / ".a.md.hanger-deleting").write_text("planned")
+    (root / ".a.md.note-deleting").write_text("planned")
     documents.discard_pending(Proposal(changes=(change,)))
     assert not target.exists() and _hidden(root) == []
 
 
+@pytest.mark.parametrize("stem_length", [230, 235])
+def test_long_note_delete_completes(paths: tuple[Path, Path], stem_length: int) -> None:
+    name = "a" * stem_length + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    with Runtime(*paths) as runtime:
+        runtime.submit(
+            issue_key(runtime._secret),
+            Proposal(
+                changes=(Change(path=name, before=digest(b"planned"), after=None),)
+            ),
+        )
+        result = runtime.run_next()
+        assert result is not None and result["status"] == "completed"
+    assert not target.exists()
+    assert list(paths[0].iterdir()) == []
+
+
+def test_release_restores_long_interrupted_delete(paths: tuple[Path, Path]) -> None:
+    name = "a" * 235 + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    documents = Documents(paths[0])
+    target.rename(paths[0] / f".{name}.note-deleting")
+    assert documents.release() == 1
+    assert target.read_text() == "planned"
+    assert list(paths[0].iterdir()) == [target]
+
+
+def test_delete_race_restores_both_long_notes(
+    paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from markdown_notes_agent.errors import ConflictError
+
+    name = "a" * 231 + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    rename = os.rename
+
+    def save_then_rename(
+        source: str | os.PathLike[str], destination: str | os.PathLike[str]
+    ) -> None:
+        if Path(source) == target:
+            target.write_text("first save")
+        rename(source, destination)
+        if Path(source) == target:
+            target.write_text("second save")
+
+    monkeypatch.setattr(os, "rename", save_then_rename)
+    documents = Documents(paths[0])
+    with pytest.raises(ConflictError):
+        documents.apply(Change(path=name, before=digest(b"planned"), after=None))
+    recovered = target.with_name(f"{target.stem}.note-recovered-1.md")
+    assert target.read_text() == "second save"
+    assert recovered.read_text() == "first save"
+    assert sorted(paths[0].iterdir()) == sorted([target, recovered])
+
+
 # A finished or stopped job keeps one record, not its step history.
 def test_finished_jobs_keep_one_record(tmp_path: Path) -> None:
-    root = tmp_path / "closet"
+    root = tmp_path / "vault"
     root.mkdir()
     (root / "b.md").write_text("old")
     with Runtime(root, tmp_path / "state") as runtime:

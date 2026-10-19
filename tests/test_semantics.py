@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from hanger.errors import HangerError
-from hanger.semantics import (
+from markdown_notes_agent.errors import MarkdownNotesAgentError
+from markdown_notes_agent.semantics import (
     FrontmatterError,
     SemanticError,
     SemanticMetadata,
@@ -17,7 +17,7 @@ from hanger.semantics import (
     semantic_schema,
     verify_evidence,
 )
-from hanger.vocabulary import PREDICATES, predicate_catalog
+from markdown_notes_agent.vocabulary import PREDICATES, predicate_catalog
 
 
 @pytest.fixture
@@ -175,10 +175,10 @@ def test_same_person_name_does_not_merge_distinct_identifiers() -> None:
         ("prov:wasRevisionOf", "document", "document"),
         ("dcterms:subject", "document", "concept"),
         ("skos:related", "concept", "concept"),
-        ("hanger:requires", "concept", "concept"),
-        ("hanger:supportedBy", "claim", "source"),
-        ("hanger:refutedBy", "claim", "document"),
-        ("hanger:supersedes", "claim", "claim"),
+        ("markdown-notes-agent:requires", "concept", "concept"),
+        ("markdown-notes-agent:supportedBy", "claim", "source"),
+        ("markdown-notes-agent:refutedBy", "claim", "document"),
+        ("markdown-notes-agent:supersedes", "claim", "claim"),
     ],
 )
 def test_supported_relation_has_valid_domain_and_range(
@@ -333,10 +333,10 @@ def test_accepted_assertions_require_evidence(concept_metadata: dict[str, Any]) 
         },
     ],
 )
-def test_invalid_explicit_contract_raises_hanger_error(
+def test_invalid_explicit_contract_raises_markdown_notes_agent_error(
     metadata: dict[str, Any],
 ) -> None:
-    with pytest.raises(HangerError) as caught:
+    with pytest.raises(MarkdownNotesAgentError) as caught:
         parse_semantics(_document(metadata))
     assert caught.value.code == "invalid_semantics"
 
@@ -399,7 +399,7 @@ def test_schema_and_catalog_derive_from_runtime_contract() -> None:
         catalog["skos:broader"]["uri"] == "http://www.w3.org/2004/02/skos/core#broader"
     )
     assert catalog["prov:used"]["domain"] == ["activity"]
-    assert catalog["hanger:supportedBy"]["is_extension"] is True
+    assert catalog["markdown-notes-agent:supportedBy"]["is_extension"] is True
     assert catalog["dcterms:subject"]["is_extension"] is False
 
 

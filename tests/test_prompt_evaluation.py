@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from hanger import prompts
-from hanger.editing import Decision, Review
+from markdown_notes_agent import prompts
+from markdown_notes_agent.editing import Decision, Review
 
 
 @pytest.mark.parametrize("outcome", ["repair", "wrong_approval", "legitimate", "limit"])
@@ -78,7 +78,7 @@ def test_evaluation_runs_guarded_workflow_without_applying(
     args = SimpleNamespace(output=tmp_path, max_calls=2 if outcome == "limit" else 6)
     result = evaluation._run(case, "compact", prompts, args)
     folder = tmp_path / (case["name"] + "-compact")
-    assert (folder / "closet" / path).read_text() == source
+    assert (folder / "vault" / path).read_text() == source
     assert result["disk_apply"] is False
     assert result["final_pass"] == (outcome in {"repair", "legitimate"})
     assert result["first_pass"] == (outcome == "legitimate")
