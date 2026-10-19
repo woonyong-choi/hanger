@@ -335,7 +335,7 @@ def test_removed_vault_is_cleaned_up(paths: tuple[Path, Path]) -> None:
         leftover = paths[0] / ".markdown-notes-agent-0123.pending"
         leftover.write_text("partial")
         (paths[0] / "b.md").write_text("planned delete")
-        interrupted = paths[0] / ".b.md.markdown-notes-agent-deleting"
+        interrupted = paths[0] / ".b.md.note-deleting"
         (paths[0] / "b.md").rename(interrupted)
         state = hub.folder / str(opened.id)
         assert state.is_dir()
@@ -531,21 +531,79 @@ def test_delete_is_verified_and_leaves_no_files(
 
     # A crash after the rename: the next attempt finishes the delete.
     target.write_text("planned")
-    rename(target, root / ".a.md.markdown-notes-agent-deleting")
+    rename(target, root / ".a.md.note-deleting")
     assert documents.apply(change) == "already_applied"
     assert not target.exists() and _hidden(root) == []
 
     # A crash after the rename of changed content: it is put back.
-    (root / ".a.md.markdown-notes-agent-deleting").write_text("changed")
+    (root / ".a.md.note-deleting").write_text("changed")
     with pytest.raises(ConflictError):
         documents.apply(change)
     assert target.read_text() == "changed" and _hidden(root) == []
 
     # Expired or failed jobs settle the same way.
     target.unlink()
-    (root / ".a.md.markdown-notes-agent-deleting").write_text("planned")
+    (root / ".a.md.note-deleting").write_text("planned")
     documents.discard_pending(Proposal(changes=(change,)))
     assert not target.exists() and _hidden(root) == []
+
+
+@pytest.mark.parametrize("stem_length", [230, 235])
+def test_long_note_delete_completes(paths: tuple[Path, Path], stem_length: int) -> None:
+    name = "a" * stem_length + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    with Runtime(*paths) as runtime:
+        runtime.submit(
+            issue_key(runtime._secret),
+            Proposal(
+                changes=(Change(path=name, before=digest(b"planned"), after=None),)
+            ),
+        )
+        result = runtime.run_next()
+        assert result is not None and result["status"] == "completed"
+    assert not target.exists()
+    assert list(paths[0].iterdir()) == []
+
+
+def test_release_restores_long_interrupted_delete(paths: tuple[Path, Path]) -> None:
+    name = "a" * 235 + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    documents = Documents(paths[0])
+    target.rename(paths[0] / f".{name}.note-deleting")
+    assert documents.release() == 1
+    assert target.read_text() == "planned"
+    assert list(paths[0].iterdir()) == [target]
+
+
+def test_delete_race_restores_both_long_notes(
+    paths: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from markdown_notes_agent.errors import ConflictError
+
+    name = "a" * 231 + ".md"
+    target = paths[0] / name
+    target.write_text("planned")
+    rename = os.rename
+
+    def save_then_rename(
+        source: str | os.PathLike[str], destination: str | os.PathLike[str]
+    ) -> None:
+        if Path(source) == target:
+            target.write_text("first save")
+        rename(source, destination)
+        if Path(source) == target:
+            target.write_text("second save")
+
+    monkeypatch.setattr(os, "rename", save_then_rename)
+    documents = Documents(paths[0])
+    with pytest.raises(ConflictError):
+        documents.apply(Change(path=name, before=digest(b"planned"), after=None))
+    recovered = target.with_name(f"{target.stem}.note-recovered-1.md")
+    assert target.read_text() == "second save"
+    assert recovered.read_text() == "first save"
+    assert sorted(paths[0].iterdir()) == sorted([target, recovered])
 
 
 # A finished or stopped job keeps one record, not its step history.

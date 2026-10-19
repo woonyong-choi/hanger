@@ -13,7 +13,7 @@ from markdown_notes_agent.requests import Change, Proposal, digest
 
 logger = logging.getLogger(__name__)
 
-_DELETING = ".markdown-notes-agent-deleting"
+_DELETING = ".note-deleting"
 # Space kept free on the disk after collecting a file.
 _FREE_MARGIN = 1024 * 1024 * 1024
 
@@ -213,9 +213,7 @@ class Documents:
         content is kept next to it under a visible name instead.
         """
         candidates = [target] + [
-            target.with_name(
-                f"{target.stem}.markdown-notes-agent-recovered-{number}.md"
-            )
+            target.with_name(f"{target.stem}.note-recovered-{number}.md")
             for number in range(1, 1000)
         ]
         for destination in candidates:
