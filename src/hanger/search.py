@@ -3,6 +3,7 @@ from __future__ import annotations
 __all__ = ["INDEX_PREFIX", "SearchIndex", "index_name"]
 
 from collections.abc import Iterable, Iterator
+from itertools import batched
 from typing import Any
 
 from elasticsearch import Elasticsearch, helpers
@@ -12,6 +13,7 @@ from hanger.requests import digest
 from hanger.scope import SearchScope
 
 INDEX_PREFIX = "hanger-"
+_FOLDER_BATCH_SIZE = 256
 
 
 def index_name(closet_identity: str) -> str:
@@ -132,75 +134,27 @@ class SearchIndex:
     def refresh(self) -> None:
         self.client.indices.refresh(index=self.name)
 
-    # cost: time O(k+s), heap O(k+s), stack O(1), io 1
-    # vars: k = result metadata bytes, s = scope bytes; server cost depends on postings
-    # basis: estimate
     def find(
         self, query: str, limit: int, *, folders: tuple[str, ...] = ()
     ) -> list[dict[str, Any]]:
         scope = SearchScope(folders)
-        filters: list[dict[str, Any]] = [{"term": {"kind": "document"}}]
-        if scope.folders:
-            filters.append(
-                {
-                    "bool": {
-                        "should": [
-                            {"prefix": {"path": folder + "/"}}
-                            for folder in scope.folders
-                        ],
-                        "minimum_should_match": 1,
-                    }
-                }
-            )
-        response = self.client.search(
-            index=self.name,
-            size=limit,
-            query={
-                "bool": {
-                    "filter": filters,
-                    "should": [
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title^3", "content"],
-                                "fuzziness": "AUTO",
-                                "_name": "text",
-                            }
-                        },
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["title.surface^3", "content.surface"],
-                                "_name": "surface_text",
-                            }
-                        },
-                        # Keyword tree names: other names and the model's name
-                        # for a note, weighed lightly so text matches lead.
-                        {
-                            "multi_match": {
-                                "query": query,
-                                "fields": ["names", "names.surface"],
-                                "boost": 0.5,
-                                "_name": "names",
-                            }
-                        },
-                    ],
-                    "minimum_should_match": 1,
-                }
-            },
-        )
-        if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
-            raise RequestError(
-                "The search server could not search the whole requested scope."
-            )
-        return [
-            dict(
-                hit["_source"],
-                score=hit["_score"],
-                matched_by=hit.get("matched_queries", []),
-            )
-            for hit in response["hits"]["hits"]
-        ]
+        if len(scope.folders) <= _FOLDER_BATCH_SIZE:
+            return self._find(query, limit, scope.folders)
+        pit = {
+            "id": self.client.open_point_in_time(index=self.name, keep_alive="1m")[
+                "id"
+            ],
+            "keep_alive": "1m",
+        }
+        try:
+            results: list[dict[str, Any]] = []
+            for batch in batched(scope.folders, _FOLDER_BATCH_SIZE):
+                results.extend(self._find(query, limit, batch, pit=pit))
+                results.sort(key=lambda hit: (-hit["score"], hit["path"]))
+                del results[limit:]
+            return results
+        finally:
+            self.client.close_point_in_time(id=pit["id"])
 
     # cost: time O(q), heap O(q), stack O(1), io 2
     # vars: q = query bytes
@@ -242,6 +196,80 @@ class SearchIndex:
         self.client.index(
             index=self.name, id="audit", document={"kind": "state", "cursor": path}
         )
+
+    def _find(
+        self,
+        query: str,
+        limit: int,
+        folders: tuple[str, ...],
+        *,
+        pit: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        filters: list[dict[str, Any]] = [{"term": {"kind": "document"}}]
+        if folders:
+            filters.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"prefix": {"path": folder + "/"}} for folder in folders
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
+        target: dict[str, Any] = {"index": self.name} if pit is None else {"pit": pit}
+        response = self.client.search(
+            **target,
+            size=limit,
+            sort=[{"_score": "desc"}, {"path": "asc"}],
+            query={
+                "bool": {
+                    "filter": filters,
+                    "should": [
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["title^3", "content"],
+                                "fuzziness": "AUTO",
+                                "_name": "text",
+                            }
+                        },
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["title.surface^3", "content.surface"],
+                                "_name": "surface_text",
+                            }
+                        },
+                        # Keyword tree names: other names and the model's name
+                        # for a note, weighed lightly so text matches lead.
+                        {
+                            "multi_match": {
+                                "query": query,
+                                "fields": ["names", "names.surface"],
+                                "boost": 0.5,
+                                "_name": "names",
+                            }
+                        },
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+        )
+        if pit is not None and "pit_id" in response:
+            pit["id"] = response["pit_id"]
+        if response.get("timed_out") or response.get("_shards", {}).get("failed", 0):
+            raise RequestError(
+                "The search server could not search the whole requested scope."
+            )
+        return [
+            dict(
+                hit["_source"],
+                score=hit["_score"],
+                matched_by=hit.get("matched_queries", []),
+            )
+            for hit in response["hits"]["hits"]
+        ]
 
 
 def _key(path: str) -> str:

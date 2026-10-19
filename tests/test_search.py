@@ -7,10 +7,11 @@ import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from conftest import OFFLINE
+from elastic_transport import TransportError
 
 from hanger.closets import ClosetPolicy
 from hanger.documents import Documents
@@ -313,6 +314,131 @@ def test_search_many_folders_filters_before_top_k(sync: Synchronizer) -> None:
 
     assert [d["path"] for d in result["documents"]] == ["chosen/a.md"]
     assert len(result["folders"]) == 1101
+
+
+@pytest.mark.parametrize("ranking", ["ranked", "tied"])
+def test_search_many_folders_preserves_global_top_k(
+    sync: Synchronizer, ranking: str
+) -> None:
+    root = sync.documents.root
+    folders = tuple(f"selected/{number:04d}" for number in range(1101))
+    selected = []
+    for number in (0, 200, 400, 600, 800, 1000, 1100):
+        path = f"{folders[number]}/a.md"
+        selected.append(path)
+        target = root / path
+        target.parent.mkdir(parents=True)
+        repetitions = number // 200 + 1 if ranking == "ranked" else 1
+        target.write_text(f"# retry\n{'retry ' * repetitions}")
+    (root / "outside.md").write_text("# retry\nretry")
+    sync.reconcile()
+    expected = [
+        hit for hit in sync.index.find("retry", 100) if hit["path"] in selected
+    ][:4]
+
+    result = sync.index.find("retry", 4, folders=folders)
+
+    assert [hit["path"] for hit in result] == [hit["path"] for hit in expected]
+    assert [hit["score"] for hit in result] == [hit["score"] for hit in expected]
+    if ranking == "tied":
+        assert [hit["path"] for hit in result] == selected[:4]
+
+
+def test_search_many_folders_preserves_literal_boundaries(sync: Synchronizer) -> None:
+    root = sync.documents.root
+    selected = "chosen[api]*?.+"
+    for folder in (selected, selected + "-old", "chosenapiXXXX"):
+        (root / folder).mkdir()
+        (root / folder / "a.md").write_text("# retry\nretry key")
+    (root / (selected + ".md")).write_text("# retry\nretry key")
+    sync.reconcile()
+
+    result = sync.search(
+        "retry", 1, folders=tuple(f"absent/{n}" for n in range(1100)) + (selected,)
+    )
+
+    assert [hit["path"] for hit in result["documents"]] == [selected + "/a.md"]
+
+
+def test_search_many_folders_preserves_snapshot_during_refresh(
+    sync: Synchronizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = sync.documents.root
+    paths = ("selected/0000/a.md", "selected/1100/a.md")
+    for path in paths:
+        target = root / path
+        target.parent.mkdir(parents=True)
+        target.write_text("# retry\nretry key")
+    sync.reconcile()
+    expected = sync.index.find("retry", 20)
+    search = sync.index.client.search
+    changed = False
+
+    def search_and_refresh(**kwargs: Any) -> Any:
+        nonlocal changed
+        response = search(**kwargs)
+        if "pit" in kwargs and not changed:
+            changed = True
+            (root / paths[-1]).write_text("# garden\nflowers")
+            sync.sync_paths([paths[-1]], force=True)
+            sync.index.refresh()
+        return response
+
+    monkeypatch.setattr(sync.index.client, "search", search_and_refresh)
+
+    result = sync.index.find(
+        "retry", 20, folders=tuple(f"selected/{n:04d}" for n in range(1101))
+    )
+
+    assert changed
+    assert result == expected
+    assert [hit["path"] for hit in sync.index.find("retry", 20)] == [paths[0]]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "shard", "transport"])
+def test_find_many_folders_rejects_partial_results(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    index = SearchIndex(OFFLINE, "partial-search")
+    calls = 0
+    closed = []
+
+    def search(**request: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        assert "index" not in request
+        assert request["pit"]["id"] == ("snapshot" if calls == 1 else "latest-snapshot")
+        if calls == 1:
+            return {
+                "pit_id": "latest-snapshot",
+                "hits": {
+                    "hits": [{"_source": {"path": "selected/0000/a.md"}, "_score": 1.0}]
+                },
+            }
+        if failure == "transport":
+            raise TransportError("test search unavailable")
+        return {
+            "hits": {"hits": []},
+            "timed_out": failure == "timeout",
+            "_shards": {"failed": int(failure == "shard")},
+        }
+
+    monkeypatch.setattr(
+        index.client, "open_point_in_time", lambda **_: {"id": "snapshot"}
+    )
+    monkeypatch.setattr(index.client, "search", search)
+    monkeypatch.setattr(
+        index.client, "close_point_in_time", lambda **kw: closed.append(kw)
+    )
+    error = TransportError if failure == "transport" else RequestError
+    try:
+        with pytest.raises(error):
+            index.find(
+                "retry", 1, folders=tuple(f"selected/{n:04d}" for n in range(1101))
+            )
+        assert closed == [{"id": "latest-snapshot"}]
+    finally:
+        index.close()
 
 
 # invalid scopes fail rather than silently reverting to the full closet.
