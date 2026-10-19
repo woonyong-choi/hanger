@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -206,10 +207,19 @@ class Scenario:
             server = [
                 row.split(None, 2)[0]
                 for row in rows
-                if f"-m markdown_notes_agent.cli --state {self.state}" in row
+                if re.search(
+                    rf"-m markdown_notes_agent\.cli --state "
+                    rf"{re.escape(str(self.state))}(?:\s|$)",
+                    row,
+                )
             ]
             if any(
-                row.split(None, 2)[1] in server and "--output-format json" in row
+                row.split(None, 2)[1] in server
+                and re.match(
+                    r"(?:\S*/)?(?:claude --safe-mode -p --output-format json|"
+                    r"codex exec --json)(?:\s|$)",
+                    row.split(None, 2)[2],
+                )
                 for row in rows
             ):
                 return
