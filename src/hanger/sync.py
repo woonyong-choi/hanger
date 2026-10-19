@@ -19,10 +19,12 @@ from hanger.config import Settings
 from hanger.context import snippets
 from hanger.documents import Documents
 from hanger.errors import ConflictError, RequestError, SearchUnavailableError
+from hanger.keyword_metadata import keyword_metadata
 from hanger.keywords import note_title
 from hanger.requests import digest
 from hanger.scope import SearchScope
 from hanger.search import SearchIndex
+from hanger.semantics import SemanticError, parse_semantics
 
 if TYPE_CHECKING:
     from hanger.keywords import KeywordGraph
@@ -133,12 +135,37 @@ class Synchronizer:
         for entry in entries:
             if self.keywords is not None:
                 if "hash" in entry:
-                    touched |= self.keywords.observe(
-                        entry["path"], entry["content"], entry["hash"]
-                    )
+                    try:
+                        touched |= self.keywords.observe(
+                            entry["path"], entry["content"], entry["hash"]
+                        )
+                    except SemanticError:
+                        self.diagnostics.append(
+                            {
+                                "path": entry["path"],
+                                "reason": "invalid semantic metadata",
+                            }
+                        )
                     entry["names"] = " | ".join(self.keywords.names(entry["path"]))
                 else:
                     touched |= self.keywords.forget(entry["path"])
+            if "hash" in entry:
+                try:
+                    snapshot = parse_semantics(entry["content"], path=entry["path"])
+                    values = keyword_metadata(snapshot).values
+                except SemanticError:
+                    entry["names"] = ""
+                else:
+                    names = [entry.get("names", "")]
+                    names.append(values.get("name", ""))
+                    aliases = values.get("aliases", [])
+                    if isinstance(aliases, str):
+                        names.append(aliases)
+                    elif isinstance(aliases, list):
+                        names.extend(a for a in aliases if isinstance(a, str))
+                    for entity in snapshot.metadata.entities:
+                        names.extend([entity.label or "", *entity.aliases])
+                    entry["names"] = " | ".join(n for n in names if n)
             yield entry
 
     def _reindex(self, paths: set[str]) -> None:
@@ -237,14 +264,27 @@ class Synchronizer:
                 raise SearchUnavailableError(
                     "The search server is not responding."
                 ) from error
+            relations = (
+                self.keywords.relations.expand(
+                    [document["path"] for document in results],
+                    read=lambda path, budget: self.read(path, max_bytes=budget),
+                    allowed=self._included,
+                    scope=scope,
+                )
+                if self.keywords is not None
+                else None
+            )
             return {
                 "source": "elasticsearch",
                 "documents": results,
                 "candidate_limit": limit,
                 "coverage": "ranked_candidates",
                 "reason": fallback_reason or "ranked",
-                "unverified": stale,
+                "unverified": [
+                    p for p in stale if scope.contains(p) and self._included(p)
+                ],
                 "folders": list(scope.folders),
+                "relations": relations,
             }
 
     # cost: time O(f), heap O(w), stack O(d), io O(f)
@@ -287,21 +327,25 @@ class Synchronizer:
     # cost: time O(n), heap O(n), stack O(1), io O(1)
     # vars: n = document bytes, bounded by MAX_DOCUMENT_BYTES
     # basis: estimate
-    def read(self, path: str) -> dict[str, str]:
+    def read(self, path: str, *, max_bytes: int = MAX_DOCUMENT_BYTES) -> dict[str, str]:
         target = self.documents.resolve(path)
         before = _signature(target)
-        if target.stat().st_size > MAX_DOCUMENT_BYTES:
-            raise RequestError(f"The note is larger than 2 MiB: {path}")
+        limit = min(max_bytes, MAX_DOCUMENT_BYTES)
+        if target.stat().st_size > limit:
+            raise RequestError(
+                f"the note exceeds the read budget of {limit} bytes: {path}",
+                code="read_budget",
+            )
         with target.open("rb") as source:
-            data = source.read(MAX_DOCUMENT_BYTES + 1)
+            data = source.read(limit + 1)
         self.read_count += 1
-        if len(data) > MAX_DOCUMENT_BYTES or _signature(target) != before:
+        if len(data) > limit or _signature(target) != before:
             raise ConflictError(f"The note changed while it was read: {path}")
         try:
             content = data.decode("utf-8")
         except UnicodeDecodeError as error:
             raise RequestError(f"The note is not UTF-8 text: {path}") from error
-        title = note_title(content, target.stem)
+        title = note_title(content, target.stem, path=path)
         return {
             "kind": "document",
             "path": path,
@@ -372,6 +416,7 @@ class Synchronizer:
                     "path": hit["path"],
                     "title": hit.get("title") or target.stem,
                     "bytes": target.stat().st_size,
+                    "matched_by": hit.get("matched_by", ["text"]),
                 }
             )
         return results, stale

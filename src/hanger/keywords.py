@@ -45,14 +45,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hanger.closets import ClosetPolicy
 from hanger.errors import HangerError, ModelError, ModelOutputError, RequestError
+from hanger.keyword_metadata import keyword_metadata
 from hanger.prompts import extract_prompt, split_prompt
+from hanger.relations import RelationProjection
 from hanger.rules import rules_for
+from hanger.semantics import SemanticError, parse_semantics
 
 logger = logging.getLogger(__name__)
 
 # Raise when the extraction prompt or its meaning changes: every note is then
 # extracted again, after the notes that changed.
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 # A concept with more direct children than this is split into groups.
 SPLIT_LIMIT = 15
 # Attempts per note before it is reported as failed.
@@ -69,7 +72,7 @@ NODE = "node:"
 MULTIPLE = "[multiple topics]"
 
 # Raise when the tables below change.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes(
     path TEXT PRIMARY KEY, hash TEXT NOT NULL, title TEXT NOT NULL,
@@ -79,7 +82,8 @@ CREATE TABLE IF NOT EXISTS notes(
     question TEXT, definition TEXT, differentia TEXT,
     title_key TEXT NOT NULL DEFAULT '', name_key TEXT NOT NULL DEFAULT '',
     attempts INTEGER NOT NULL DEFAULT 0, failure TEXT NOT NULL DEFAULT '',
-    rechecks INTEGER NOT NULL DEFAULT 0);
+    rechecks INTEGER NOT NULL DEFAULT 0,
+    explicit TEXT NOT NULL DEFAULT '{}', concept INTEGER NOT NULL DEFAULT 1);
 CREATE INDEX IF NOT EXISTS notes_slug ON notes(slug);
 CREATE INDEX IF NOT EXISTS notes_title_key ON notes(tree, title_key);
 CREATE INDEX IF NOT EXISTS notes_name_key ON notes(tree, name_key);
@@ -226,24 +230,41 @@ def _link_key(raw: str) -> str:
     return norm(stem[:-3] if stem.endswith(".md") else stem)
 
 
-def note_title(text: str, fallback: str) -> str:
+def note_title(text: str, fallback: str, *, path: str = "document.md") -> str:
     """The front matter title, else the first heading, else the file name."""
-    meta, body = _front_matter(text)
+    try:
+        snapshot = parse_semantics(text, path=path)
+        title, body = snapshot.frontmatter.get("title"), snapshot.body
+    except SemanticError:
+        meta, body = _front_matter(text)
+        title = meta.get("title")
     heading = re.search(r"^#\s+(.+)$", body, re.M)
-    return meta.get("title") or (heading.group(1).strip() if heading else fallback)
+    return (title if isinstance(title, str) and title else None) or (
+        heading.group(1).strip() if heading else fallback
+    )
 
 
-def parse_note(text: str, fallback: str) -> dict[str, Any]:
+def parse_note(
+    text: str, fallback: str, *, path: str = "document.md"
+) -> dict[str, Any]:
     """Title, slug and user-written links of a note."""
-    meta, body = _front_matter(text)
-    title = note_title(text, fallback)
+    snapshot = parse_semantics(text, path=path)
+    meta, body = snapshot.frontmatter, snapshot.body
+    title = note_title(text, fallback, path=path)
+    explicit = keyword_metadata(snapshot)
     links: list[tuple[str, str, str]] = []
-    if meta.get("parent"):
-        found = list(_links(meta["parent"]))
-        if found:
-            links += [(raw, "parent", anchor) for raw, anchor in found]
-        else:
-            links.append((meta["parent"], "parent", ""))
+    for field, kind in (
+        ("parent", "parent"),
+        ("broader", "parent"),
+        ("related", "related"),
+        ("requires", "requires"),
+    ):
+        for value in explicit.values.get(field, []):
+            found = list(_links(value))
+            if found:
+                links += [(raw, kind, anchor) for raw, anchor in found]
+            elif value.strip():
+                links.append((value, kind, ""))
     for line in body.splitlines():
         kind = "list" if _LIST_LINK.match(line) else "prose"
         for raw, anchor in _links(line):
@@ -288,9 +309,11 @@ class KeywordGraph:
         # Called with (note, same note, concept name) when two notes answer
         # the same question and both folders allow merging.
         self.on_same: Callable[[str, str, str], None] | None = None
+        self.relations = RelationProjection(database.with_name("relations.sqlite"))
 
     def close(self) -> None:
         with self._lock:
+            self.relations.close()
             self._db.close()
 
     def _rows(self, query: str, *args: Any) -> list[tuple[Any, ...]]:
@@ -315,11 +338,18 @@ class KeywordGraph:
     # basis: estimate
     def observe(self, path: str, text: str, digest: str) -> set[str]:
         """Record a note's text. Returns notes whose link names changed."""
+        try:
+            snapshot = parse_semantics(text, path=path)
+            parsed = parse_note(text, PurePosixPath(path).stem, path=path)
+            explicit = keyword_metadata(snapshot)
+        except SemanticError:
+            self.forget(path)
+            raise
         with self._transaction():
             row = self._one("SELECT hash, slug, tree FROM notes WHERE path=?", path)
             if row and row[0] == digest:
                 return set()
-            parsed = parse_note(text, PurePosixPath(path).stem)
+            self.relations.observe(snapshot)
             tree, enabled, merge = self._folder_rules(path)
             slug = norm(parsed["slug"])
             values = (
@@ -345,6 +375,21 @@ class KeywordGraph:
                     "INSERT INTO notes(hash, title, slug, stem, tree, enabled, "
                     "merge, title_key, path) VALUES(?,?,?,?,?,?,?,?,?)",
                     values,
+                )
+            self._db.execute(
+                "UPDATE notes SET explicit=?, concept=? WHERE path=?",
+                (
+                    json.dumps(explicit.values, ensure_ascii=False),
+                    int(explicit.concept),
+                    path,
+                ),
+            )
+            if not explicit.concept:
+                self._leave_tree(path)
+            if explicit.complete:
+                self._db.execute(
+                    "UPDATE notes SET extracted=hash, version=? WHERE path=?",
+                    (PROMPT_VERSION, path),
                 )
             # A note of this name is back: its name may be used again.
             self._db.execute(
@@ -400,6 +445,7 @@ class KeywordGraph:
     def forget(self, path: str) -> set[str]:
         """A note is gone: its children move up a level and are checked again."""
         with self._transaction():
+            self.relations.forget(path)
             row = self._one("SELECT tree FROM notes WHERE path=?", path)
             if not row:
                 return set()
@@ -471,6 +517,7 @@ class KeywordGraph:
         them to another tree or turned keywords on or off.
         """
         present = set(paths)
+        missing_relations = self.relations.missing(present)
         touched: set[str] = set()
         with self._lock:
             known = {
@@ -482,13 +529,15 @@ class KeywordGraph:
         for path in sorted(set(known) - present):
             touched |= self.forget(path)
         for path in sorted(present):
-            if path not in known:
+            if path not in known or path in missing_relations:
                 try:
                     text, digest = read(path)
+                    touched |= self.observe(path, text, digest)
+                    if path in missing_relations:
+                        self.relations.observe(parse_semantics(text, path=path))
                 except (OSError, HangerError) as error:
                     logger.info("keywords: cannot read %s: %s", path, error)
                     continue
-                touched |= self.observe(path, text, digest)
                 continue
             rules = self._folder_rules(path)
             if rules != known[path]:
@@ -560,6 +609,10 @@ class KeywordGraph:
             if not row:
                 return []
             found.append(row[0])
+            explicit = self.explicit(path)
+            found += explicit.get("aliases", [])
+            if explicit.get("name"):
+                found.append(explicit["name"])
             found += [
                 a
                 for (a,) in self._rows(
@@ -567,9 +620,11 @@ class KeywordGraph:
                     path,
                 )
             ]
-            if row[1]:
-                found.append(row[1])
-                found += json.loads(row[2] or "[]")
+            if row[1] and self._tree_of(path) is not None:
+                if "name" not in explicit:
+                    found.append(row[1])
+                if "aliases" not in explicit:
+                    found += json.loads(row[2] or "[]")
             seen: set[str] = set()
             unique = []
             for name in found:
@@ -590,7 +645,7 @@ class KeywordGraph:
         row = self._one(
             "SELECT tree FROM nodes WHERE id=?"
             if node.startswith(NODE)
-            else "SELECT tree FROM notes WHERE path=? AND enabled=1",
+            else "SELECT tree FROM notes WHERE path=? AND enabled=1 AND concept=1",
             node,
         )
         return None if row is None else str(row[0])
@@ -615,7 +670,8 @@ class KeywordGraph:
                     )
                 ]
                 human = [h for h in dict.fromkeys(human) if self._tree_of(h) == tree]
-                if human:
+                explicit = self.explicit(node)
+                if human or "parent" in explicit or "broader" in explicit:
                     return sorted(human), "user"
             model = [
                 t
@@ -711,7 +767,8 @@ class KeywordGraph:
         """The next note to extract: changed notes before version updates."""
         with self._lock:
             row = self._one(
-                "SELECT path FROM notes WHERE enabled=1 AND attempts<? AND "
+                "SELECT path FROM notes WHERE enabled=1 AND concept=1 "
+                "AND attempts<? AND "
                 "(extracted IS NULL OR extracted!=hash OR version!=?) "
                 "ORDER BY COALESCE(version IS NOT NULL AND extracted=hash, 0), "
                 "attempts, path LIMIT 1",
@@ -734,22 +791,27 @@ class KeywordGraph:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            (total,) = self._one("SELECT COUNT(*) FROM notes WHERE enabled=1") or (0,)
+            (total,) = self._one(
+                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND concept=1"
+            ) or (0,)
             (done,) = self._one(
-                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND extracted=hash "
+                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND concept=1 "
+                "AND extracted=hash "
                 "AND version=?",
                 PROMPT_VERSION,
             ) or (0,)
             failures = [
                 {"path": p, "reason": r}
                 for p, r in self._rows(
-                    "SELECT path, failure FROM notes WHERE enabled=1 AND attempts>=? "
+                    "SELECT path, failure FROM notes WHERE enabled=1 AND concept=1 "
+                    "AND attempts>=? "
                     "ORDER BY path LIMIT 20",
                     MAX_ATTEMPTS,
                 )
             ]
             (failed,) = self._one(
-                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND attempts>=? "
+                "SELECT COUNT(*) FROM notes WHERE enabled=1 AND concept=1 "
+                "AND attempts>=? "
                 "AND NOT (extracted=hash AND version=?)",
                 MAX_ATTEMPTS,
                 PROMPT_VERSION,
@@ -782,6 +844,11 @@ class KeywordGraph:
 
     # ---------- the model's input ----------
 
+    def explicit(self, path: str) -> dict[str, Any]:
+        with self._lock:
+            row = self._one("SELECT explicit FROM notes WHERE path=?", path)
+            return dict(json.loads(row[0])) if row else {}
+
     def note(self, path: str) -> dict[str, Any] | None:
         with self._lock:
             row = self._one(
@@ -791,14 +858,15 @@ class KeywordGraph:
             )
             if row is None:
                 return None
+            explicit = self.explicit(path)
             return {
                 "hash": row[0],
                 "tree": row[1],
-                "name": row[2] or "",
-                "definition": row[3] or "",
-                "differentia": row[4] or "",
-                "question": row[5] or "",
-                "merge": bool(row[6]),
+                "name": explicit.get("name", row[2] or ""),
+                "definition": explicit.get("definition", row[3] or ""),
+                "differentia": explicit.get("differentia", row[4] or ""),
+                "question": explicit.get("central_question", row[5] or ""),
+                "merge": bool(row[6]) and self._tree_of(path) is not None,
             }
 
     def candidates(
@@ -862,8 +930,9 @@ class KeywordGraph:
         merges: list[tuple[str, str, str]] = []
         with self._transaction():
             row = self._one("SELECT hash, tree, name FROM notes WHERE path=?", path)
-            if row is None or row[0] != expected:
+            if row is None or row[0] != expected or self._tree_of(path) is None:
                 return {"stale": True}
+            explicit = self.explicit(path)
             tree, old_name = row[1], row[2]
             self._db.execute(
                 "UPDATE notes SET extracted=hash, version=?, name=?, aliases=?, "
@@ -878,8 +947,8 @@ class KeywordGraph:
                     ),
                     answer.central_question,
                     answer.definition,
-                    answer.differentia,
-                    norm(answer.name),
+                    explicit.get("differentia", answer.differentia),
+                    norm(explicit.get("name", answer.name)),
                     path,
                 ),
             )
@@ -905,7 +974,11 @@ class KeywordGraph:
                 return node
 
             multiple = answer.central_question.startswith(MULTIPLE)
-            for item in [] if multiple else answer.broader:
+            for item in (
+                []
+                if multiple or {"parent", "broader"} & explicit.keys()
+                else answer.broader
+            ):
                 if item.id:
                     node = target(item.id)
                     if node and not self._reaches(node, path):
@@ -926,19 +999,27 @@ class KeywordGraph:
             }
             # Parents the user set are not related or prerequisite either.
             above = broader | set(self.parents(path)[0])
-            requires = {t for t in map(target, answer.requires) if t} - above
+            requires = {
+                t
+                for t in map(target, [] if "requires" in explicit else answer.requires)
+                if t
+            } - above
             for node in requires:
                 self._db.execute(
                     "INSERT OR IGNORE INTO edges VALUES(?,?,'requires')", (path, node)
                 )
-            for node in {t for t in map(target, answer.related) if t}:
+            for node in {
+                t
+                for t in map(target, [] if "related" in explicit else answer.related)
+                if t
+            }:
                 if node not in above | requires:
                     self._db.execute(
                         "INSERT OR IGNORE INTO edges VALUES(?,?,'related')",
                         (path, node),
                     )
             self._db.execute("DELETE FROM same_wait WHERE path=?", (path,))
-            if answer.same_as and not multiple:
+            if answer.same_as and not multiple and "same_as" not in explicit:
                 same = target(answer.same_as)
                 if same and not same.startswith(NODE):
                     report["same_as"] = self._same(path, same, answer.name, merges)
@@ -962,6 +1043,10 @@ class KeywordGraph:
         self, path: str, other: str, name: str, merges: list[tuple[str, str, str]]
     ) -> str:
         """Two notes answer the same question: record it, and merge if allowed."""
+        if self._tree_of(path) is None or self._tree_of(other) is None:
+            return "ignored"
+        if "same_as" in self.explicit(path) or "same_as" in self.explicit(other):
+            return "ignored"
         info = self.note(other)
         if not info or not info["definition"]:
             # The other note is judged when it is placed.
@@ -1001,7 +1086,8 @@ class KeywordGraph:
             p
             for (p,) in self._rows(
                 "SELECT path FROM notes WHERE tree=? AND enabled=1 AND path!=? "
-                "AND (title_key=? OR name_key=?) ORDER BY title_key!=?, path LIMIT 1",
+                "AND concept=1 AND (title_key=? OR name_key=?) "
+                "ORDER BY title_key!=?, path LIMIT 2",
                 tree,
                 path,
                 norm(name),
@@ -1010,6 +1096,9 @@ class KeywordGraph:
             )
         ]
         if not existing and self._one("SELECT 1 FROM tombstones WHERE key=?", key):
+            report["ignored"].append(name)
+            return
+        if len(existing) > 1:
             report["ignored"].append(name)
             return
         if existing:
@@ -1183,6 +1272,16 @@ class KeywordGraph:
                 return [{"id": n, "name": self.display_name(n)} for n in nodes]
 
             def related(kind: str) -> list[dict[str, str]]:
+                if kind in self.explicit(node):
+                    return named(
+                        t
+                        for (t,) in self._rows(
+                            "SELECT target FROM links WHERE owner=? AND kind=? "
+                            "AND target IS NOT NULL",
+                            node,
+                            kind,
+                        )
+                    )
                 return named(
                     t
                     for (t,) in self._rows(
@@ -1243,21 +1342,19 @@ class KeywordGraph:
             if self._tree_of(text) is not None:
                 return text
             key = norm(text)
-            for (found,) in self._rows(
-                "SELECT path FROM notes WHERE enabled=1 AND (title_key=? OR "
-                "name_key=?) ORDER BY title_key!=?, path LIMIT 1",
-                key,
-                key,
-                key,
-            ):
-                return str(found)
-            for (node,) in self._rows("SELECT id FROM nodes"):
-                if norm(self.display_name(node)) == key:
-                    return str(node)
-            for (path,) in self._rows("SELECT path FROM notes ORDER BY path"):
-                if key in {norm(n) for n in self.names(path)}:
-                    return str(path)
-            return None
+            matches = {
+                path
+                for (path,) in self._rows(
+                    "SELECT path FROM notes WHERE enabled=1 AND concept=1"
+                )
+                if key in {norm(name) for name in self.names(path)}
+            }
+            matches.update(
+                node
+                for (node,) in self._rows("SELECT id FROM nodes")
+                if norm(self.display_name(node)) == key
+            )
+            return next(iter(matches)) if len(matches) == 1 else None
 
     def summary(self, path: str) -> dict[str, Any] | None:
         """Short tree facts for a search result or a draft."""
@@ -1372,14 +1469,22 @@ class KeywordBuilder:
             short = f"c{number + 1}"
             ids[short] = candidate["id"]
             candidate["id"] = short
-        prompt = extract_prompt(
-            path=path,
-            title=title,
-            body=body[:6000],
-            rules=self.graph.policy.rules([path]),
-            candidates=candidates,
-        )
         try:
+            prompt = extract_prompt(
+                path=path,
+                title=title,
+                body=body[:6000],
+                rules=self.graph.policy.rules([path]),
+                candidates=candidates,
+            )
+            explicit = self.graph.explicit(path)
+            if explicit:
+                prompt += (
+                    "\nExplicit values are authoritative. "
+                    "Copy them without re-extraction; "
+                    "infer only missing fields.\n"
+                    + json.dumps(explicit, ensure_ascii=False)
+                )
             answer = Extraction.model_validate(
                 self.model.ask(prompt, Extraction, is_cancelled, "keywords")
             )

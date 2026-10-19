@@ -410,14 +410,16 @@ def test_forget_uses_the_user_parent(graph: KeywordGraph) -> None:
     assert graph.parents("leaf.md")[0] == ["top.md"]
 
 
-def test_hidden_model_edge_cannot_close_a_cycle(graph: KeywordGraph) -> None:
+def test_explicit_parent_prevents_hidden_model_edge(graph: KeywordGraph) -> None:
     root = graph.root
     _observe(graph, root, "top.md", "# Top\n")
     _observe(graph, root, "m1.md", "# M1\n")
     _observe(graph, root, "m2.md", "---\nparent: top\n---\n# M2\n")
     _extract(graph, "m2.md", broader=[{"id": "m1.md"}], ids=["m1.md"])
     report = _extract(graph, "m1.md", broader=[{"id": "m2.md"}], ids=["m2.md"])
-    assert "m2.md" in report["ignored"]
+    assert report["ignored"] == []
+    assert graph.parents("m1.md") == (["m2.md"], "model")
+    assert graph.parents("m2.md") == (["top.md"], "user")
 
 
 def test_demoted_concept_leaves_no_ghost_supporters(graph: KeywordGraph) -> None:
