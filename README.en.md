@@ -2,7 +2,7 @@
 
 <p align="center">
   Search and edit local Markdown notes through MCP<br>
-  <a href="https://github.com/woonyong-choi/markdown-notes-agent/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="Source version"></a>
+  <a href="https://pypi.org/project/markdown-notes-agent/"><img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="PyPI version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a><br>
   <a href="README.md">한국어</a> | English
 </p>
@@ -12,7 +12,7 @@
 You need macOS or Linux, Python 3.12 or newer, and [uv](https://docs.astral.sh/uv/). Markdown Notes Agent calls models through an authenticated Claude Code or Codex CLI.
 
 ```sh
-uv tool install git+https://github.com/woonyong-choi/markdown-notes-agent
+uv tool install markdown-notes-agent
 markdown-notes-agent setup
 markdown-notes-agent vault add ~/notes
 ```
@@ -64,10 +64,10 @@ An `accepted` change request is queued. The AI tool uses `job_status` to check t
 <details>
 <summary>Updates and source installation</summary>
 
-Update the source installation with these commands.
+Update the released package with these commands.
 
 ```sh
-uv tool install --force git+https://github.com/woonyong-choi/markdown-notes-agent
+uv tool upgrade markdown-notes-agent
 markdown-notes-agent setup
 ```
 
@@ -206,7 +206,7 @@ Settings, the vault list, applied ignore rules and decisions are stored in `~/.l
 
 ## Status
 
-Version 0.3.0 supports multiple vaults, folder rules, search, keyword trees, and change requests with review and recovery.
+[Version 0.3.0 on PyPI](https://pypi.org/project/markdown-notes-agent/0.3.0/) supports multiple vaults, folder rules, search, keyword trees, and change requests with review and recovery.
 
 | Available | Not yet available | Next | Measurement |
 |---|---|---|---|
