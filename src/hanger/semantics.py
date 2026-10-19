@@ -48,6 +48,8 @@ _CONFIG = ConfigDict(extra="forbid", strict=True, frozen=True)
 _LEGACY_FIELDS = {
     "aliases",
     "definition",
+    "differentia",
+    "same_as",
     "central_question",
     "broader",
     "related",

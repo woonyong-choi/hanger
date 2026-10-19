@@ -138,7 +138,7 @@ checks = verify_evidence(snapshot, sources=other_snapshots)
 
 ### 기존 메타데이터
 
-`LegacyMetadata.from_frontmatter()` 하나가 `aliases`, `definition`, `central_question`, `broader`, `related`, `requires`, `parent`, `title`, `slug`를 `values`에 원래 형식대로 보존한다. 실제로 존재한 키는 `legacy.declared_fields`에 남긴다. 알려지지 않은 루트 키도 `snapshot.frontmatter`에 남긴다.
+`LegacyMetadata.from_frontmatter()` 하나가 `aliases`, `definition`, `differentia`, `same_as`, `central_question`, `broader`, `related`, `requires`, `parent`, `title`, `slug`를 `values`에 원래 형식대로 보존한다. 실제로 존재한 키는 `legacy.declared_fields`에 남긴다. 알려지지 않은 루트 키도 `snapshot.frontmatter`에 남긴다.
 
 YAML의 목록·인용 문자열·여러 줄 문자열을 읽는다. 날짜와 timestamp scalar는 JSON과 호환되는 문자열로 보존한다. YAML alias 참조는 순환·반복 확장을 막기 위해 거부한다. 사용자 정의 태그와 JSON으로 표현할 수 없는 값도 거부한다. 원문은 `snapshot.text`에 그대로 남는다. 기존 루트 관계 값의 타입을 추측해 새 assertion으로 바꾸거나 `semantics`를 덮어쓰지 않는다. 새 namespace가 없으면 새 모델은 `unknown`과 빈 목록을 반환한다.
 

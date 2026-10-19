@@ -60,9 +60,9 @@ every language: closet, Hanger, .hangerignore, HANGER.md, and every command,
 path and id. "Then" is for you: do it.
 A decision_required error means Hanger waits for the user's own answer. Show
 the question and both choices, wait, then call decide. Never answer for them.
-Hanger builds a keyword tree of the notes in the background. Search results
-show each note's place in it; keyword_tree shows a concept's names, broader and
-narrower concepts and relations, and the top of each tree."""
+Search results distinguish text/name matches from bounded verified relations.
+Relation results include current source text, paths, evidence and omitted scope.
+The keyword_tree tool separately shows the older tree and model proposals."""
 
 
 def _threaded(function: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
@@ -370,6 +370,7 @@ class Service:
         """Search notes in listed closet folders (OR; empty means all).
 
         Top results come with full text; the rest are listed with matched lines.
+        relations contains bounded, currently verified relation paths and sources.
         Use read_document for a listed path. fallback_reason re-syncs the scope
         before searching when a note seems to be missing. While the search
         server starts, progress is reported for up to 30 seconds.
@@ -427,12 +428,20 @@ class Service:
             load=synchronizer.read,
             peek=synchronizer.peek,
         )
+        matches = {
+            item["path"]: item.get("matched_by", ["text"])
+            for item in result["documents"]
+        }
         graph = opened.keywords
-        if graph is not None:
-            for item in [*full.values(), *listed]:
-                summary = graph.summary(item["path"])
-                if summary is not None:
-                    item["keywords"] = summary
+        for item in [*full.values(), *listed]:
+            item["matched_by"] = matches[item["path"]]
+            summary = graph.summary(item["path"]) if graph is not None else None
+            if summary is not None:
+                item["keywords"] = {
+                    **summary,
+                    "source": "legacy_keyword_tree",
+                    "verification": "unverified_model_or_links",
+                }
         return {
             **result,
             "closet": str(opened.root),

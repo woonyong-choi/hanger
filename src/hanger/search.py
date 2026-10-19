@@ -164,12 +164,14 @@ class SearchIndex:
                                 "query": query,
                                 "fields": ["title^3", "content"],
                                 "fuzziness": "AUTO",
+                                "_name": "text",
                             }
                         },
                         {
                             "multi_match": {
                                 "query": query,
                                 "fields": ["title.surface^3", "content.surface"],
+                                "_name": "surface_text",
                             }
                         },
                         # Keyword tree names: other names and the model's name
@@ -179,6 +181,7 @@ class SearchIndex:
                                 "query": query,
                                 "fields": ["names", "names.surface"],
                                 "boost": 0.5,
+                                "_name": "names",
                             }
                         },
                     ],
@@ -191,7 +194,11 @@ class SearchIndex:
                 "The search server could not search the whole requested scope."
             )
         return [
-            dict(hit["_source"], score=hit["_score"])
+            dict(
+                hit["_source"],
+                score=hit["_score"],
+                matched_by=hit.get("matched_queries", []),
+            )
             for hit in response["hits"]["hits"]
         ]
 
