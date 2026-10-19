@@ -2,7 +2,7 @@
 
 <p align="center">
   Search and edit local Markdown notes through MCP<br>
-  <a href="https://github.com/woonyong-choi/markdown-notes-agent/blob/main/pyproject.toml"><img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="Source version"></a>
+  <a href="https://pypi.org/project/markdown-notes-agent/"><img src="https://img.shields.io/badge/version-v0.3.0-blue" alt="PyPI version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a><br>
   한국어 | <a href="README.en.md">English</a>
 </p>
@@ -12,7 +12,7 @@
 macOS 또는 Linux, Python 3.12 이상, [uv](https://docs.astral.sh/uv/)가 필요합니다. 모델은 로그인한 Claude Code 또는 Codex CLI를 통해 호출합니다.
 
 ```sh
-uv tool install git+https://github.com/woonyong-choi/markdown-notes-agent
+uv tool install markdown-notes-agent
 markdown-notes-agent setup
 markdown-notes-agent vault add ~/notes
 ```
@@ -64,10 +64,10 @@ codex mcp add markdown-notes-agent -- markdown-notes-agent serve
 <details>
 <summary>업데이트와 소스 설치</summary>
 
-소스 설치는 다음 명령으로 업데이트합니다.
+배포판은 다음 명령으로 업데이트합니다.
 
 ```sh
-uv tool install --force git+https://github.com/woonyong-choi/markdown-notes-agent
+uv tool upgrade markdown-notes-agent
 markdown-notes-agent setup
 ```
 
@@ -206,7 +206,7 @@ vault이 둘 이상이면 요청마다 `vault`에 id나 그 vault 안의 경로�
 
 ## 상태
 
-0.3.0 소스는 여러 vault 관리, 폴더 규칙, 검색·키워드 트리, 변경 요청·검토·복구를 지원합니다.
+[PyPI의 0.3.0 배포판](https://pypi.org/project/markdown-notes-agent/0.3.0/)은 여러 vault 관리, 폴더 규칙, 검색·키워드 트리, 변경 요청·검토·복구를 지원합니다.
 
 | 있는 것 | 아직 없는 것 | 다음 | 측정 |
 |---|---|---|---|
