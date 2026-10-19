@@ -231,11 +231,11 @@ Search integration tests use Elasticsearch with Nori at `MARKDOWN_NOTES_AGENT_TE
 <details>
 <summary>Regenerate the diagram</summary>
 
-[change-request.torso](docs/assets/change-request.torso) is the source; the SVG is generated. Set `TORSO_CLI` to the CLI path from [Torso 14e57b7](https://github.com/woonyong-choi/torso/tree/14e57b7b274ac791f46d6c7827acf17686a983ed).
+[change-request.diagramplay](docs/assets/change-request.diagramplay) is the source; the SVG is generated. Set `DIAGRAMPLAY_CLI` to the CLI path from [DiagramPlay ebdc3e9](https://github.com/woonyong-choi/diagramplay/tree/ebdc3e9c84c3d5443af7f1b6b5d9b2a18e5002ca).
 
 ```sh
-node "$TORSO_CLI" check docs/assets/change-request.torso --strict
-node "$TORSO_CLI" render docs/assets/change-request.torso --strict --out docs/assets
+node "$DIAGRAMPLAY_CLI" check docs/assets/change-request.diagramplay --strict
+node "$DIAGRAMPLAY_CLI" render docs/assets/change-request.diagramplay --strict --out docs/assets
 ```
 
 </details>

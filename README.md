@@ -231,11 +231,11 @@ uv run mypy src
 <details>
 <summary>그림 다시 만들기</summary>
 
-[change-request.torso](docs/assets/change-request.torso)가 원본이고 SVG는 생성물입니다. [Torso 14e57b7](https://github.com/woonyong-choi/torso/tree/14e57b7b274ac791f46d6c7827acf17686a983ed)의 CLI 경로를 `TORSO_CLI`에 지정해 생성합니다.
+[change-request.diagramplay](docs/assets/change-request.diagramplay)가 원본이고 SVG는 생성물입니다. [DiagramPlay ebdc3e9](https://github.com/woonyong-choi/diagramplay/tree/ebdc3e9c84c3d5443af7f1b6b5d9b2a18e5002ca)의 CLI 경로를 `DIAGRAMPLAY_CLI`에 지정해 생성합니다.
 
 ```sh
-node "$TORSO_CLI" check docs/assets/change-request.torso --strict
-node "$TORSO_CLI" render docs/assets/change-request.torso --strict --out docs/assets
+node "$DIAGRAMPLAY_CLI" check docs/assets/change-request.diagramplay --strict
+node "$DIAGRAMPLAY_CLI" render docs/assets/change-request.diagramplay --strict --out docs/assets
 ```
 
 </details>

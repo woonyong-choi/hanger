@@ -1,4 +1,4 @@
-torso
+diagramplay
 title "Change request"
 
 box proposal "Proposal" "Review + source check" tone=blue appearance=filled
