@@ -1,5 +1,6 @@
 """Planning: what the model reads, drafts and gets back for review."""
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -41,7 +42,10 @@ def test_large_candidate_set_is_listed_instead_of_failing(
     assert status["status"] == "completed", status.get("error")
     assert 1 <= len(status["search"]["read"]) <= 5
     assert len(status["search"]["read"]) + len(status["search"]["listed"]) == 12
-    assert "OTHER MATCHED DOCUMENTS" in model.prompts[0]
+    context = json.loads(model.prompts[0].split("\n", 1)[1])["input"]
+    assert {item["path"] for item in context["listed"]} == set(
+        status["search"]["listed"]
+    )
 
 
 # the model can ask for a listed document and decide after reading it.
@@ -281,10 +285,8 @@ def test_closet_rules_limit_search_and_writes(closet: tuple[Path, Path, str]) ->
     )
     assert all(a.get("args", {}).get("choice") is None for a in status["next_actions"])
     assert "Notes here are final." in model.prompts[0]
-    assert (
-        "READ-ONLY NOTES (cite them if useful; never change them): notes/a.md"
-        in (model.prompts[0])
-    )
+    context = json.loads(model.prompts[0].split("\n", 1)[1])["input"]
+    assert context["read_only"] == ["notes/a.md"]
     assert (root / "notes/a.md").read_text() == "# 결제\n재시도 2회"
 
 

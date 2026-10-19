@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 from collections.abc import Callable
@@ -34,7 +35,12 @@ def test_cancel_running_model_never_applies_late_result(
     ) -> dict[str, Any]:
         started.set()
         assert released.wait(5)
-        return {"proposal": {"changes": [{"path": "docs/a.md", "after": "late"}]}}
+        return {
+            "proposal": {"changes": [{"path": "docs/a.md", "after": "late"}]},
+            "policy_dependencies": planner.synchronizer.policy.context(
+                (), targets=["docs/a.md"]
+            )["policy_dependencies"],
+        }
 
     monkeypatch.setattr(Planner, "prepare", prepare)
     index = SearchIndex("http://127.0.0.1:19200", str(root))
@@ -97,6 +103,9 @@ def test_parallel_proposals_recheck_shared_source(
                 ]
             },
             "dependencies": {"a.md": before},
+            "policy_dependencies": planner.synchronizer.policy.context(["a.md"])[
+                "policy_dependencies"
+            ],
         }
 
     monkeypatch.setattr(Planner, "prepare", prepare)
@@ -405,8 +414,8 @@ def test_partial_replan_preserves_applied_context(
         nonlocal calls
         calls += 1
         if calls == 2:
-            assert "PRIOR ATTEMPT AND OBSERVED EFFECTS" in prompt
-            assert '"applied": {"docs/a.md"' in prompt
+            context = json.loads(prompt.split("\n", 1)[1])["input"]
+            assert "docs/a.md" in context["previous"]["applied"]
         names = ("a", "b") if calls == 1 else ("b",)
         return {
             "decision": {

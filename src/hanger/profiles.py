@@ -27,36 +27,31 @@ class ProfilePolicy:
 PROFILES: dict[Profile, ProfilePolicy] = {
     "note": ProfilePolicy(
         "note",
-        "Preserve the author's intent, voice, questions and uncertainty. "
-        "Do not turn notes into verified facts or merge different questions.",
+        "Preserve intent, voice, questions and uncertainty; "
+        "do not promote notes to verified facts.",
     ),
     "wiki": ProfilePolicy(
         "wiki",
-        "Explain concepts, prerequisites, conditions and exceptions precisely. "
-        "Preserve source citations and version scope. Separate sourced facts from "
-        "hypotheses, opinion and observations. Do not invent external verification. "
-        "Defer factual changes that require missing evidence.",
+        "Explain prerequisites, conditions and exceptions. "
+        "Preserve citations/version scope; defer factual changes missing evidence, "
+        "but retain explicitly unverified claims as unverified.",
         require_evidence=True,
     ),
     "work_record": ProfilePolicy(
         "work_record",
-        "Connect problem, hypothesis, alternatives, decision, evidence and "
-        "remaining work chronologically. Distinguish planned from executed and "
-        "observed from inferred. Never invent measurements or claim an unexecuted "
-        "test passed.",
+        "Connect problem, alternatives, decision, evidence and remaining work "
+        "chronologically. Separate planned/executed and observed/inferred; "
+        "invent no measurements or test results.",
         require_evidence=True,
     ),
     "blog": ProfilePolicy(
         "blog",
-        "Keep a coherent reader journey: concrete problem, reasoning, evidence, "
-        "result and limitation. Preserve the author's voice and experience without "
-        "inventing personal achievements. Avoid promotional claims and repetition.",
+        "Keep the reader journey from problem through reasoning/evidence to "
+        "result/limits. Preserve voice; invent no achievements.",
     ),
     "creative": ProfilePolicy(
         "creative",
-        "Preserve narrative voice, point of view, character identity, timeline and "
-        "world rules. Treat fiction as fiction, not factual assertions. Do not merge "
-        "distinct scenes because their topics match. Preserve deliberate ambiguity "
-        "unless the user explicitly asks to resolve it.",
+        "Preserve voice, viewpoint, characters, timeline, world rules and ambiguity. "
+        "Keep fiction fictional and distinct scenes separate; do not force concepts.",
     ),
 }

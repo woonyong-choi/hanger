@@ -1,5 +1,6 @@
 """Keyword tree: user links, model extraction, generated concepts, merging."""
 
+import json
 import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -299,9 +300,9 @@ def test_builder_maps_short_ids_and_records_failures(graph: KeywordGraph) -> Non
     assert builder.step(lambda: False)
     assert graph.parents("chair.md") == (["furniture.md"], "model")
     assert "Seat" in graph.names("chair.md")
-    assert '"id": "c1"' in model.prompts[0]
-    assert (
-        "furniture.md" not in model.prompts[0].split("CANDIDATES")[1].split("NOTE:")[0]
+    assert '"id":"c1"' in model.prompts[0]
+    assert "furniture.md" not in json.dumps(
+        json.loads(model.prompts[0].split("\n", 1)[1])["input"]["candidates"]
     )
     assert reindexed == [{"chair.md"}]
     _observe(graph, root, "chair.md", "# Chair\nChanged.\n")
@@ -476,3 +477,84 @@ def test_model_outage_pauses_without_failing_notes(graph: KeywordGraph) -> None:
     assert not builder.step(lambda: False)  # paused
     assert graph.next_note() == "a.md"
     assert graph.status()["failed_count"] == 0
+
+
+def test_builder_passes_explicit_values_in_one_json_envelope(
+    graph: KeywordGraph,
+) -> None:
+    text = '---\ntitle: Written name\naliases: []\ndifferentia: ""\n---\n# A\n'
+    _observe(graph, graph.root, "a.md", text)
+    model = _Model(
+        [
+            {
+                "central_question": "What is A?",
+                "name": "Guessed name",
+                "aliases": ["Guessed alias"],
+                "definition": "A is a concept.",
+                "differentia": "Guessed distinction",
+            }
+        ]
+    )
+    builder = KeywordBuilder(
+        graph,
+        model,
+        lambda path: (text, digest(text.encode())),
+        lambda query, limit: [],
+        lambda paths: None,
+    )
+    assert builder.step(lambda: False)
+    value = json.loads(model.prompts[0].split("\n", 1)[1])
+    explicit = value["input"]["explicit_values"]
+    assert explicit["name"] == "Written name"
+    assert explicit["aliases"] == [] and explicit["differentia"] == ""
+    assert value["policy"]["field_precedence"] == ["explicit_values", "inference"]
+    assert value["policy"]["inference"] == "missing_fields_only"
+    assert graph.note("a.md")["name"] == "Written name"
+    assert graph.note("a.md")["differentia"] == ""
+    assert "Guessed alias" not in graph.names("a.md")
+
+
+@pytest.mark.parametrize("rules", [b"x" * (32 * 1024 + 1), b"\xff"])
+def test_invalid_rules_do_not_starve_other_notes(
+    graph: KeywordGraph, rules: bytes
+) -> None:
+    root = graph.root
+    _observe(graph, root, "a/item.md", "# A\n")
+    _observe(graph, root, "b.md", "# B\n")
+    (root / "a/HANGER.md").write_bytes(rules)
+    model = _Model(
+        [
+            {
+                "central_question": "What is B?",
+                "name": "B",
+                "definition": "B",
+                "differentia": "",
+            }
+        ]
+    )
+
+    def read(path: str) -> tuple[str, str]:
+        text = (root / path).read_text()
+        return text, digest(text.encode())
+
+    builder = KeywordBuilder(graph, model, read, lambda q, k: [], lambda p: None)
+    assert builder.step(lambda: False)
+    assert not model.prompts
+    assert graph.next_note() == "b.md"
+    assert builder.step(lambda: False)
+    assert len(model.prompts) == 1
+    assert graph.note("b.md")["name"] == "B"
+
+
+def test_previous_prompt_extraction_is_queued_for_new_policy(
+    graph: KeywordGraph, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hanger import keywords
+
+    current_version = keywords.PROMPT_VERSION
+    _observe(graph, graph.root, "a.md", "# A\n")
+    monkeypatch.setattr(keywords, "PROMPT_VERSION", 1)
+    _extract(graph, "a.md")
+    assert graph.next_note() is None
+    monkeypatch.setattr(keywords, "PROMPT_VERSION", current_version)
+    assert graph.next_note() == "a.md"

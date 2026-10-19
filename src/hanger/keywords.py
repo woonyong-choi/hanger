@@ -1476,15 +1476,8 @@ class KeywordBuilder:
                 body=body[:6000],
                 rules=self.graph.policy.rules([path]),
                 candidates=candidates,
+                explicit_values=self.graph.explicit(path),
             )
-            explicit = self.graph.explicit(path)
-            if explicit:
-                prompt += (
-                    "\nExplicit values are authoritative. "
-                    "Copy them without re-extraction; "
-                    "infer only missing fields.\n"
-                    + json.dumps(explicit, ensure_ascii=False)
-                )
             answer = Extraction.model_validate(
                 self.model.ask(prompt, Extraction, is_cancelled, "keywords")
             )

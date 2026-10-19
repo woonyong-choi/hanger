@@ -20,13 +20,14 @@ __all__ = [
     "resolve_decision",
 ]
 
+import hashlib
 import os
 import threading
 from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from hanger.errors import RequestError
+from hanger.errors import ConflictError, RequestError
 from hanger.ignore import DEFAULT_IGNORE, IGNORE_FILE, IgnoreRules, summarize_change
 from hanger.rules import DEFAULT_RULES, RULES_FILE, rules_for
 from hanger.store import Closet, Decision, StateStore
@@ -94,6 +95,74 @@ class ClosetPolicy:
         # From the root down, so nearer rules come later.
         ordered = sorted(found.items(), key=lambda item: (item[0].count("/"), item[0]))
         return [{"file": path, "rules": text} for path, text in ordered]
+
+    def context(
+        self,
+        paths: Iterable[str],
+        folders: Iterable[str] = (),
+        targets: Iterable[str] = (),
+    ) -> dict[str, Any]:
+        """Capture scoped policies and every present or absent rule dependency."""
+        catalog: dict[str, str] = {}
+        dependencies: dict[str, str | None] = {
+            "@applied_ignore": hashlib.sha256(self.ignore_text.encode()).hexdigest(),
+            IGNORE_FILE: self._fingerprint(IGNORE_FILE),
+        }
+        scopes: dict[str, dict[str, list[str]]] = {
+            "source_rules": {},
+            "target_rules": {},
+            "folder_rules": {},
+        }
+        read_only = []
+        folder_writable: dict[str, bool] = {}
+        for key, entries, folder in (
+            ("source_rules", paths, False),
+            ("target_rules", targets, False),
+            ("folder_rules", ["", *folders], True),
+        ):
+            for path in entries:
+                rules = rules_for(self.root, path, folder=folder)
+                for name, fingerprint in rules.dependencies.items():
+                    if name in dependencies and dependencies[name] != fingerprint:
+                        raise ConflictError(
+                            "folder rules changed while collecting policy"
+                        )
+                    dependencies[name] = fingerprint
+                catalog.update(rules.texts)
+                scopes[key][path] = [name for name, _ in rules.texts]
+                if folder:
+                    folder_writable[path] = rules.writable and not self.excluded(
+                        path, folder=True
+                    )
+                if not folder and (not rules.writable or self.excluded(path)):
+                    read_only.append(path)
+        if sum(len(text.encode()) for text in catalog.values()) > 32 * 1024:
+            raise RequestError("request rules exceed 32 KiB", code="rules_limit")
+        return {
+            **scopes,
+            "rule_catalog": catalog,
+            "read_only": sorted(set(read_only)),
+            "folder_writable": folder_writable,
+            "policy_dependencies": dependencies,
+        }
+
+    def matches(self, dependencies: dict[str, str | None]) -> bool:
+        """Check rule contents, absence and both disk and applied ignore policy."""
+        for path, expected in dependencies.items():
+            actual = (
+                hashlib.sha256(self.ignore_text.encode()).hexdigest()
+                if path == "@applied_ignore"
+                else self._fingerprint(path)
+            )
+            if actual != expected:
+                return False
+        return True
+
+    def _fingerprint(self, path: str) -> str | None:
+        try:
+            return hashlib.sha256((self.root / path).read_bytes()).hexdigest()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
 
 
 def closet_present(root: Path) -> bool:
