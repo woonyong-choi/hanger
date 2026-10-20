@@ -106,7 +106,7 @@ Markdown Notes Agent watches the registered folder and updates the search index.
 <details>
 <summary>Per-folder rule files</summary>
 
-`VAULT.md` can sit in any folder and applies to that folder and below. For settings between the top `---` lines, the nearest file wins. For each note path, Markdown Notes Agent selects written rules from the nearest folder first, up to a total of 32 KiB, then sends the selected rules from the root down to the nearest folder. The file has its own name so it does not mix with other AI tools' rule files (`AGENTS.md`, `CLAUDE.md` and so on).
+`VAULT.md` can sit in any folder and applies to that folder and below. If settings between the top `---` lines conflict, Markdown Notes Agent uses the value from the file nearest to the note. It sends all written rules from the root down to the folder nearest to the note. If the written rules for one note path or the entire request exceed a total of 32 KiB, the request stops with a `rules_limit` error. It does not omit rules to fit the limit. The file has its own name so it does not mix with other AI tools' rule files (`AGENTS.md`, `CLAUDE.md` and so on).
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -131,11 +131,11 @@ Notes in this folder are final. Quote them; do not change them.
 One note is one concept. Broader concepts the user wrote come first: a `parent` in the front matter (a slug, file name or link), and index notes whose list lines start with a link (that note is the parent of the notes it lists). Where the user wrote nothing, the model reads the note with its 20 nearest notes and proposes a concept name, other names, a definition and broader, related and prerequisite concepts; the program checks and stores them.
 
 - A broader concept must be in the same tree and cannot form a cycle.
-- A new broader name joins a note or concept of the same name; otherwise it becomes a concept when a second note proposes it, and goes back to waiting if it drops to one child.
+- A new broader name joins a note or concept of the same name; otherwise it becomes a concept when a second note proposes it, and goes back to waiting if it drops to at most one child.
 - A concept with more than 15 direct children is split into narrower groups by the model.
 - When a note is deleted, its children move up a level and are placed again.
 - Notes that answer the same central question are reported, and when both folders set `merge: auto` a merge job is queued. Merges are reviewed like any other change.
-- Concept names and other names add lightly to search, so a note is found by names its text never uses. Search results and drafts carry a note's place when the note belongs to the tree.
+- Search uses concept names and other names as secondary signals. A note can be found by names its text never uses. Search results and drafts carry a note's place when the note belongs to the tree.
 
 The tree is built in the background, one note at a time, while no user request waits. `markdown-notes-agent keywords` and `list_vaults` show progress.
 
@@ -214,6 +214,14 @@ Settings, the vault list, applied ignore rules and decisions are stored in `~/.l
 | Writing, editing, organizing, and review | A cost and quality comparison of the whole organizing workflow | [Whole workflow measurement](https://github.com/woonyong-choi/markdown-notes-agent/issues/8) | Whole comparison incomplete |
 
 Formats and commands can change without notice before 1.0.
+
+## Documentation
+
+The design documents are written in Korean.
+
+- [Folder rules](docs/configuration.md)
+- [Search responses and limits](docs/search.md)
+- [Semantic metadata format](docs/data.md)
 
 ## Development
 
