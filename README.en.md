@@ -215,6 +215,14 @@ Settings, the vault list, applied ignore rules and decisions are stored in `~/.l
 
 Formats and commands can change without notice before 1.0.
 
+## Documentation
+
+The design documents are written in Korean.
+
+- [Folder rules](docs/configuration.md)
+- [Search responses and limits](docs/search.md)
+- [Semantic metadata format](docs/data.md)
+
 ## Development
 
 ```sh

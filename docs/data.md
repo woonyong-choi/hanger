@@ -48,10 +48,12 @@ WAL은 복구 기법이다.
 | 스키마 버전 | `semantics.version`, 현재 정수 `1` |
 | 파서 | [semantics.py](../src/markdown_notes_agent/semantics.py)의 Pydantic 모델과 PyYAML SafeLoader 기반 파서 |
 | 어휘 | [vocabulary.py](../src/markdown_notes_agent/vocabulary.py)의 `PREDICATES` |
-| 부작용 | 파일·네트워크 읽기와 쓰기 없음 |
-| 소비 범위 | Python 파서와 검증 API |
+| 파서 부작용 | 파일·네트워크 읽기와 쓰기 없음 |
+| 소비 범위 | Python 파서·검증 API, 이름·별칭 색인, 검증된 관계의 검색 확장 |
 
-이 형식은 고정 어휘를 쓰는 typed JSON이다. RDF 또는 JSON-LD 처리기가 아니며 `@context`, 원격 context 조회, 자동 추론을 지원하지 않는다. 기존 키워드 그래프·검색 경로에는 아직 연결하지 않는다.
+이 형식은 고정 어휘를 쓰는 typed JSON이다. RDF 또는 JSON-LD 처리기가 아니며 `@context`, 원격 context 조회, 자동 추론을 지원하지 않는다.
+
+검색 동기화는 개체의 `label`과 `aliases`를 이름 검색에 색인한다. 관계 저장소가 연결되어 있으면 본문·이름 검색 결과를 시작점으로 `status: accepted`, `origin: explicit`이고 모든 근거가 `verified`인 관계만 확장한다. 최대 두 관계를 따라가며 문서 수·관계 검사 수·읽기와 출력 바이트 한도를 적용한다. 연결되지 않았으면 검색 응답의 `relations`는 `null`이다. 전체 연결망 탐색이나 인용문의 의미적 타당성을 보장하지 않으며, 범위와 한도·제외 조건은 [검색 응답](search.md#범위와-한도)에 있다.
 
 ## API
 

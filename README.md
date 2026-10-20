@@ -215,6 +215,12 @@ vault이 둘 이상이면 요청마다 `vault`에 id나 그 vault 안의 경로�
 
 1.0 전에는 형식과 명령이 예고 없이 바뀔 수 있습니다.
 
+## 문서
+
+- [폴더 규칙](docs/configuration.md)
+- [검색 응답과 한도](docs/search.md)
+- [의미 메타데이터 형식](docs/data.md)
+
 ## 개발
 
 ```sh
